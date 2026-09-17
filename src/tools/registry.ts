@@ -4,13 +4,22 @@ import { globTool } from "./fs/glob";
 import { grepTool } from "./fs/grep";
 import { readFileTool } from "./fs/read";
 import { writeFileTool } from "./fs/write";
+import { createTodoTools } from "./todo";
 import type { Tool } from "./types";
 
 export class ToolRegistry {
   private tools = new Map<string, Tool>();
 
   constructor() {
-    for (const tool of [readFileTool, writeFileTool, editFileTool, globTool, grepTool, bashTool]) {
+    for (const tool of [
+      readFileTool,
+      writeFileTool,
+      editFileTool,
+      globTool,
+      grepTool,
+      bashTool,
+      ...createTodoTools(),
+    ]) {
       this.register(tool);
     }
   }

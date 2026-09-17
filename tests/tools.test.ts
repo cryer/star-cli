@@ -28,7 +28,16 @@ afterAll(async () => {
 
 describe("registry", () => {
   it("registers all built-in tools", () => {
-    expect(registry.names().sort()).toEqual(["bash", "edit_file", "glob", "grep", "read_file", "write_file"]);
+    expect(registry.names().sort()).toEqual([
+      "bash",
+      "edit_file",
+      "glob",
+      "grep",
+      "read_file",
+      "todo_read",
+      "todo_write",
+      "write_file",
+    ]);
   });
 });
 
