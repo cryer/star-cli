@@ -3,12 +3,13 @@ import { useRef, useState } from "react";
 
 interface InputBoxProps {
   isStreaming: boolean;
+  disabled?: boolean;
   onSubmit(text: string): void;
   onInterrupt(): void;
   onExit(): void;
 }
 
-export function InputBox({ isStreaming, onSubmit, onInterrupt, onExit }: InputBoxProps) {
+export function InputBox({ isStreaming, disabled, onSubmit, onInterrupt, onExit }: InputBoxProps) {
   const [value, setValue] = useState("");
   const [history, setHistory] = useState<string[]>([]);
   const historyIndexRef = useRef<number | null>(null);
@@ -16,7 +17,7 @@ export function InputBox({ isStreaming, onSubmit, onInterrupt, onExit }: InputBo
 
   useInput((input, key) => {
     if (key.ctrl && input === "c") {
-      if (isStreaming) {
+      if (isStreaming || disabled) {
         onInterrupt();
       } else {
         setValue("");
@@ -28,7 +29,7 @@ export function InputBox({ isStreaming, onSubmit, onInterrupt, onExit }: InputBo
       onExit();
       return;
     }
-    if (isStreaming) return;
+    if (isStreaming || disabled) return;
     if (key.return) {
       const text = value.trim();
       if (text.length > 0) {

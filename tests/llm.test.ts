@@ -22,9 +22,7 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
   };
 }
 
-async function collect(
-  gen: AsyncGenerator<StreamEvent>,
-): Promise<StreamEvent[]> {
+async function collect(gen: AsyncGenerator<StreamEvent>): Promise<StreamEvent[]> {
   const events: StreamEvent[] = [];
   for await (const event of gen) {
     events.push(event);
@@ -51,10 +49,7 @@ describe("resolveModelConfig", () => {
   });
 
   it("listModels returns all configured models", () => {
-    expect(listModels(makeConfig()).map((m) => m.name)).toEqual([
-      "fast",
-      "smart",
-    ]);
+    expect(listModels(makeConfig()).map((m) => m.name)).toEqual(["fast", "smart"]);
   });
 });
 
@@ -136,9 +131,7 @@ describe("streamChat", () => {
   it("normalizes error events into Error instances", async () => {
     const model = new MockLanguageModelV1({
       doStream: async () => ({
-        stream: convertArrayToReadableStream([
-          { type: "error", error: new Error("boom") },
-        ]),
+        stream: convertArrayToReadableStream([{ type: "error", error: new Error("boom") }]),
         rawCall: { rawPrompt: null, rawSettings: {} },
       }),
     });

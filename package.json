@@ -6,9 +6,7 @@
   "bin": {
     "star": "./dist/main.js"
   },
-  "files": [
-    "dist"
-  ],
+  "files": ["dist"],
   "engines": {
     "node": ">=20"
   },

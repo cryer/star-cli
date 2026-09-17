@@ -1,9 +1,9 @@
 import type { LanguageModel } from "ai";
 import { tool as aiTool } from "ai";
 import type { StarConfig } from "../config/schema";
+import { compactMessages } from "../context/compaction";
 import type { StreamEvent } from "../core/events";
 import type { CoreMessage } from "../core/messages";
-import { compactMessages } from "../context/compaction";
 import { checkPermission } from "../permissions/gate";
 import type { PermissionRequest } from "../permissions/types";
 import type { SessionStore } from "../session/store";
@@ -16,7 +16,6 @@ export interface AgentLoopOptions {
   config: StarConfig;
   cwd: string;
   system?: string;
-  confirm?: (req: PermissionRequest) => Promise<boolean>;
   sessionStore?: SessionStore | null;
 }
 
@@ -29,6 +28,7 @@ interface PendingToolCall {
 export class AgentLoop {
   private messages: CoreMessage[] = [];
   private readonly opts: AgentLoopOptions;
+  confirmHandler?: (req: PermissionRequest) => Promise<boolean>;
 
   constructor(opts: AgentLoopOptions) {
     this.opts = opts;
@@ -162,7 +162,7 @@ export class AgentLoop {
   }
 
   private async executeTool(call: PendingToolCall, signal: AbortSignal): Promise<ToolResult> {
-    const { registry, config, cwd, confirm } = this.opts;
+    const { registry, config, cwd } = this.opts;
     const tool = registry.get(call.name);
     if (!tool) {
       return { content: `Unknown tool: ${call.name}`, isError: true };
@@ -178,8 +178,12 @@ export class AgentLoop {
       return { content: `Permission denied for tool "${call.name}".`, isError: true };
     }
     if (decision === "ask") {
-      const approved = confirm
-        ? await confirm({ toolName: call.name, args: call.args, level: tool.permission })
+      const approved = this.confirmHandler
+        ? await this.confirmHandler({
+            toolName: call.name,
+            args: call.args,
+            level: tool.permission,
+          })
         : false;
       if (!approved) {
         return { content: `User rejected tool "${call.name}".`, isError: true };

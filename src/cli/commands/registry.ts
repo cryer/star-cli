@@ -2,6 +2,12 @@ export interface CommandContext {
   addSystemMessage(text: string): void;
   clearMessages(): void;
   exit(): void;
+  listModels(): string;
+  switchModel(name: string): Promise<string>;
+  listSessions(): Promise<string>;
+  resumeSession(id: string): Promise<string>;
+  showTodos(): Promise<string>;
+  describeConfig(): string;
 }
 
 export interface SlashCommand {

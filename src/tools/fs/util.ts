@@ -9,13 +9,14 @@ export interface WalkedFile {
   mtimeMs: number;
 }
 
-export async function walkFiles(root: string, skipDirs: Set<string> = SKIP_DIRS): Promise<WalkedFile[]> {
+export async function walkFiles(
+  root: string,
+  skipDirs: Set<string> = SKIP_DIRS,
+): Promise<WalkedFile[]> {
   const out: WalkedFile[] = [];
   async function walk(dir: string, relBase: string): Promise<void> {
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => null);
+    if (!entries) {
       return;
     }
     for (const entry of entries) {

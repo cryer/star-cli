@@ -7,7 +7,10 @@ const schema = z.object({
   path: z.string().describe("File path, absolute or relative to the working directory"),
   old_string: z.string().min(1).describe("Exact text to replace"),
   new_string: z.string().describe("Replacement text"),
-  replace_all: z.boolean().optional().describe("Replace every occurrence instead of requiring a unique match"),
+  replace_all: z
+    .boolean()
+    .optional()
+    .describe("Replace every occurrence instead of requiring a unique match"),
 });
 
 export const editFileTool: Tool<typeof schema> = {
@@ -25,10 +28,10 @@ export const editFileTool: Tool<typeof schema> = {
       return { content: `Failed to read ${args.path}: ${(err as Error).message}`, isError: true };
     }
     let count = 0;
-    let idx = 0;
-    while ((idx = content.indexOf(args.old_string, idx)) !== -1) {
+    let idx = content.indexOf(args.old_string);
+    while (idx !== -1) {
       count += 1;
-      idx += args.old_string.length;
+      idx = content.indexOf(args.old_string, idx + args.old_string.length);
     }
     if (count === 0) {
       return { content: `old_string not found in ${args.path}`, isError: true };

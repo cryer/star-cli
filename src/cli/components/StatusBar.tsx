@@ -1,18 +1,16 @@
 import { Box, Text } from "ink";
-import type { TokenUsage } from "../../core/events";
 
 interface StatusBarProps {
   model: string;
   permissionMode: string;
-  usage?: TokenUsage;
+  tokens: number;
 }
 
-export function StatusBar({ model, permissionMode, usage }: StatusBarProps) {
-  const tokens = usage ? `${usage.totalTokens} tokens` : "0 tokens";
+export function StatusBar({ model, permissionMode, tokens }: StatusBarProps) {
   return (
     <Box justifyContent="space-between">
       <Text dimColor>model: {model}</Text>
-      <Text dimColor>{tokens}</Text>
+      <Text dimColor>{tokens} tokens</Text>
       <Text dimColor>mode: {permissionMode}</Text>
     </Box>
   );

@@ -10,7 +10,8 @@ const schema = z.object({
 
 export const writeFileTool: Tool<typeof schema> = {
   name: "write_file",
-  description: "Write content to a file, creating parent directories as needed. Overwrites existing files.",
+  description:
+    "Write content to a file, creating parent directories as needed. Overwrites existing files.",
   permission: "write",
   parameters: schema,
   async execute(args, ctx) {

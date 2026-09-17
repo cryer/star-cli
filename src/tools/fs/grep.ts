@@ -2,14 +2,20 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { Tool } from "../types";
-import { matchesGlob, walkFiles, type WalkedFile } from "./util";
+import { type WalkedFile, matchesGlob, walkFiles } from "./util";
 
 const MAX_MATCHES = 250;
 
 const schema = z.object({
   pattern: z.string().describe("Regular expression to search for"),
-  path: z.string().optional().describe("File or directory to search, defaults to the working directory"),
-  glob: z.string().optional().describe("Glob pattern to filter which files are searched, e.g. '*.ts'"),
+  path: z
+    .string()
+    .optional()
+    .describe("File or directory to search, defaults to the working directory"),
+  glob: z
+    .string()
+    .optional()
+    .describe("Glob pattern to filter which files are searched, e.g. '*.ts'"),
   ignoreCase: z.boolean().optional().describe("Case-insensitive matching"),
 });
 

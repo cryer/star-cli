@@ -1,18 +1,17 @@
 import type { StreamEvent } from "../core/events";
-import type { CoreMessage } from "../core/messages";
+import type { PermissionRequest } from "../permissions/types";
 
 export interface ChatBackend {
-  stream(input: string, history: CoreMessage[], signal: AbortSignal): AsyncGenerator<StreamEvent>;
+  stream(input: string, signal: AbortSignal): AsyncGenerator<StreamEvent>;
+  confirmHandler?: (req: PermissionRequest) => Promise<boolean>;
 }
 
 export class EchoBackend implements ChatBackend {
+  confirmHandler?: (req: PermissionRequest) => Promise<boolean>;
+
   constructor(private readonly delayMs = 20) {}
 
-  async *stream(
-    input: string,
-    _history: CoreMessage[],
-    signal: AbortSignal,
-  ): AsyncGenerator<StreamEvent> {
+  async *stream(input: string, signal: AbortSignal): AsyncGenerator<StreamEvent> {
     const chunks = input.split(/(\s+)/).filter((s) => s.length > 0);
     for (const chunk of chunks) {
       if (signal.aborted) return;

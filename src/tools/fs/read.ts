@@ -9,8 +9,18 @@ const MAX_CHARS = 100 * 1024;
 
 const schema = z.object({
   path: z.string().describe("File path, absolute or relative to the working directory"),
-  offset: z.number().int().positive().optional().describe("1-based line number to start reading from"),
-  limit: z.number().int().positive().optional().describe("Maximum number of lines to read (default 2000)"),
+  offset: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("1-based line number to start reading from"),
+  limit: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Maximum number of lines to read (default 2000)"),
 });
 
 export const readFileTool: Tool<typeof schema> = {
@@ -24,10 +34,8 @@ export const readFileTool: Tool<typeof schema> = {
     if (isSensitivePath(filePath)) {
       return { content: `Refused to read sensitive file: ${args.path}`, isError: true };
     }
-    let st;
-    try {
-      st = await stat(filePath);
-    } catch {
+    const st = await stat(filePath).catch(() => null);
+    if (!st) {
       return { content: `File not found: ${args.path}`, isError: true };
     }
     if (st.isDirectory()) {
@@ -56,7 +64,9 @@ export const readFileTool: Tool<typeof schema> = {
     }
     const lastShown = start - 1 + out.length;
     if (truncatedBySize) {
-      out.push(`... (truncated: output exceeds 100KB, showing lines ${start}-${lastShown} of ${lines.length})`);
+      out.push(
+        `... (truncated: output exceeds 100KB, showing lines ${start}-${lastShown} of ${lines.length})`,
+      );
     } else if (end < lines.length) {
       out.push(`... (truncated: showing lines ${start}-${end} of ${lines.length})`);
     }

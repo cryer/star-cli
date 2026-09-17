@@ -114,7 +114,12 @@ describe("edit_file", () => {
   });
 
   it("replace_all replaces every occurrence", async () => {
-    const res = await run("edit_file", { path: "e2.txt", old_string: "dup", new_string: "x", replace_all: true });
+    const res = await run("edit_file", {
+      path: "e2.txt",
+      old_string: "dup",
+      new_string: "x",
+      replace_all: true,
+    });
     expect(res.isError).toBeUndefined();
     expect(await readFile(path.join(dir, "e2.txt"), "utf8")).toBe("x x");
   });

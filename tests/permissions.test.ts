@@ -59,7 +59,12 @@ describe("dangerous bash commands", () => {
   }
 
   it("allows safe commands", () => {
-    for (const command of ["ls -la", "rm -rf node_modules", "git status", "rm -rf /home/user/tmp"]) {
+    for (const command of [
+      "ls -la",
+      "rm -rf node_modules",
+      "git status",
+      "rm -rf /home/user/tmp",
+    ]) {
       expect(checkPermission("auto", req("bash", { command }, "exec"), ctx)).toBe("allow");
     }
   });
@@ -74,7 +79,11 @@ describe("path outside cwd", () => {
 
   it("denies absolute path outside cwd in auto mode", () => {
     expect(
-      checkPermission("auto", req("write_file", { path: "C:/Windows/system32/x.dll" }, "write"), ctx),
+      checkPermission(
+        "auto",
+        req("write_file", { path: "C:/Windows/system32/x.dll" }, "write"),
+        ctx,
+      ),
     ).toBe("deny");
   });
 
@@ -85,12 +94,12 @@ describe("path outside cwd", () => {
   });
 
   it("asks for outside read in ask mode, denies outside write", () => {
-    expect(
-      checkPermission("ask", req("read_file", { path: "../outside.txt" }, "read"), ctx),
-    ).toBe("ask");
-    expect(
-      checkPermission("ask", req("edit_file", { path: "../outside.txt" }, "write"), ctx),
-    ).toBe("deny");
+    expect(checkPermission("ask", req("read_file", { path: "../outside.txt" }, "read"), ctx)).toBe(
+      "ask",
+    );
+    expect(checkPermission("ask", req("edit_file", { path: "../outside.txt" }, "write"), ctx)).toBe(
+      "deny",
+    );
   });
 
   it("denies outside write in readonly mode", () => {
@@ -111,7 +120,11 @@ describe("path outside cwd", () => {
   it("compares drive letters case-insensitively", () => {
     const upperCtx: PermissionContext = { cwd: "e:/star_cli" };
     expect(
-      checkPermission("auto", req("write_file", { path: "E:/STAR_CLI/src/x.ts" }, "write"), upperCtx),
+      checkPermission(
+        "auto",
+        req("write_file", { path: "E:/STAR_CLI/src/x.ts" }, "write"),
+        upperCtx,
+      ),
     ).toBe("allow");
     expect(
       checkPermission("auto", req("read_file", { path: "D:/other/x.ts" }, "read"), upperCtx),
@@ -139,7 +152,9 @@ describe("sensitive files", () => {
 
   it("allows .env.example / .env.sample / .env.template", () => {
     for (const file of [".env.example", ".env.sample", ".env.template"]) {
-      expect(checkPermission("auto", req("write_file", { path: file }, "write"), ctx)).toBe("allow");
+      expect(checkPermission("auto", req("write_file", { path: file }, "write"), ctx)).toBe(
+        "allow",
+      );
     }
   });
 });

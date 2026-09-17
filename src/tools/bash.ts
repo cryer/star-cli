@@ -8,7 +8,12 @@ const MAX_TIMEOUT = 600;
 
 const schema = z.object({
   command: z.string().describe("Shell command to execute"),
-  timeout: z.number().positive().max(MAX_TIMEOUT).optional().describe("Timeout in seconds (default 120, max 600)"),
+  timeout: z
+    .number()
+    .positive()
+    .max(MAX_TIMEOUT)
+    .optional()
+    .describe("Timeout in seconds (default 120, max 600)"),
   description: z.string().optional().describe("Short description of what the command does"),
 });
 
@@ -35,7 +40,6 @@ export const bashTool: Tool<typeof schema> = {
       const child = spawn(shell, ["-c", args.command], { cwd: ctx.cwd, windowsHide: true });
       let output = "";
       let settled = false;
-      let timer: NodeJS.Timeout;
       const finish = (result: ToolResult) => {
         if (settled) {
           return;
@@ -49,7 +53,7 @@ export const bashTool: Tool<typeof schema> = {
         child.kill();
         finish({ content: `${truncateMiddle(output)}\nCommand aborted`, isError: true });
       };
-      timer = setTimeout(() => {
+      const timer = setTimeout(() => {
         child.kill();
         finish({
           content: `${truncateMiddle(output)}\nCommand timed out after ${timeoutSeconds}s`,

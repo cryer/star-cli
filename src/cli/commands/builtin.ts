@@ -32,14 +32,47 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
     },
   });
 
-  for (const name of ["model", "resume", "todo", "config"] as const) {
-    registry.register({
-      name,
-      description: `${name} (not implemented)`,
-      usage: `/${name}`,
-      run(_args, ctx) {
-        ctx.addSystemMessage("not implemented");
-      },
-    });
-  }
+  registry.register({
+    name: "model",
+    description: "List available models or switch the current model",
+    usage: "/model [name]",
+    async run(args, ctx) {
+      if (!args) {
+        ctx.addSystemMessage(ctx.listModels());
+      } else {
+        ctx.addSystemMessage(await ctx.switchModel(args));
+      }
+    },
+  });
+
+  registry.register({
+    name: "resume",
+    description: "List sessions or resume a session by id",
+    usage: "/resume [sessionId]",
+    async run(args, ctx) {
+      if (!args) {
+        ctx.addSystemMessage(await ctx.listSessions());
+      } else {
+        ctx.addSystemMessage(await ctx.resumeSession(args));
+      }
+    },
+  });
+
+  registry.register({
+    name: "todo",
+    description: "Show the current todo list",
+    usage: "/todo",
+    async run(_args, ctx) {
+      ctx.addSystemMessage(await ctx.showTodos());
+    },
+  });
+
+  registry.register({
+    name: "config",
+    description: "Show the current configuration",
+    usage: "/config",
+    run(_args, ctx) {
+      ctx.addSystemMessage(ctx.describeConfig());
+    },
+  });
 }

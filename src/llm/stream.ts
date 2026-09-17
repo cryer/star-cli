@@ -10,9 +10,7 @@ export interface StreamChatOptions {
   maxTokens?: number;
 }
 
-export async function* streamChat(
-  opts: StreamChatOptions,
-): AsyncGenerator<StreamEvent> {
+export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<StreamEvent> {
   const result = streamText({
     model: opts.model,
     messages: opts.messages,
@@ -43,10 +41,7 @@ export async function* streamChat(
       case "error":
         yield {
           type: "error",
-          error:
-            part.error instanceof Error
-              ? part.error
-              : new Error(String(part.error)),
+          error: part.error instanceof Error ? part.error : new Error(String(part.error)),
         };
         break;
     }
