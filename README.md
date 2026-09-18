@@ -1,6 +1,10 @@
 # Star CLI
 
+[![CI](https://github.com/cryer/star-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/cryer/star-cli/actions/workflows/ci.yml)
+
 An AI agent command-line interface written in TypeScript — multi-model LLM access, streaming terminal UI, tool calling, permission control, and session persistence.
+
+Features: streaming REPL with slash commands · OpenAI / Anthropic / OpenAI-compatible providers · built-in fs / bash / web tools with a permission gate · `@file` mentions · conversation compaction (`/compact`) · session persistence and resume (`/resume`, `star -r`) · file-write snapshots with `/undo` · persistent permission allow-rules · TODO task tracking · Markdown session export (`/export`).
 
 ## Requirements
 
@@ -36,6 +40,10 @@ defaultModel = "gpt"
 permissionMode = "ask"   # auto | ask | readonly
 contextMaxTokens = 100000
 contextCompaction = "summary"   # summary | truncate — how over-budget history is compacted
+
+[permissions]
+# persistent allow-rules, written automatically when you pick "a" (always) on a permission prompt
+allow = ["bash(npm test)", "read_file"]   # <tool> or <tool(<pattern>)>, * is a glob wildcard
 
 [[providers]]
 name = "openai"
@@ -85,15 +93,28 @@ star -r <sessionId>           resume a previous session
 | `/config` | show resolved config |
 | `/compact` | compact conversation history to free up context |
 | `/export [path]` | export the current session to a Markdown file |
+| `/undo` | revert the last file write/edit made by a tool |
 | `/clear` | clear the screen |
 | `/exit` | quit |
 | `/q` | quit (alias of `/exit`) |
 
-Keys: `ESC` / `Ctrl+C` interrupts the current stream; on a permission prompt: `y` allow, `n` deny, `a` always allow this tool for the session. Input editing: arrow keys move the cursor, `Ctrl+A`/`Ctrl+E` jump to start/end, `Ctrl+U`/`Ctrl+K` delete before/after the cursor, `Ctrl+W` deletes the previous word, up/down recall history.
+Keys: `ESC` / `Ctrl+C` interrupts the current stream; on a permission prompt: `y` allow, `n` deny, `a` always allow — the generated allow-rule (e.g. `bash(npm test)`) is saved to `permissions.allow` in the config file and survives restarts. Input editing: arrow keys move the cursor, `Ctrl+A`/`Ctrl+E` jump to start/end, `Ctrl+U`/`Ctrl+K` delete before/after the cursor, `Ctrl+W` deletes the previous word, up/down recall history.
+
+## @file mentions
+
+Prefix a path with `@` in any prompt to attach its content (REPL and print mode alike):
+
+```
+star -p "summarize @README.md and @src/main.tsx"
+```
+
+Missing, binary, oversized (>100KB), or sensitive files (`.env`, private keys) are skipped with a note. The chat history keeps your original `@path` text, so resumed sessions don't carry the injected bulk.
 
 ## Built-in tools
 
-`read_file`, `write_file`, `edit_file`, `glob`, `grep`, `bash`, `web_fetch`, `todo_read`, `todo_write` — each declares a permission level (`read` / `write` / `exec`) enforced by the permission gate. Hard safety rules (dangerous shell commands, paths outside the working directory, secret files like `.env` / private keys) are denied in every mode.
+`read_file`, `write_file`, `edit_file`, `glob`, `grep`, `bash`, `web_fetch`, `web_search` (DuckDuckGo, no API key needed), `todo_read`, `todo_write` — each declares a permission level (`read` / `write` / `exec`) enforced by the permission gate. Hard safety rules (dangerous shell commands, paths outside the working directory, secret files like `.env` / private keys) are denied in every mode and cannot be overridden by allow-rules.
+
+Every successful `write_file` / `edit_file` first snapshots the file's previous content (in-memory, last 50 writes per session); `/undo` restores the most recent snapshot, deleting the file if it didn't exist before.
 
 ## Sessions
 
@@ -102,10 +123,13 @@ Sessions persist under `~/.star-cli/sessions/<id>/` (messages as JSONL + `meta.j
 ## Development
 
 ```bash
-pnpm build       # tsup bundle to dist/
-pnpm test        # vitest
-pnpm typecheck   # tsc --noEmit
-pnpm lint        # biome
+pnpm build           # tsup bundle to dist/
+pnpm test            # vitest unit tests (no network)
+pnpm typecheck       # tsc --noEmit
+pnpm lint            # biome
+pnpm test:pipeline   # layered pipeline incl. optional live LLM smoke (needs an API key)
 ```
+
+CI runs lint, typecheck, tests, and build on Ubuntu + Windows against Node 20/22 (`.github/workflows/ci.yml`).
 
 Architecture: `src/cli` (Ink UI), `src/agent` (main loop), `src/llm` (Vercel AI SDK provider layer), `src/tools`, `src/context` (token budget + compaction), `src/permissions`, `src/session`, `src/config`.
