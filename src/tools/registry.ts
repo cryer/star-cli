@@ -6,6 +6,7 @@ import { readFileTool } from "./fs/read";
 import { writeFileTool } from "./fs/write";
 import { createTodoTools } from "./todo";
 import type { Tool } from "./types";
+import { webFetchTool } from "./web/fetch";
 
 export class ToolRegistry {
   private tools = new Map<string, Tool>();
@@ -18,6 +19,7 @@ export class ToolRegistry {
       globTool,
       grepTool,
       bashTool,
+      webFetchTool,
       ...createTodoTools(),
     ]) {
       this.register(tool);
