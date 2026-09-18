@@ -7,7 +7,15 @@ An AI agent command-line interface written in TypeScript — multi-model LLM acc
 - Node.js >= 20
 - pnpm
 
-## Quick start
+## Install
+
+```bash
+npm install -g @cryer/star-cli
+star                  # interactive REPL
+star -p "hi"          # non-interactive print mode
+```
+
+## Quick start (from source)
 
 ```bash
 pnpm install
@@ -23,6 +31,8 @@ Config file: `~/.star-cli/config.toml` (project-level override: `.star/config.to
 ```toml
 defaultModel = "gpt"
 permissionMode = "ask"   # auto | ask | readonly
+contextMaxTokens = 100000
+contextCompaction = "summary"   # summary | truncate — how over-budget history is compacted
 
 [[providers]]
 name = "openai"
@@ -71,11 +81,11 @@ star -r <sessionId>           resume a previous session
 | `/clear` | clear the screen |
 | `/exit` | quit |
 
-Keys: `ESC` / `Ctrl+C` interrupts the current stream; on a permission prompt: `y` allow, `n` deny, `a` always allow this tool for the session.
+Keys: `ESC` / `Ctrl+C` interrupts the current stream; on a permission prompt: `y` allow, `n` deny, `a` always allow this tool for the session. Input editing: arrow keys move the cursor, `Ctrl+A`/`Ctrl+E` jump to start/end, `Ctrl+U`/`Ctrl+K` delete before/after the cursor, `Ctrl+W` deletes the previous word, up/down recall history.
 
 ## Built-in tools
 
-`read_file`, `write_file`, `edit_file`, `glob`, `grep`, `bash`, `todo_read`, `todo_write` — each declares a permission level (`read` / `write` / `exec`) enforced by the permission gate. Hard safety rules (dangerous shell commands, paths outside the working directory, secret files like `.env` / private keys) are denied in every mode.
+`read_file`, `write_file`, `edit_file`, `glob`, `grep`, `bash`, `web_fetch`, `todo_read`, `todo_write` — each declares a permission level (`read` / `write` / `exec`) enforced by the permission gate. Hard safety rules (dangerous shell commands, paths outside the working directory, secret files like `.env` / private keys) are denied in every mode.
 
 ## Sessions
 

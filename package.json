@@ -1,12 +1,24 @@
 {
-  "name": "star-cli",
+  "name": "@cryer/star-cli",
   "version": "0.1.0",
   "description": "An AI agent command-line interface",
   "type": "module",
+  "license": "MIT",
+  "author": "cryer",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cryer/star-cli.git"
+  },
+  "homepage": "https://github.com/cryer/star-cli#readme",
+  "bugs": "https://github.com/cryer/star-cli/issues",
+  "keywords": ["ai", "agent", "cli", "llm", "openai", "anthropic", "terminal"],
   "bin": {
     "star": "./dist/main.js"
   },
   "files": ["dist"],
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=20"
   },
@@ -19,7 +31,8 @@
     "test:pipeline": "node scripts/pipeline.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
-    "lint:fix": "biome check --write ."
+    "lint:fix": "biome check --write .",
+    "prepublishOnly": "pnpm test:pipeline"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^1.2.0",
