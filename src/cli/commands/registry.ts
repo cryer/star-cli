@@ -11,6 +11,7 @@ export interface CommandContext {
   describeConfig(): string;
   compactContext(): Promise<string>;
   exportSession(path: string): Promise<string>;
+  undo(): Promise<string>;
 }
 
 export interface SlashCommand {

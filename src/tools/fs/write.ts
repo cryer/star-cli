@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { Tool } from "../types";
+import { captureSnapshot, pushSnapshot } from "./snapshots";
 
 const schema = z.object({
   path: z.string().describe("File path, absolute or relative to the working directory"),
@@ -16,12 +17,14 @@ export const writeFileTool: Tool<typeof schema> = {
   parameters: schema,
   async execute(args, ctx) {
     const filePath = path.resolve(ctx.cwd, args.path);
+    const snapshot = await captureSnapshot(filePath, "write_file");
     try {
       await mkdir(path.dirname(filePath), { recursive: true });
       await writeFile(filePath, args.content, "utf8");
     } catch (err) {
       return { content: `Failed to write ${args.path}: ${(err as Error).message}`, isError: true };
     }
+    pushSnapshot(snapshot);
     return { content: `Wrote ${Buffer.byteLength(args.content, "utf8")} bytes to ${args.path}` };
   },
 };

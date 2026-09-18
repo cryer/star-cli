@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { Tool } from "../types";
+import { pushSnapshot } from "./snapshots";
 
 const schema = z.object({
   path: z.string().describe("File path, absolute or relative to the working directory"),
@@ -45,7 +46,18 @@ export const editFileTool: Tool<typeof schema> = {
     const updated = args.replace_all
       ? content.split(args.old_string).join(args.new_string)
       : content.replace(args.old_string, args.new_string);
-    await writeFile(filePath, updated, "utf8");
+    try {
+      await writeFile(filePath, updated, "utf8");
+    } catch (err) {
+      return { content: `Failed to write ${args.path}: ${(err as Error).message}`, isError: true };
+    }
+    pushSnapshot({
+      path: filePath,
+      existed: true,
+      content,
+      toolName: "edit_file",
+      timestamp: Date.now(),
+    });
     return { content: `Edited ${args.path}: ${count} replacement${count > 1 ? "s" : ""}` };
   },
 };

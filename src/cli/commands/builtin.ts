@@ -111,4 +111,13 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
       ctx.addSystemMessage(await ctx.exportSession(args));
     },
   });
+
+  registry.register({
+    name: "undo",
+    description: "Revert the last file change made by write_file or edit_file",
+    usage: "/undo",
+    async run(_args, ctx) {
+      ctx.addSystemMessage(await ctx.undo());
+    },
+  });
 }

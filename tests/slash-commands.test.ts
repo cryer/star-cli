@@ -22,6 +22,7 @@ function makeCtx(overrides: Partial<CommandContext> = {}) {
     describeConfig: () => "config summary",
     compactContext: async () => "compact result",
     exportSession: async (p) => `exported ${p}`,
+    undo: async () => "undo result",
     ...overrides,
   };
   return { ctx, calls };

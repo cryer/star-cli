@@ -11,6 +11,7 @@ import type { PermissionRequest } from "../permissions/types";
 import { formatSessionList, resumeSession } from "../session/resume";
 import { SessionStore } from "../session/store";
 import { TodoStore, createDefaultRegistry } from "../tools";
+import { undoLastSnapshot } from "../tools/fs/snapshots";
 import { formatTodos } from "../tools/todo";
 import type { ChatBackend } from "./backend";
 import { compactSession, exportSession } from "./commands/actions";
@@ -260,6 +261,7 @@ export function Repl({
       },
       exportSession: (arg) =>
         exportSession({ backend: backendRef.current, sessionStore, cwd, arg }),
+      undo: () => undoLastSnapshot(),
       describeConfig: () =>
         [
           `defaultModel: ${config.defaultModel || "(none)"}`,
