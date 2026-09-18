@@ -31,13 +31,21 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
           args: part.args,
         };
         break;
-      case "finish":
+      case "finish": {
+        const finite = (n: number) => (Number.isFinite(n) ? n : 0);
         yield {
           type: "finish",
           finishReason: part.finishReason,
-          usage: part.usage,
+          usage: part.usage
+            ? {
+                promptTokens: finite(part.usage.promptTokens),
+                completionTokens: finite(part.usage.completionTokens),
+                totalTokens: finite(part.usage.totalTokens),
+              }
+            : undefined,
         };
         break;
+      }
       case "error":
         yield {
           type: "error",

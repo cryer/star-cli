@@ -105,6 +105,32 @@ describe("streamChat", () => {
     ]);
   });
 
+  it("sanitizes non-finite usage numbers to zero", async () => {
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: convertArrayToReadableStream([
+          { type: "text-delta", textDelta: "Hi" },
+          {
+            type: "finish",
+            finishReason: "stop",
+            usage: { promptTokens: Number.NaN, completionTokens: Number.NaN },
+          },
+        ]),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+
+    const events = await collect(
+      streamChat({ model, messages: [{ role: "user", content: "hi" }] }),
+    );
+
+    expect(events[1]).toEqual({
+      type: "finish",
+      finishReason: "stop",
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    });
+  });
+
   it("normalizes tool-call events", async () => {
     const model = new MockLanguageModelV1({
       doStream: async () => ({

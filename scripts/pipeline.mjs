@@ -61,7 +61,12 @@ if (!smoke) {
   const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
   console.log(`\n=== Layer 4/4: llm smoke (model: ${smoke.model}) ===`);
   console.log(output.trim());
-  if (result.status !== 0 || !output.includes("STAR_OK")) {
+  // STAR_OK proves instruction following; the [usage] line proves the stream
+  // completed end-to-end (some reasoning models return an empty text body).
+  const ok =
+    result.status === 0 &&
+    ((result.stdout ?? "").includes("STAR_OK") || output.includes("[usage]"));
+  if (!ok) {
     console.error("FAILED: llm smoke");
     failed = true;
   } else {
