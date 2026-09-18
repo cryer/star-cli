@@ -78,6 +78,7 @@ star -r <sessionId>           resume a previous session
 | `/model [name]` | list / switch models |
 | `/resume [id]` | list / resume sessions |
 | `/todo` | show TODO list |
+| `/cost` | show API token usage for this session |
 | `/config` | show resolved config |
 | `/clear` | clear the screen |
 | `/exit` | quit |

@@ -7,6 +7,7 @@ export interface CommandContext {
   listSessions(): Promise<string>;
   resumeSession(id: string): Promise<string>;
   showTodos(): Promise<string>;
+  showUsage(): string;
   describeConfig(): string;
 }
 

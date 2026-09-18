@@ -17,6 +17,8 @@ function makeCtx(overrides: Partial<CommandContext> = {}) {
     listSessions: async () => "sessions list",
     resumeSession: async (id) => `resumed ${id}`,
     showTodos: async () => "todos",
+    showUsage: () =>
+      "API usage this session: 3 requests, 1234 prompt + 567 completion = 1801 tokens",
     describeConfig: () => "config summary",
     ...overrides,
   };
@@ -76,12 +78,17 @@ describe("CommandRegistry", () => {
     await registry.get("clear")?.run("", ctx);
     await registry.get("exit")?.run("", ctx);
     await registry.get("todo")?.run("", ctx);
+    await registry.get("cost")?.run("", ctx);
     await registry.get("config")?.run("", ctx);
 
     expect(calls).toEqual([
       { type: "clear" },
       { type: "exit" },
       { type: "system", text: "todos" },
+      {
+        type: "system",
+        text: "API usage this session: 3 requests, 1234 prompt + 567 completion = 1801 tokens",
+      },
       { type: "system", text: "config summary" },
     ]);
   });
@@ -97,6 +104,25 @@ describe("CommandRegistry", () => {
     for (const cmd of registry.list()) {
       expect(text).toContain(`/${cmd.name}`);
     }
+  });
+
+  it("/cost shows usage summary from context", async () => {
+    const registry = makeRegistry();
+    const { ctx, calls } = makeCtx({
+      showUsage: () => "API usage this session: 1 requests, 10 prompt + 5 completion = 15 tokens",
+    });
+
+    await registry.get("cost")?.run("", ctx);
+
+    expect(calls).toEqual([
+      {
+        type: "system",
+        text: "API usage this session: 1 requests, 10 prompt + 5 completion = 15 tokens",
+      },
+    ]);
+    expect(calls[0]?.text).toMatch(
+      /^API usage this session: \d+ requests, \d+ prompt \+ \d+ completion = \d+ tokens$/,
+    );
   });
 
   it("/model without args lists models, with args switches", async () => {

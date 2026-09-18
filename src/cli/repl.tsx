@@ -23,6 +23,21 @@ import { summarizeArgs } from "./format";
 
 const FLUSH_INTERVAL_MS = 30;
 
+interface UsageStats {
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+function emptyUsage(): UsageStats {
+  return { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+}
+
+function formatUsage(usage: UsageStats): string {
+  return `API usage this session: ${usage.requests} requests, ${usage.promptTokens} prompt + ${usage.completionTokens} completion = ${usage.totalTokens} tokens`;
+}
+
 interface PendingPermission {
   request: PermissionRequest;
   resolve: (approved: boolean) => void;
@@ -54,7 +69,7 @@ export function Repl({ backend, model, permissionMode, config, cwd, sessionStore
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [streamingText, setStreamingText] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [totalTokens, setTotalTokens] = useState(0);
+  const [usageVersion, setUsageVersion] = useState(0);
   const [modelName, setModelName] = useState(model);
   const [pending, setPending] = useState<PendingPermission | null>(null);
   const [cardsVersion, setCardsVersion] = useState(0);
@@ -68,6 +83,7 @@ export function Repl({ backend, model, permissionMode, config, cwd, sessionStore
   const pendingRef = useRef<PendingPermission | null>(null);
   const alwaysAllowedRef = useRef(new Set<string>());
   const modelNameRef = useRef(model);
+  const usageRef = useRef<UsageStats>(emptyUsage());
 
   const pushMessage = useCallback((role: DisplayMessage["role"], text: string) => {
     setMessages((prev) => [...prev, { id: nextIdRef.current++, role, text }]);
@@ -214,6 +230,7 @@ export function Repl({ backend, model, permissionMode, config, cwd, sessionStore
         await store.load(cwd);
         return formatTodos(store.list());
       },
+      showUsage: () => formatUsage(usageRef.current),
       describeConfig: () =>
         [
           `defaultModel: ${config.defaultModel || "(none)"}`,
@@ -260,7 +277,12 @@ export function Repl({ backend, model, permissionMode, config, cwd, sessionStore
             }
           } else if (event.type === "finish") {
             if (event.usage) {
-              setTotalTokens((prev) => prev + (event.usage?.totalTokens ?? 0));
+              const usage = usageRef.current;
+              usage.requests += 1;
+              usage.promptTokens += event.usage.promptTokens;
+              usage.completionTokens += event.usage.completionTokens;
+              usage.totalTokens += event.usage.totalTokens;
+              setUsageVersion((v) => v + 1);
             }
           } else if (event.type === "error") {
             pushMessage("system", `Error: ${event.error.message}`);
@@ -340,7 +362,12 @@ export function Repl({ backend, model, permissionMode, config, cwd, sessionStore
         onInterrupt={interrupt}
         onExit={exit}
       />
-      <StatusBar model={modelName} permissionMode={permissionMode} tokens={totalTokens} />
+      <StatusBar
+        key={usageVersion}
+        model={modelName}
+        permissionMode={permissionMode}
+        tokens={usageRef.current.totalTokens}
+      />
     </Box>
   );
 }

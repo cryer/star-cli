@@ -35,6 +35,11 @@ async function createLoop(
 async function printMode(loop: AgentLoop, prompt: string): Promise<number> {
   const controller = new AbortController();
   process.on("SIGINT", () => controller.abort());
+  let requests = 0;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let totalTokens = 0;
+  let exitCode = 0;
   for await (const event of loop.stream(prompt, controller.signal)) {
     switch (event.type) {
       case "text-delta":
@@ -51,13 +56,28 @@ async function printMode(loop: AgentLoop, prompt: string): Promise<number> {
         process.stderr.write(`[result] ${event.isError ? "ERROR: " : ""}${preview}\n`);
         break;
       }
+      case "finish":
+        if (event.usage) {
+          requests += 1;
+          promptTokens += event.usage.promptTokens;
+          completionTokens += event.usage.completionTokens;
+          totalTokens += event.usage.totalTokens;
+        }
+        break;
       case "error":
         process.stderr.write(`\n[error] ${event.error.message}\n`);
-        return 1;
+        exitCode = 1;
+        break;
     }
+    if (exitCode !== 0) break;
+  }
+  if (requests > 0) {
+    process.stderr.write(
+      `[usage] ${requests} requests, ${promptTokens} prompt + ${completionTokens} completion = ${totalTokens} tokens\n`,
+    );
   }
   process.stdout.write("\n");
-  return 0;
+  return exitCode;
 }
 
 const program = new Command();

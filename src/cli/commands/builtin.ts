@@ -68,6 +68,15 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
   });
 
   registry.register({
+    name: "cost",
+    description: "Show API token usage for this session",
+    usage: "/cost",
+    run(_args, ctx) {
+      ctx.addSystemMessage(ctx.showUsage());
+    },
+  });
+
+  registry.register({
     name: "config",
     description: "Show the current configuration",
     usage: "/config",
