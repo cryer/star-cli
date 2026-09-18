@@ -1,59 +1,10 @@
-import { EventEmitter } from "node:events";
-import { Readable } from "node:stream";
-import type { render } from "ink";
-import type { ReactElement } from "react";
 import { createElement } from "react";
 import { describe, expect, it, vi } from "vitest";
+import { renderApp, stripAnsi, typeText } from "./ink-harness";
 
-// Force chalk (used by ink) to emit ANSI styles in this non-TTY environment.
-// Must run before ink is imported, hence the dynamic imports below.
-process.env.FORCE_COLOR = "3";
-const { render: inkRender } = await import("ink");
+// FORCE_COLOR is set by ./ink-harness before ink is loaded (static import above),
+// so this dynamic import of InputBox (which imports ink) sees colored output.
 const { InputBox } = await import("../src/cli/components/InputBox");
-
-const tick = () => new Promise((resolve) => setTimeout(resolve, 30));
-
-// biome-ignore lint/suspicious/noControlCharactersInRegex: matches ANSI escape sequences
-const stripAnsi = (s: string) => s.replace(/\u001B\[[0-9;]*[a-zA-Z]/g, "");
-
-interface InkApp {
-  stdin: { write(s: string): void };
-  lastFrame(): string | undefined;
-  unmount(): void;
-}
-
-// Mirrors ink-testing-library's harness; it cannot be required directly because
-// its CJS entry does require("ink") and ink 5 is ESM with top-level await.
-function renderApp(node: ReactElement): InkApp {
-  let lastFrame: string | undefined;
-  const stdout = new EventEmitter() as EventEmitter & {
-    write(frame: string): void;
-    columns: number;
-  };
-  stdout.write = (frame: string) => {
-    lastFrame = frame;
-  };
-  stdout.columns = 100;
-  const stdin = new Readable({ read() {} }) as Readable & {
-    setRawMode(): void;
-    isTTY: boolean;
-  };
-  stdin.setRawMode = () => {};
-  stdin.isTTY = true;
-  (stdin as unknown as { ref(): void; unref(): void }).ref = () => {};
-  (stdin as unknown as { ref(): void; unref(): void }).unref = () => {};
-  const instance = inkRender(node, {
-    stdout: stdout as never,
-    stdin: stdin as never,
-    debug: true,
-    exitOnCtrlC: false,
-  });
-  return {
-    stdin: { write: (s: string) => stdin.push(s) },
-    lastFrame: () => lastFrame,
-    unmount: () => instance.unmount(),
-  };
-}
 
 function setup() {
   const onSubmit = vi.fn();
@@ -65,12 +16,7 @@ function setup() {
   return { app, onSubmit, onInterrupt, onExit };
 }
 
-async function type(stdin: { write(s: string): void }, ...chunks: string[]) {
-  for (const chunk of chunks) {
-    stdin.write(chunk);
-    await tick();
-  }
-}
+const type = typeText;
 
 const LEFT = "\u001B[D";
 const RIGHT = "\u001B[C";

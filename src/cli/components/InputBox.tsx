@@ -1,24 +1,50 @@
 import { Box, Text, useInput } from "ink";
 import { useRef, useState } from "react";
+import { type SlashCommandHint, filterCommands } from "../commands/suggest";
 
 interface InputBoxProps {
   isStreaming: boolean;
   disabled?: boolean;
+  commands?: SlashCommandHint[];
   onSubmit(text: string): void;
   onInterrupt(): void;
   onExit(): void;
 }
 
-export function InputBox({ isStreaming, disabled, onSubmit, onInterrupt, onExit }: InputBoxProps) {
+export function InputBox({
+  isStreaming,
+  disabled,
+  commands,
+  onSubmit,
+  onInterrupt,
+  onExit,
+}: InputBoxProps) {
   const [value, setValue] = useState("");
   const [cursor, setCursor] = useState(0);
   const [history, setHistory] = useState<string[]>([]);
+  const [highlight, setHighlight] = useState(0);
+  const [suggestionsDismissed, setSuggestionsDismissed] = useState(false);
   const historyIndexRef = useRef<number | null>(null);
   const draftRef = useRef("");
 
   const edit = (next: string, nextCursor: number) => {
     setValue(next);
     setCursor(Math.max(0, Math.min(nextCursor, next.length)));
+    setHighlight(0);
+    setSuggestionsDismissed(false);
+  };
+
+  const suggestions =
+    isStreaming || disabled || suggestionsDismissed || !commands
+      ? []
+      : filterCommands(value, commands);
+  const activeIndex = suggestions.length === 0 ? 0 : Math.min(highlight, suggestions.length - 1);
+
+  const completeHighlighted = () => {
+    const cmd = suggestions[activeIndex];
+    if (!cmd) return;
+    const text = `/${cmd.name} `;
+    edit(text, text.length);
   };
 
   useInput((input, key) => {
@@ -36,6 +62,10 @@ export function InputBox({ isStreaming, disabled, onSubmit, onInterrupt, onExit 
       return;
     }
     if (isStreaming || disabled) return;
+    if (key.escape) {
+      if (suggestions.length > 0) setSuggestionsDismissed(true);
+      return;
+    }
     if (key.return) {
       const text = value.trim();
       if (text.length > 0) {
@@ -47,7 +77,16 @@ export function InputBox({ isStreaming, disabled, onSubmit, onInterrupt, onExit 
       draftRef.current = "";
       return;
     }
-    if (key.upArrow) {
+    if (key.tab) {
+      if (suggestions.length > 0) {
+        completeHighlighted();
+        return;
+      }
+    } else if (key.upArrow) {
+      if (suggestions.length > 0) {
+        setHighlight((prev) => (prev - 1 + suggestions.length) % suggestions.length);
+        return;
+      }
       if (history.length === 0) return;
       if (historyIndexRef.current === null) {
         draftRef.current = value;
@@ -58,8 +97,11 @@ export function InputBox({ isStreaming, disabled, onSubmit, onInterrupt, onExit 
       const entry = history[historyIndexRef.current] ?? "";
       edit(entry, entry.length);
       return;
-    }
-    if (key.downArrow) {
+    } else if (key.downArrow) {
+      if (suggestions.length > 0) {
+        setHighlight((prev) => (prev + 1) % suggestions.length);
+        return;
+      }
       if (historyIndexRef.current === null) return;
       if (historyIndexRef.current < history.length - 1) {
         historyIndexRef.current += 1;
@@ -70,13 +112,15 @@ export function InputBox({ isStreaming, disabled, onSubmit, onInterrupt, onExit 
         edit(draftRef.current, draftRef.current.length);
       }
       return;
-    }
-    if (key.leftArrow) {
+    } else if (key.leftArrow) {
       setCursor((prev) => Math.max(0, prev - 1));
       return;
-    }
-    if (key.rightArrow) {
-      setCursor((prev) => Math.min(value.length, prev + 1));
+    } else if (key.rightArrow) {
+      if (suggestions.length > 0 && cursor === value.length) {
+        completeHighlighted();
+      } else {
+        setCursor((prev) => Math.min(value.length, prev + 1));
+      }
       return;
     }
     if (key.ctrl && input === "a") {
@@ -119,11 +163,27 @@ export function InputBox({ isStreaming, disabled, onSubmit, onInterrupt, onExit 
   const after = value.slice(cursor + 1);
 
   return (
-    <Box borderStyle="round" borderColor="gray" paddingX={1}>
-      <Text color="cyan">{"> "}</Text>
-      <Text>{before}</Text>
-      <Text inverse>{at}</Text>
-      <Text>{after}</Text>
+    <Box flexDirection="column">
+      <Box borderStyle="round" borderColor="gray" paddingX={1}>
+        <Text color="cyan">{"> "}</Text>
+        <Text>{before}</Text>
+        <Text inverse>{at}</Text>
+        <Text>{after}</Text>
+      </Box>
+      {suggestions.length > 0 && (
+        <Box flexDirection="column" paddingLeft={2}>
+          {suggestions.map((cmd, index) =>
+            index === activeIndex ? (
+              <Text key={cmd.name} bold inverse>{`/${cmd.name} - ${cmd.description}`}</Text>
+            ) : (
+              <Text key={cmd.name}>
+                <Text color="cyan">{`/${cmd.name}`}</Text>
+                <Text dimColor>{` - ${cmd.description}`}</Text>
+              </Text>
+            ),
+          )}
+        </Box>
+      )}
     </Box>
   );
 }

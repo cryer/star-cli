@@ -385,6 +385,11 @@ export function Repl({
     [registry, pushMessage, runStream],
   );
 
+  const commandHints = useMemo(
+    () => registry.list().map((cmd) => ({ name: cmd.name, description: cmd.description })),
+    [registry],
+  );
+
   const cards = [...toolCardsRef.current.values()];
 
   return (
@@ -402,6 +407,7 @@ export function Repl({
       <InputBox
         isStreaming={isStreaming}
         disabled={pending !== null}
+        commands={commandHints}
         onSubmit={handleSubmit}
         onInterrupt={interrupt}
         onExit={exit}
