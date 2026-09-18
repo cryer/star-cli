@@ -54,6 +54,7 @@ describe("loadConfig", () => {
       models: [],
       maxSteps: 50,
       contextMaxTokens: 100_000,
+      contextCompaction: "summary",
     });
   });
 
@@ -94,6 +95,12 @@ maxSteps = 10
     });
     expect(config.defaultModel).toBe("cli-model");
     expect(config.permissionMode).toBe("readonly");
+  });
+
+  it("parses contextCompaction from TOML", async () => {
+    writeFile(globalConfigPath(), `contextCompaction = "truncate"`);
+    const config = await loadConfig(cwd);
+    expect(config.contextCompaction).toBe("truncate");
   });
 
   it("loadConfigSync matches loadConfig", async () => {

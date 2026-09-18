@@ -1,3 +1,4 @@
+import { type LanguageModelV1, generateText } from "ai";
 import type { CoreMessage } from "../core/messages";
 import { estimateTokens } from "./tokens";
 
@@ -14,6 +15,45 @@ function placeholderMessage(droppedCount: number): CoreMessage {
     role: "user",
     content: `[context compacted: ${droppedCount} earlier messages dropped]`,
   };
+}
+
+const SUMMARY_SYSTEM_PROMPT = [
+  "You are summarizing an AI coding agent's conversation for context compaction.",
+  "Write a concise summary that preserves:",
+  "- the user's goals and requests",
+  "- decisions made and their rationale",
+  "- files and code touched (paths, key changes)",
+  "- tool results that matter (errors, key outputs)",
+  "- outstanding TODOs and next steps",
+  "Output only the summary, no preamble.",
+].join("\n");
+
+function serializeMessage(message: CoreMessage): string {
+  if (typeof message.content === "string") {
+    return `${message.role}: ${message.content}`;
+  }
+  const parts = message.content.map((part) => {
+    if (part.type === "text") return part.text;
+    if (part.type === "tool-call")
+      return `[tool-call ${part.toolName}] ${JSON.stringify(part.args)}`;
+    if (part.type === "tool-result")
+      return `[tool-result ${part.toolName}] ${JSON.stringify(part.result)}`;
+    return `[${part.type}]`;
+  });
+  return `${message.role}: ${parts.join("\n")}`;
+}
+
+export async function summarizeMessages(
+  messages: CoreMessage[],
+  model: LanguageModelV1,
+): Promise<string> {
+  const transcript = messages.map(serializeMessage).join("\n");
+  const { text } = await generateText({
+    model,
+    system: SUMMARY_SYSTEM_PROMPT,
+    prompt: `Summarize this conversation so far:\n\n${transcript}`,
+  });
+  return text.trim();
 }
 
 export function compactMessages(messages: CoreMessage[], maxTokens: number): CompactionResult {

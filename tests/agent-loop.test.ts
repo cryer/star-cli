@@ -74,6 +74,7 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     models: [],
     maxSteps: 50,
     contextMaxTokens: 100_000,
+    contextCompaction: "summary",
     ...overrides,
   };
 }

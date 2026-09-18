@@ -1,7 +1,7 @@
 import type { LanguageModel } from "ai";
 import { tool as aiTool } from "ai";
 import type { StarConfig } from "../config/schema";
-import { compactMessages } from "../context/compaction";
+import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
 import type { StreamEvent } from "../core/events";
 import type { CoreMessage } from "../core/messages";
 import { checkPermission } from "../permissions/gate";
@@ -60,7 +60,7 @@ export class AgentLoop {
     for (let step = 0; step < config.maxSteps; step++) {
       const compacted = compactMessages([...this.messages], config.contextMaxTokens);
       if (compacted.compacted) {
-        this.messages = compacted.messages;
+        this.messages = await this.applyCompactionSummary(compacted);
       }
 
       let text = "";
@@ -135,6 +135,26 @@ export class AgentLoop {
       type: "error",
       error: new Error(`Max steps (${config.maxSteps}) reached, stopping.`),
     };
+  }
+
+  private async applyCompactionSummary(compacted: CompactionResult): Promise<CoreMessage[]> {
+    const { config, model } = this.opts;
+    if (config.contextCompaction !== "summary" || !model) {
+      return compacted.messages;
+    }
+    const headCount = compacted.messages[0]?.role === "system" ? 1 : 0;
+    const dropped = this.messages.slice(headCount, headCount + compacted.droppedCount);
+    try {
+      const summary = await summarizeMessages(dropped, model);
+      const messages = compacted.messages.slice();
+      messages[headCount] = {
+        role: "user",
+        content: `[earlier conversation summarized]\n${summary}`,
+      };
+      return messages;
+    } catch {
+      return compacted.messages;
+    }
   }
 
   private async *streamOnce(

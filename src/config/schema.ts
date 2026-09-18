@@ -23,6 +23,7 @@ export const ConfigSchema = z.object({
   models: z.array(ModelConfigSchema).default([]),
   maxSteps: z.number().int().positive().default(50),
   contextMaxTokens: z.number().int().positive().default(100_000),
+  contextCompaction: z.enum(["summary", "truncate"]).default("summary"),
 });
 
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
