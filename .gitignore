@@ -6,3 +6,4 @@ dist/
 !.env.example
 coverage/
 .DS_Store
+AGENTS.md

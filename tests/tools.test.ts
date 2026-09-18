@@ -204,14 +204,19 @@ describe("bash", () => {
   });
 
   it("appends exit code on failure", async () => {
-    const res = await run("bash", { command: "echo oops >&2; exit 3" });
+    const res = await run("bash", {
+      command: "node -e \"console.error('oops'); process.exit(3)\"",
+    });
     expect(res.isError).toBe(true);
     expect(res.content).toContain("oops");
     expect(res.content).toContain("Exit code: 3");
   });
 
   it("times out long-running commands", async () => {
-    const res = await run("bash", { command: "sleep 5", timeout: 1 });
+    const res = await run("bash", {
+      command: 'node -e "setTimeout(() => {}, 10000)"',
+      timeout: 1,
+    });
     expect(res.isError).toBe(true);
     expect(res.content).toContain("timed out");
   }, 15000);
