@@ -20,9 +20,12 @@ star -p "hi"          # non-interactive print mode
 ```bash
 pnpm install
 pnpm build
-node dist/main.js          # interactive REPL
-node dist/main.js -p "hi"  # non-interactive print mode
+npm link                 # one-time: registers the `star` command globally
+star                     # interactive REPL
+star -p "hi"             # non-interactive print mode
 ```
+
+Without `npm link` you can run the bundle directly: `node dist/main.js` (re-run `pnpm build` after code changes; the linked `star` always points at `dist/`).
 
 ## Configuration
 
