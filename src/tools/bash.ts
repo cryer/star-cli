@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
@@ -67,6 +67,17 @@ const schema = z.object({
   description: z.string().optional().describe("Short description of what the command does"),
 });
 
+function killTree(child: ChildProcess): void {
+  if (process.platform === "win32" && child.pid) {
+    spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+      windowsHide: true,
+      stdio: "ignore",
+    }).unref();
+    return;
+  }
+  child.kill("SIGKILL");
+}
+
 function truncateMiddle(s: string): string {
   if (s.length <= MAX_OUTPUT) {
     return s;
@@ -103,11 +114,11 @@ export const bashTool: Tool<typeof schema> = {
         resolve(result);
       };
       const onAbort = () => {
-        child.kill();
+        killTree(child);
         finish({ content: `${truncateMiddle(output)}\nCommand aborted`, isError: true });
       };
       const timer = setTimeout(() => {
-        child.kill();
+        killTree(child);
         finish({
           content: `${truncateMiddle(output)}\nCommand timed out after ${timeoutSeconds}s`,
           isError: true,
