@@ -15,7 +15,7 @@ const schema = z.object({
     .describe("Maximum characters of text to return (default 20000)"),
 });
 
-function decodeEntities(s: string): string {
+export function decodeEntities(s: string): string {
   return s
     .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
     .replace(/&#x([0-9a-fA-F]+);/gi, (_, n) => String.fromCodePoint(Number.parseInt(n, 16)))

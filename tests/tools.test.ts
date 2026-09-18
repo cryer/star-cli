@@ -37,6 +37,7 @@ describe("registry", () => {
       "todo_read",
       "todo_write",
       "web_fetch",
+      "web_search",
       "write_file",
     ]);
   });
