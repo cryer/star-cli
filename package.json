@@ -16,6 +16,7 @@
     "start": "node dist/main.js",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:pipeline": "node scripts/pipeline.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "lint:fix": "biome check --write ."

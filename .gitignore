@@ -6,4 +6,9 @@ dist/
 !.env.example
 coverage/
 .DS_Store
+
+*.md
+!README.md
+
 AGENTS.md
+test.txt
