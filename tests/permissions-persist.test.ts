@@ -10,7 +10,8 @@ import { checkPermission } from "../src/permissions/gate";
 import type { PermissionContext, PermissionRequest } from "../src/permissions/types";
 import type { PermissionLevel } from "../src/tools/types";
 
-const ctx: PermissionContext = { cwd: "E:/star_cli" };
+const testCwd = path.join(path.parse(process.cwd()).root, "star_test_cwd");
+const ctx: PermissionContext = { cwd: testCwd };
 
 function req(toolName: string, args: unknown, level: PermissionLevel): PermissionRequest {
   return { toolName, args, level };

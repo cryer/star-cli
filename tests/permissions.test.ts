@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { checkPermission, describeDecision } from "../src/permissions/gate";
 import type {
@@ -8,7 +9,8 @@ import type {
 } from "../src/permissions/types";
 import type { PermissionLevel } from "../src/tools/types";
 
-const ctx: PermissionContext = { cwd: "E:/star_cli" };
+const testCwd = path.join(path.parse(process.cwd()).root, "star_test_cwd");
+const ctx: PermissionContext = { cwd: testCwd };
 
 function req(toolName: string, args: unknown, level: PermissionLevel): PermissionRequest {
   return { toolName, args, level };
@@ -78,13 +80,11 @@ describe("path outside cwd", () => {
   });
 
   it("denies absolute path outside cwd in auto mode", () => {
-    expect(
-      checkPermission(
-        "auto",
-        req("write_file", { path: "C:/Windows/system32/x.dll" }, "write"),
-        ctx,
-      ),
-    ).toBe("deny");
+    const outsideAbs =
+      process.platform === "win32" ? "C:/Windows/system32/x.dll" : "/etc/star_outside/x.dll";
+    expect(checkPermission("auto", req("write_file", { path: outsideAbs }, "write"), ctx)).toBe(
+      "deny",
+    );
   });
 
   it("denies outside read in auto mode", () => {
@@ -113,11 +113,15 @@ describe("path outside cwd", () => {
       checkPermission("auto", req("write_file", { path: "src/new-file.ts" }, "write"), ctx),
     ).toBe("allow");
     expect(
-      checkPermission("auto", req("write_file", { path: "E:/star_cli/dist/out.js" }, "write"), ctx),
+      checkPermission(
+        "auto",
+        req("write_file", { path: path.join(testCwd, "dist", "out.js") }, "write"),
+        ctx,
+      ),
     ).toBe("allow");
   });
 
-  it("compares drive letters case-insensitively", () => {
+  it.runIf(process.platform === "win32")("compares drive letters case-insensitively", () => {
     const upperCtx: PermissionContext = { cwd: "e:/star_cli" };
     expect(
       checkPermission(
@@ -131,7 +135,7 @@ describe("path outside cwd", () => {
     ).toBe("deny");
   });
 
-  it("normalizes backslashes and .. segments", () => {
+  it.runIf(process.platform === "win32")("normalizes backslashes and .. segments", () => {
     expect(
       checkPermission("auto", req("read_file", { path: "src\\..\\..\\escape.txt" }, "read"), ctx),
     ).toBe("deny");

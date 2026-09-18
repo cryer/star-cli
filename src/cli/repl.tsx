@@ -389,9 +389,9 @@ export function Repl({
 
   return (
     <Box flexDirection="column">
-      <MessageList key={epoch} messages={messages} />
+      <MessageList key={`messages-${epoch}`} messages={messages} />
       {cards.length > 0 && (
-        <Box key={cardsVersion} flexDirection="column">
+        <Box key={`cards-${cardsVersion}`} flexDirection="column">
           {cards.map((card) => (
             <ToolCallCard key={card.id} card={card} />
           ))}
@@ -407,7 +407,7 @@ export function Repl({
         onExit={exit}
       />
       <StatusBar
-        key={usageVersion}
+        key={`status-${usageVersion}`}
         model={modelName}
         permissionMode={permissionMode}
         tokens={usageRef.current.totalTokens}
