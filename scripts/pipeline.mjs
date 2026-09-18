@@ -24,7 +24,7 @@ function smokeConfig() {
     return { model: process.env.SMOKE_MODEL };
   }
   if (process.env.FASTAI_API_KEY) {
-    return { model: "gpt-5.5" };
+    return { model: "gpt6" };
   }
   if (process.env.OPENROUTER_API_KEY) {
     return { model: "nemotron" };
@@ -52,10 +52,11 @@ if (!smoke) {
   );
 } else {
   const prompt = "Reply with exactly: STAR_OK";
+  // no shell: cmd would split the prompt on spaces ("too many arguments")
   const result = spawnSync(
     "node",
     ["dist/main.js", "-m", smoke.model, "--permission-mode", "auto", "-p", prompt],
-    { encoding: "utf8", timeout: 90_000, shell: process.platform === "win32" },
+    { encoding: "utf8", timeout: 90_000 },
   );
   const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
   console.log(`\n=== Layer 4/4: llm smoke (model: ${smoke.model}) ===`);

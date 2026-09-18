@@ -135,8 +135,10 @@ program
     }
 
     if (opts.print) {
-      const code = await printMode(loop, opts.print);
-      process.exit(code);
+      // Let the loop drain instead of process.exit(): force-exiting on Windows
+      // can hit a libuv assertion while undici keep-alive handles are closing.
+      process.exitCode = await printMode(loop, opts.print);
+      return;
     }
 
     renderRepl(loop, {
