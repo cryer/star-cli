@@ -39,6 +39,7 @@ name = "openai"
 protocol = "openai-compatible"
 baseURL = "https://api.openai.com/v1"
 apiKeyEnv = "OPENAI_API_KEY"
+# protocol = "openai-responses"  # for relays exposing only /v1/responses
 
 [[models]]
 name = "gpt"

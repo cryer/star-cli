@@ -2,7 +2,9 @@ import { z } from "zod";
 
 export const ProviderConfigSchema = z.object({
   name: z.string(),
-  protocol: z.enum(["openai-compatible", "anthropic"]).default("openai-compatible"),
+  protocol: z
+    .enum(["openai-compatible", "anthropic", "openai-responses"])
+    .default("openai-compatible"),
   baseURL: z.string(),
   apiKeyEnv: z.string().optional(),
   apiKey: z.string().optional(),

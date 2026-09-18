@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
+import { createModel } from "../src/llm/provider";
 import { listModels, resolveModelConfig } from "../src/llm/registry";
 import { streamChat } from "../src/llm/stream";
 
@@ -51,6 +52,24 @@ describe("resolveModelConfig", () => {
 
   it("listModels returns all configured models", () => {
     expect(listModels(makeConfig()).map((m) => m.name)).toEqual(["fast", "smart"]);
+  });
+});
+
+describe("createModel", () => {
+  it("builds a model for an openai-responses provider", () => {
+    const model = createModel(
+      makeConfig({
+        providers: [
+          {
+            name: "p1",
+            protocol: "openai-responses",
+            baseURL: "https://relay.example.com/v1",
+            apiKey: "test-key",
+          },
+        ],
+      }),
+    );
+    expect(model.modelId).toBe("m-fast");
   });
 });
 

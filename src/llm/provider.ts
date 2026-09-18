@@ -1,4 +1,5 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
+import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModel } from "ai";
 import type { ProviderConfig, StarConfig } from "../config/schema";
@@ -40,5 +41,11 @@ export function createModel(config: StarConfig, modelName?: string): LanguageMod
         apiKey,
         headers: provider.headers,
       })(modelConfig.model);
+    case "openai-responses":
+      return createOpenAI({
+        baseURL: provider.baseURL,
+        apiKey,
+        headers: provider.headers,
+      }).responses(modelConfig.model);
   }
 }

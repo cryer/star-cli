@@ -141,6 +141,20 @@ model = "gpt-4o"
     expect(config.providers[0]?.protocol).toBe("openai-compatible");
     expect(config.models[0]?.model).toBe("gpt-4o");
   });
+
+  it("parses the openai-responses protocol from TOML", async () => {
+    writeFile(
+      globalConfigPath(),
+      `[[providers]]
+name = "relay"
+protocol = "openai-responses"
+baseURL = "https://relay.example.com/v1"
+apiKeyEnv = "TEST_STAR_API_KEY"
+`,
+    );
+    const config = await loadConfig(cwd);
+    expect(config.providers[0]?.protocol).toBe("openai-responses");
+  });
 });
 
 describe("resolveApiKey", () => {
