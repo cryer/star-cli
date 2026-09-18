@@ -20,6 +20,8 @@ function makeCtx(overrides: Partial<CommandContext> = {}) {
     showUsage: () =>
       "API usage this session: 3 requests, 1234 prompt + 567 completion = 1801 tokens",
     describeConfig: () => "config summary",
+    compactContext: async () => "compact result",
+    exportSession: async (p) => `exported ${p}`,
     ...overrides,
   };
   return { ctx, calls };
@@ -65,7 +67,7 @@ describe("CommandRegistry", () => {
 
   it("complete matches prefix with or without leading slash", () => {
     const registry = makeRegistry();
-    expect(registry.complete("/ex").map((c) => c.name)).toEqual(["exit"]);
+    expect(registry.complete("/ex").map((c) => c.name)).toEqual(["exit", "export"]);
     expect(registry.complete("re").map((c) => c.name)).toEqual(["resume"]);
     expect(registry.complete("").length).toBe(registry.list().length);
     expect(registry.complete("/zzz")).toEqual([]);

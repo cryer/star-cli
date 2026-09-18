@@ -83,6 +83,8 @@ star -r <sessionId>           resume a previous session
 | `/todo` | show TODO list |
 | `/cost` | show API token usage for this session |
 | `/config` | show resolved config |
+| `/compact` | compact conversation history to free up context |
+| `/export [path]` | export the current session to a Markdown file |
 | `/clear` | clear the screen |
 | `/exit` | quit |
 | `/q` | quit (alias of `/exit`) |

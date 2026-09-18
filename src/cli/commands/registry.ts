@@ -9,6 +9,8 @@ export interface CommandContext {
   showTodos(): Promise<string>;
   showUsage(): string;
   describeConfig(): string;
+  compactContext(): Promise<string>;
+  exportSession(path: string): Promise<string>;
 }
 
 export interface SlashCommand {

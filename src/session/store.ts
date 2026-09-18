@@ -131,6 +131,15 @@ export class SessionStore {
     await fs.writeFile(this.metaPath(), JSON.stringify(meta, null, 2));
   }
 
+  async replaceMessages(messages: CoreMessage[]): Promise<void> {
+    await this.ensureInitialized();
+    const content = messages.map((message) => JSON.stringify(message)).join("\n");
+    await fs.writeFile(this.messagesPath(), content ? `${content}\n` : "");
+    const meta = await this.meta();
+    meta.updatedAt = Date.now();
+    await fs.writeFile(this.metaPath(), JSON.stringify(meta, null, 2));
+  }
+
   async messages(): Promise<CoreMessage[]> {
     let raw: string;
     try {

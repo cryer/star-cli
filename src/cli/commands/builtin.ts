@@ -93,4 +93,22 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
       ctx.addSystemMessage(ctx.describeConfig());
     },
   });
+
+  registry.register({
+    name: "compact",
+    description: "Compact the conversation history to free up context",
+    usage: "/compact",
+    async run(_args, ctx) {
+      ctx.addSystemMessage(await ctx.compactContext());
+    },
+  });
+
+  registry.register({
+    name: "export",
+    description: "Export the current session to a Markdown file",
+    usage: "/export [path]",
+    async run(args, ctx) {
+      ctx.addSystemMessage(await ctx.exportSession(args));
+    },
+  });
 }

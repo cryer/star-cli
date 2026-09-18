@@ -11,6 +11,7 @@ import { SessionStore } from "../session/store";
 import { TodoStore, createDefaultRegistry } from "../tools";
 import { formatTodos } from "../tools/todo";
 import type { ChatBackend } from "./backend";
+import { compactSession, exportSession } from "./commands/actions";
 import { registerBuiltinCommands } from "./commands/builtin";
 import { type CommandContext, CommandRegistry, parseSlashCommand } from "./commands/registry";
 import { InputBox } from "./components/InputBox";
@@ -221,6 +222,29 @@ export function Repl({
         return formatTodos(store.list());
       },
       showUsage: () => formatUsage(usageRef.current),
+      compactContext: async () => {
+        let summaryModel = null;
+        try {
+          summaryModel = createModel(config, modelNameRef.current);
+        } catch {
+          summaryModel = null;
+        }
+        const result = await compactSession({
+          backend: backendRef.current,
+          sessionStore,
+          config,
+          model: summaryModel,
+        });
+        if (result.compacted && result.messages) {
+          const display = buildDisplayMessages(result.messages);
+          nextIdRef.current = display.length;
+          setMessages(display);
+          setEpoch((e) => e + 1);
+        }
+        return result.message;
+      },
+      exportSession: (arg) =>
+        exportSession({ backend: backendRef.current, sessionStore, cwd, arg }),
       describeConfig: () =>
         [
           `defaultModel: ${config.defaultModel || "(none)"}`,
@@ -234,7 +258,7 @@ export function Repl({
     const reg = new CommandRegistry();
     registerBuiltinCommands(reg);
     return Object.assign(reg, { ctx });
-  }, [pushMessage, exit, config, cwd, switchModel, resume]);
+  }, [pushMessage, exit, config, cwd, switchModel, resume, sessionStore]);
 
   const runStream = useCallback(
     async (input: string) => {
