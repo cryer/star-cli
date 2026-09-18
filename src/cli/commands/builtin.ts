@@ -33,6 +33,15 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
   });
 
   registry.register({
+    name: "q",
+    description: "Exit the application (alias of /exit)",
+    usage: "/q",
+    run(_args, ctx) {
+      ctx.exit();
+    },
+  });
+
+  registry.register({
     name: "model",
     description: "List available models or switch the current model",
     usage: "/model [name]",

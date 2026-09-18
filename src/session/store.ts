@@ -3,6 +3,13 @@ import path from "node:path";
 import { sessionsDir } from "../config/paths";
 import type { CoreMessage } from "../core/messages";
 
+export interface SessionUsage {
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
 export interface SessionMeta {
   id: string;
   title: string;
@@ -10,6 +17,7 @@ export interface SessionMeta {
   cwd: string;
   createdAt: number;
   updatedAt: number;
+  usage?: SessionUsage;
 }
 
 function generateId(now: Date): string {
@@ -37,6 +45,9 @@ export class SessionStore {
   readonly id: string;
   readonly dir: string;
 
+  private pendingMeta: { cwd: string; model: string; createdAt: number } | null = null;
+  private initialized = false;
+
   private constructor(id: string) {
     this.id = id;
     this.dir = path.join(sessionsDir(), id);
@@ -51,12 +62,8 @@ export class SessionStore {
   }
 
   static async create(cwd: string, model: string): Promise<SessionStore> {
-    const id = generateId(new Date());
-    const store = new SessionStore(id);
-    await fs.mkdir(store.dir, { recursive: true });
-    const now = Date.now();
-    const meta: SessionMeta = { id, title: "", model, cwd, createdAt: now, updatedAt: now };
-    await fs.writeFile(store.metaPath(), JSON.stringify(meta, null, 2));
+    const store = new SessionStore(generateId(new Date()));
+    store.pendingMeta = { cwd, model, createdAt: Date.now() };
     return store;
   }
 
@@ -66,13 +73,14 @@ export class SessionStore {
       const raw = await fs.readFile(store.metaPath(), "utf8");
       const meta = JSON.parse(raw) as SessionMeta;
       if (meta.id !== id) return null;
+      store.initialized = true;
       return store;
     } catch {
       return null;
     }
   }
 
-  static async list(): Promise<SessionMeta[]> {
+  static async list(cwd?: string): Promise<SessionMeta[]> {
     let entries: string[];
     try {
       entries = await fs.readdir(sessionsDir());
@@ -84,7 +92,7 @@ export class SessionStore {
       try {
         const raw = await fs.readFile(path.join(sessionsDir(), entry, "meta.json"), "utf8");
         const meta = JSON.parse(raw) as SessionMeta;
-        if (meta.id === entry) metas.push(meta);
+        if (meta.id === entry && (cwd === undefined || meta.cwd === cwd)) metas.push(meta);
       } catch {
         // 跳过损坏的会话目录
       }
@@ -92,7 +100,28 @@ export class SessionStore {
     return metas.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
+  private async ensureInitialized(): Promise<void> {
+    if (this.initialized) return;
+    const pending = this.pendingMeta;
+    if (!pending) {
+      this.initialized = true;
+      return;
+    }
+    await fs.mkdir(this.dir, { recursive: true });
+    const meta: SessionMeta = {
+      id: this.id,
+      title: "",
+      model: pending.model,
+      cwd: pending.cwd,
+      createdAt: pending.createdAt,
+      updatedAt: pending.createdAt,
+    };
+    await fs.writeFile(this.metaPath(), JSON.stringify(meta, null, 2));
+    this.initialized = true;
+  }
+
   async append(message: CoreMessage): Promise<void> {
+    await this.ensureInitialized();
     await fs.appendFile(this.messagesPath(), `${JSON.stringify(message)}\n`);
     const meta = await this.meta();
     meta.updatedAt = Date.now();
@@ -123,14 +152,37 @@ export class SessionStore {
   }
 
   async meta(): Promise<SessionMeta> {
+    await this.ensureInitialized();
     const raw = await fs.readFile(this.metaPath(), "utf8");
     return JSON.parse(raw) as SessionMeta;
   }
 
   async setTitle(title: string): Promise<void> {
+    await this.ensureInitialized();
     const meta = await this.meta();
     meta.title = title;
     meta.updatedAt = Date.now();
+    await fs.writeFile(this.metaPath(), JSON.stringify(meta, null, 2));
+  }
+
+  async addUsage(delta: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  }): Promise<void> {
+    await this.ensureInitialized();
+    const meta = await this.meta();
+    const usage = meta.usage ?? {
+      requests: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+    };
+    usage.requests += 1;
+    usage.promptTokens += delta.promptTokens;
+    usage.completionTokens += delta.completionTokens;
+    usage.totalTokens += delta.totalTokens;
+    meta.usage = usage;
     await fs.writeFile(this.metaPath(), JSON.stringify(meta, null, 2));
   }
 }

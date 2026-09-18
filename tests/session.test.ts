@@ -24,14 +24,22 @@ function readMeta(dir: string): SessionMeta {
 }
 
 describe("SessionStore", () => {
-  it("create/append/messages round-trips messages", async () => {
+  it("create writes nothing to disk until the first append", async () => {
     const store = await SessionStore.create("/tmp/work", "test-model");
     expect(store.dir).toBe(path.join(sessionsDir(), store.id));
+    expect(fs.existsSync(store.dir)).toBe(false);
+
+    await store.append({ role: "user", content: "你好" });
+    expect(fs.existsSync(store.dir)).toBe(true);
     expect(readMeta(store.dir)).toMatchObject({
       id: store.id,
       model: "test-model",
       cwd: "/tmp/work",
     });
+  });
+
+  it("create/append/messages round-trips messages", async () => {
+    const store = await SessionStore.create("/tmp/work", "test-model");
 
     const messages: CoreMessage[] = [
       { role: "user", content: "你好" },
@@ -41,6 +49,12 @@ describe("SessionStore", () => {
     for (const message of messages) await store.append(message);
 
     expect(await store.messages()).toEqual(messages);
+  });
+
+  it("initializes the meta title from the first user message on append", async () => {
+    const store = await SessionStore.create("/tmp/work", "test-model");
+    await store.append({ role: "user", content: "第一条消息" });
+    expect(readMeta(store.dir).title).toBe("第一条消息");
   });
 
   it("writes one JSON object per line in messages.jsonl", async () => {
@@ -61,6 +75,9 @@ describe("SessionStore", () => {
     const first = await SessionStore.create("/a", "m");
     const second = await SessionStore.create("/b", "m");
     const third = await SessionStore.create("/c", "m");
+    for (const store of [first, second, third]) {
+      await store.append({ role: "user", content: "hi" });
+    }
 
     const metaPath = (dir: string) => path.join(dir, "meta.json");
     const bump = (dir: string, updatedAt: number) => {
@@ -76,8 +93,20 @@ describe("SessionStore", () => {
     expect(metas.map((m) => m.id)).toEqual([second.id, third.id, first.id]);
   });
 
+  it("list(cwd) filters sessions by cwd", async () => {
+    const here = await SessionStore.create("/work/here", "m");
+    const there = await SessionStore.create("/work/there", "m");
+    await here.append({ role: "user", content: "hi" });
+    await there.append({ role: "user", content: "hi" });
+
+    const metas = await SessionStore.list("/work/here");
+    expect(metas.map((m) => m.id)).toEqual([here.id]);
+    expect(await SessionStore.list("/work/nowhere")).toEqual([]);
+  });
+
   it("skips corrupt directories in list", async () => {
     const good = await SessionStore.create("/a", "m");
+    await good.append({ role: "user", content: "hi" });
     fs.mkdirSync(path.join(sessionsDir(), "broken"), { recursive: true });
     fs.writeFileSync(path.join(sessionsDir(), "broken", "meta.json"), "{not json");
 
@@ -89,6 +118,8 @@ describe("SessionStore", () => {
   it("open returns null for a missing session", async () => {
     expect(await SessionStore.open("20250101120000-nope00")).toBeNull();
     const store = await SessionStore.create("/a", "m");
+    expect(await SessionStore.open(store.id)).toBeNull();
+    await store.append({ role: "user", content: "hi" });
     expect((await SessionStore.open(store.id))?.id).toBe(store.id);
   });
 
@@ -118,6 +149,40 @@ describe("SessionStore", () => {
     await store.append({ role: "user", content: "原始标题" });
     await store.setTitle("新标题");
     expect((await store.meta()).title).toBe("新标题");
+  });
+
+  it("addUsage accumulates across calls and round-trips through open", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.addUsage({ promptTokens: 10, completionTokens: 5, totalTokens: 15 });
+    await store.append({ role: "user", content: "hi" });
+    await store.addUsage({ promptTokens: 20, completionTokens: 7, totalTokens: 27 });
+
+    const reopened = await SessionStore.open(store.id);
+    expect((await reopened?.meta())?.usage).toEqual({
+      requests: 2,
+      promptTokens: 30,
+      completionTokens: 12,
+      totalTokens: 42,
+    });
+  });
+
+  it("loads metas without a usage field", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "user", content: "hi" });
+    const meta = readMeta(store.dir);
+    meta.usage = undefined;
+    fs.writeFileSync(path.join(store.dir, "meta.json"), JSON.stringify(meta));
+
+    const reopened = await SessionStore.open(store.id);
+    expect((await reopened?.meta())?.usage).toBeUndefined();
+
+    await reopened?.addUsage({ promptTokens: 1, completionTokens: 2, totalTokens: 3 });
+    expect((await reopened?.meta())?.usage).toEqual({
+      requests: 1,
+      promptTokens: 1,
+      completionTokens: 2,
+      totalTokens: 3,
+    });
   });
 });
 

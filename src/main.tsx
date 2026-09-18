@@ -6,7 +6,7 @@ import type { StarConfig } from "./config/schema";
 import type { CoreMessage } from "./core/messages";
 import { createModel } from "./llm/provider";
 import { resumeSession } from "./session/resume";
-import { SessionStore } from "./session/store";
+import { type SessionMeta, SessionStore } from "./session/store";
 import { createDefaultRegistry } from "./tools";
 
 const SYSTEM_PROMPT = `You are Star CLI, an AI coding agent running in the user's terminal.
@@ -111,16 +111,15 @@ program
     }
 
     let sessionStore: SessionStore | null = null;
-    let resumedMessages: CoreMessage[] | null = null;
+    let resumed: { meta: SessionMeta; messages: CoreMessage[] } | null = null;
     if (opts.resume) {
-      const resumed = await resumeSession(opts.resume);
+      resumed = await resumeSession(opts.resume);
       if (!resumed) {
         console.error(`Session not found: ${opts.resume}`);
         process.exit(1);
       }
-      resumedMessages = resumed.messages;
       sessionStore = await SessionStore.open(opts.resume);
-    } else {
+    } else if (!opts.print) {
       sessionStore = await SessionStore.create(cwd, modelName);
     }
 
@@ -131,8 +130,8 @@ program
       console.error(error instanceof Error ? error.message : String(error));
       process.exit(1);
     }
-    if (resumedMessages) {
-      await loop.loadMessages(resumedMessages);
+    if (resumed) {
+      await loop.loadMessages(resumed.messages);
     }
 
     if (opts.print) {
@@ -146,6 +145,8 @@ program
       config,
       cwd,
       sessionStore,
+      initialMessages: resumed?.messages,
+      initialUsage: resumed?.meta.usage,
     });
   });
 

@@ -19,11 +19,11 @@ import { type PermissionDecision, PermissionPrompt } from "./components/Permissi
 import { StatusBar } from "./components/StatusBar";
 import { StreamingMessage } from "./components/StreamingMessage";
 import { ToolCallCard, type ToolCardData, formatToolCard } from "./components/ToolCallCard";
-import { summarizeArgs } from "./format";
+import { buildDisplayMessages, summarizeArgs } from "./format";
 
 const FLUSH_INTERVAL_MS = 30;
 
-interface UsageStats {
+export interface UsageStats {
   requests: number;
   promptTokens: number;
   completionTokens: number;
@@ -43,18 +43,6 @@ interface PendingPermission {
   resolve: (approved: boolean) => void;
 }
 
-function coreMessageText(message: CoreMessage): string {
-  const content = message.content;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .filter((part) => part.type === "text")
-      .map((part) => ("text" in part ? part.text : ""))
-      .join(" ");
-  }
-  return "";
-}
-
 interface ReplProps {
   backend: ChatBackend;
   model: string;
@@ -62,11 +50,24 @@ interface ReplProps {
   config: StarConfig;
   cwd: string;
   sessionStore: SessionStore | null;
+  initialMessages?: CoreMessage[];
+  initialUsage?: UsageStats;
 }
 
-export function Repl({ backend, model, permissionMode, config, cwd, sessionStore }: ReplProps) {
+export function Repl({
+  backend,
+  model,
+  permissionMode,
+  config,
+  cwd,
+  sessionStore,
+  initialMessages,
+  initialUsage,
+}: ReplProps) {
   const { exit } = useApp();
-  const [messages, setMessages] = useState<DisplayMessage[]>([]);
+  const [initialDisplay] = useState(() => buildDisplayMessages(initialMessages ?? []));
+  const [messages, setMessages] = useState<DisplayMessage[]>(initialDisplay);
+  const [epoch, setEpoch] = useState(0);
   const [streamingText, setStreamingText] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [usageVersion, setUsageVersion] = useState(0);
@@ -75,7 +76,7 @@ export function Repl({ backend, model, permissionMode, config, cwd, sessionStore
   const [cardsVersion, setCardsVersion] = useState(0);
 
   const backendRef = useRef<ChatBackend>(backend);
-  const nextIdRef = useRef(0);
+  const nextIdRef = useRef(initialDisplay.length);
   const abortRef = useRef<AbortController | null>(null);
   const streamedRef = useRef("");
   const flushTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -83,7 +84,7 @@ export function Repl({ backend, model, permissionMode, config, cwd, sessionStore
   const pendingRef = useRef<PendingPermission | null>(null);
   const alwaysAllowedRef = useRef(new Set<string>());
   const modelNameRef = useRef(model);
-  const usageRef = useRef<UsageStats>(emptyUsage());
+  const usageRef = useRef<UsageStats>(initialUsage ? { ...initialUsage } : emptyUsage());
 
   const pushMessage = useCallback((role: DisplayMessage["role"], text: string) => {
     setMessages((prev) => [...prev, { id: nextIdRef.current++, role, text }]);
@@ -180,35 +181,22 @@ export function Repl({ backend, model, permissionMode, config, cwd, sessionStore
       return `Session not found: ${id}`;
     }
     await current.loadMessages(resumed.messages);
-    const display: DisplayMessage[] = [];
-    let collapsed = 0;
-    for (const message of resumed.messages) {
-      if (message.role === "user" || message.role === "assistant") {
-        const text = coreMessageText(message);
-        if (text) {
-          display.push({ id: nextIdRef.current++, role: message.role, text });
-        } else {
-          collapsed++;
-        }
-      } else if (message.role === "tool") {
-        collapsed++;
-      }
-    }
-    if (collapsed > 0) {
-      display.push({
-        id: nextIdRef.current++,
-        role: "system",
-        text: `已恢复 ${collapsed} 条历史消息`,
-      });
-    }
+    const display = buildDisplayMessages(resumed.messages);
+    nextIdRef.current = display.length;
     setMessages(display);
+    setEpoch((e) => e + 1);
+    usageRef.current = resumed.meta.usage ? { ...resumed.meta.usage } : emptyUsage();
+    setUsageVersion((v) => v + 1);
     return `Resumed session ${id} (${resumed.messages.length} messages).`;
   }, []);
 
   const registry = useMemo(() => {
     const ctx: CommandContext = {
       addSystemMessage: (text) => pushMessage("system", text),
-      clearMessages: () => setMessages([]),
+      clearMessages: () => {
+        setMessages([]);
+        setEpoch((e) => e + 1);
+      },
       exit: () => exit(),
       listModels: () => {
         const models = listModels(config);
@@ -221,8 +209,10 @@ export function Repl({ backend, model, permissionMode, config, cwd, sessionStore
       },
       switchModel,
       listSessions: async () => {
-        const metas = await SessionStore.list();
-        return metas.length === 0 ? "No sessions found." : formatSessionList(metas);
+        const metas = await SessionStore.list(cwd);
+        return metas.length === 0
+          ? "No sessions found for this directory."
+          : formatSessionList(metas);
       },
       resumeSession: resume,
       showTodos: async () => {
@@ -283,6 +273,7 @@ export function Repl({ backend, model, permissionMode, config, cwd, sessionStore
               usage.completionTokens += event.usage.completionTokens;
               usage.totalTokens += event.usage.totalTokens;
               setUsageVersion((v) => v + 1);
+              sessionStore?.addUsage(event.usage).catch(() => {});
             }
           } else if (event.type === "error") {
             pushMessage("system", `Error: ${event.error.message}`);
@@ -320,7 +311,7 @@ export function Repl({ backend, model, permissionMode, config, cwd, sessionStore
         }
       }
     },
-    [pushMessage, setPendingPermission],
+    [pushMessage, setPendingPermission, sessionStore],
   );
 
   const handleSubmit = useCallback(
@@ -345,7 +336,7 @@ export function Repl({ backend, model, permissionMode, config, cwd, sessionStore
 
   return (
     <Box flexDirection="column">
-      <MessageList messages={messages} />
+      <MessageList key={epoch} messages={messages} />
       {cards.length > 0 && (
         <Box key={cardsVersion} flexDirection="column">
           {cards.map((card) => (
@@ -378,6 +369,8 @@ export interface ReplOptions {
   config: StarConfig;
   cwd: string;
   sessionStore: SessionStore | null;
+  initialMessages?: CoreMessage[];
+  initialUsage?: UsageStats;
 }
 
 export function renderRepl(backend: ChatBackend, opts: ReplOptions) {
@@ -389,6 +382,8 @@ export function renderRepl(backend: ChatBackend, opts: ReplOptions) {
       config={opts.config}
       cwd={opts.cwd}
       sessionStore={opts.sessionStore}
+      initialMessages={opts.initialMessages}
+      initialUsage={opts.initialUsage}
     />,
   );
 }

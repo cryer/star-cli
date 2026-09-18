@@ -82,6 +82,7 @@ star -r <sessionId>           resume a previous session
 | `/config` | show resolved config |
 | `/clear` | clear the screen |
 | `/exit` | quit |
+| `/q` | quit (alias of `/exit`) |
 
 Keys: `ESC` / `Ctrl+C` interrupts the current stream; on a permission prompt: `y` allow, `n` deny, `a` always allow this tool for the session. Input editing: arrow keys move the cursor, `Ctrl+A`/`Ctrl+E` jump to start/end, `Ctrl+U`/`Ctrl+K` delete before/after the cursor, `Ctrl+W` deletes the previous word, up/down recall history.
 
@@ -91,7 +92,7 @@ Keys: `ESC` / `Ctrl+C` interrupts the current stream; on a permission prompt: `y
 
 ## Sessions
 
-Sessions persist under `~/.star-cli/sessions/<id>/` (messages as JSONL + `meta.json`). List with `/resume`, resume with `/resume <id>` or `star -r <id>`.
+Sessions persist under `~/.star-cli/sessions/<id>/` (messages as JSONL + `meta.json`). List with `/resume` (only sessions started in the current directory are listed), resume with `/resume <id>` or `star -r <id>`. Sessions are created lazily — opening the REPL and exiting without chatting leaves nothing on disk, and print mode (`-p`) doesn't create a session unless resuming with `-r`. Token usage is accumulated in `meta.json`, so `/cost` reflects resumed history too.
 
 ## Development
 

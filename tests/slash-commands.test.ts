@@ -77,12 +77,14 @@ describe("CommandRegistry", () => {
 
     await registry.get("clear")?.run("", ctx);
     await registry.get("exit")?.run("", ctx);
+    await registry.get("q")?.run("", ctx);
     await registry.get("todo")?.run("", ctx);
     await registry.get("cost")?.run("", ctx);
     await registry.get("config")?.run("", ctx);
 
     expect(calls).toEqual([
       { type: "clear" },
+      { type: "exit" },
       { type: "exit" },
       { type: "system", text: "todos" },
       {
@@ -91,6 +93,15 @@ describe("CommandRegistry", () => {
       },
       { type: "system", text: "config summary" },
     ]);
+  });
+
+  it("/q is registered as an alias of /exit", async () => {
+    const registry = makeRegistry();
+    const q = registry.get("q");
+    expect(q?.description).toContain("exit");
+    const { ctx, calls } = makeCtx();
+    await q?.run("", ctx);
+    expect(calls).toEqual([{ type: "exit" }]);
   });
 
   it("/help lists all commands", async () => {
