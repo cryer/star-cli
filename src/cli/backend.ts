@@ -1,8 +1,13 @@
 import type { StreamEvent } from "../core/events";
 import type { PermissionRequest } from "../permissions/types";
 
+export interface StreamOptions {
+  /** Text persisted to the session store instead of `input` (e.g. the raw prompt before @mention injection). */
+  persistAs?: string;
+}
+
 export interface ChatBackend {
-  stream(input: string, signal: AbortSignal): AsyncGenerator<StreamEvent>;
+  stream(input: string, signal: AbortSignal, opts?: StreamOptions): AsyncGenerator<StreamEvent>;
   confirmHandler?: (req: PermissionRequest) => Promise<boolean>;
 }
 

@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { AgentLoop } from "./agent/loop";
+import { resolveMentions } from "./cli/mentions";
 import { renderRepl } from "./cli/repl";
 import { loadConfigSync } from "./config/loader";
 import type { StarConfig } from "./config/schema";
@@ -32,15 +33,24 @@ async function createLoop(
   });
 }
 
-async function printMode(loop: AgentLoop, prompt: string): Promise<number> {
+async function printMode(loop: AgentLoop, prompt: string, cwd: string): Promise<number> {
   const controller = new AbortController();
   process.on("SIGINT", () => controller.abort());
+  const resolved = await resolveMentions(prompt, cwd);
+  if (resolved.attached.length > 0) {
+    process.stderr.write(`[attached] ${resolved.attached.join(", ")}\n`);
+  }
+  for (const skip of resolved.skipped) {
+    process.stderr.write(`[skipped] @${skip.path}: ${skip.reason}\n`);
+  }
   let requests = 0;
   let promptTokens = 0;
   let completionTokens = 0;
   let totalTokens = 0;
   let exitCode = 0;
-  for await (const event of loop.stream(prompt, controller.signal)) {
+  for await (const event of loop.stream(resolved.input, controller.signal, {
+    persistAs: prompt,
+  })) {
     switch (event.type) {
       case "text-delta":
         process.stdout.write(event.text);
@@ -137,7 +147,7 @@ program
     if (opts.print) {
       // Let the loop drain instead of process.exit(): force-exiting on Windows
       // can hit a libuv assertion while undici keep-alive handles are closing.
-      process.exitCode = await printMode(loop, opts.print);
+      process.exitCode = await printMode(loop, opts.print, cwd);
       return;
     }
 

@@ -49,10 +49,16 @@ export class AgentLoop {
     await this.opts.sessionStore?.append(message);
   }
 
-  async *stream(input: string, signal: AbortSignal): AsyncGenerator<StreamEvent> {
+  async *stream(
+    input: string,
+    signal: AbortSignal,
+    opts?: { persistAs?: string },
+  ): AsyncGenerator<StreamEvent> {
     const userMessage: CoreMessage = { role: "user", content: input };
     this.messages.push(userMessage);
-    await this.persist(userMessage);
+    await this.persist(
+      opts?.persistAs !== undefined ? { role: "user", content: opts.persistAs } : userMessage,
+    );
 
     const { config, registry, cwd } = this.opts;
     const aiTools = this.buildAiTools();

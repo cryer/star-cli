@@ -4,6 +4,7 @@ export interface DisplayMessage {
   id: number;
   role: "user" | "assistant" | "system" | "tool";
   text: string;
+  note?: string;
 }
 
 const roleStyles: Record<DisplayMessage["role"], { label: string; color: string }> = {
@@ -24,6 +25,7 @@ export function MessageList({ messages }: { messages: DisplayMessage[] }) {
               {style.label}
             </Text>
             <Text color={style.color}>{message.text}</Text>
+            {message.note && <Text dimColor>{message.note}</Text>}
           </Box>
         );
       }}

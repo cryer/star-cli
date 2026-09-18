@@ -24,6 +24,7 @@ import { StatusBar } from "./components/StatusBar";
 import { StreamingMessage } from "./components/StreamingMessage";
 import { ToolCallCard, type ToolCardData, formatToolCard } from "./components/ToolCallCard";
 import { buildDisplayMessages, summarizeArgs } from "./format";
+import { resolveMentions } from "./mentions";
 
 const FLUSH_INTERVAL_MS = 30;
 
@@ -90,8 +91,8 @@ export function Repl({
   const modelNameRef = useRef(model);
   const usageRef = useRef<UsageStats>(initialUsage ? { ...initialUsage } : emptyUsage());
 
-  const pushMessage = useCallback((role: DisplayMessage["role"], text: string) => {
-    setMessages((prev) => [...prev, { id: nextIdRef.current++, role, text }]);
+  const pushMessage = useCallback((role: DisplayMessage["role"], text: string, note?: string) => {
+    setMessages((prev) => [...prev, { id: nextIdRef.current++, role, text, note }]);
   }, []);
 
   const setPendingPermission = useCallback((p: PendingPermission | null) => {
@@ -280,7 +281,15 @@ export function Repl({
 
   const runStream = useCallback(
     async (input: string) => {
-      pushMessage("user", input);
+      const resolved = await resolveMentions(input, cwd);
+      pushMessage(
+        "user",
+        input,
+        resolved.attached.length > 0 ? `attached: ${resolved.attached.join(", ")}` : undefined,
+      );
+      for (const skip of resolved.skipped) {
+        pushMessage("system", `Skipped @${skip.path}: ${skip.reason}`);
+      }
       const controller = new AbortController();
       abortRef.current = controller;
       streamedRef.current = "";
@@ -290,7 +299,9 @@ export function Repl({
         setStreamingText(streamedRef.current);
       }, FLUSH_INTERVAL_MS);
       try {
-        for await (const event of backendRef.current.stream(input, controller.signal)) {
+        for await (const event of backendRef.current.stream(resolved.input, controller.signal, {
+          persistAs: input,
+        })) {
           if (event.type === "text-delta") {
             streamedRef.current += event.text;
           } else if (event.type === "tool-call") {
@@ -353,7 +364,7 @@ export function Repl({
         }
       }
     },
-    [pushMessage, setPendingPermission, sessionStore],
+    [pushMessage, setPendingPermission, sessionStore, cwd],
   );
 
   const handleSubmit = useCallback(
