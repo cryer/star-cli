@@ -1,10 +1,12 @@
 import { Box, render, useApp, useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentLoop } from "../agent/loop";
+import { addAllowRule } from "../config/save";
 import type { StarConfig } from "../config/schema";
 import type { CoreMessage } from "../core/messages";
 import { createModel } from "../llm/provider";
 import { listModels } from "../llm/registry";
+import { buildAllowRule, isAllowedByRules } from "../permissions/allow";
 import type { PermissionRequest } from "../permissions/types";
 import { formatSessionList, resumeSession } from "../session/resume";
 import { SessionStore } from "../session/store";
@@ -99,7 +101,7 @@ export function Repl({
   const attachConfirmHandler = useCallback(
     (target: ChatBackend) => {
       target.confirmHandler = (req) => {
-        if (alwaysAllowedRef.current.has(req.toolName)) {
+        if (isAllowedByRules([...alwaysAllowedRef.current], req)) {
           return Promise.resolve(true);
         }
         return new Promise<boolean>((resolve) => {
@@ -137,12 +139,25 @@ export function Repl({
       const p = pendingRef.current;
       if (!p) return;
       if (decision === "always") {
-        alwaysAllowedRef.current.add(p.request.toolName);
+        const rule = buildAllowRule(p.request);
+        alwaysAllowedRef.current.add(rule);
+        void addAllowRule(rule)
+          .then((added) => {
+            pushMessage(
+              "system",
+              added
+                ? `Always allow ${rule} — saved to config`
+                : `Always allow ${rule} (already in config)`,
+            );
+          })
+          .catch(() => {
+            pushMessage("system", `Always allow ${rule} for this session (failed to save)`);
+          });
       }
       setPendingPermission(null);
       p.resolve(decision !== "no");
     },
-    [setPendingPermission],
+    [setPendingPermission, pushMessage],
   );
 
   const switchModel = useCallback(
@@ -253,6 +268,7 @@ export function Repl({
           `models (${config.models.length}): ${config.models.map((m) => m.name).join(", ") || "(none)"}`,
           `maxSteps: ${config.maxSteps}`,
           `contextMaxTokens: ${config.contextMaxTokens}`,
+          `permissions.allow (${config.permissions.allow.length}): ${config.permissions.allow.join(", ") || "(none)"}`,
         ].join("\n"),
     };
     const reg = new CommandRegistry();

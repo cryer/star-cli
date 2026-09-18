@@ -192,6 +192,7 @@ export class AgentLoop {
       config.permissionMode,
       { toolName: call.name, args: call.args, level: tool.permission },
       { cwd },
+      config.permissions.allow,
     );
 
     if (decision === "deny") {

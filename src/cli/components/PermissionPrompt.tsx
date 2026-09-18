@@ -23,7 +23,7 @@ export function PermissionPrompt({ request, onDecision }: PermissionPromptProps)
         Permission required: {request.toolName} ({request.level})
       </Text>
       <Text>{summarizeArgs(request.args)}</Text>
-      <Text>[y] allow [n] deny [a] always</Text>
+      <Text>[y] allow [n] deny [a] always (saved to config)</Text>
     </Box>
   );
 }

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { isAllowedByRules } from "./allow";
 import type {
   PermissionContext,
   PermissionDecision,
@@ -53,6 +54,7 @@ export function checkPermission(
   mode: PermissionMode,
   req: PermissionRequest,
   ctx: PermissionContext,
+  allowRules: readonly string[] = [],
 ): PermissionDecision {
   const command = getStringArg(req.args, "command");
   const filePath = getStringArg(req.args, "path");
@@ -85,6 +87,9 @@ export function checkPermission(
   }
   if (mode === "readonly") {
     return req.level === "read" ? "allow" : "deny";
+  }
+  if (isAllowedByRules(allowRules, req)) {
+    return "allow";
   }
   return req.level === "read" ? "allow" : "ask";
 }

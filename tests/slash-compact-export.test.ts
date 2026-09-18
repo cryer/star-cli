@@ -35,6 +35,7 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     maxSteps: 50,
     contextMaxTokens: 90,
     contextCompaction: "summary",
+    permissions: { allow: [] },
     ...overrides,
   };
 }

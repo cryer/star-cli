@@ -55,6 +55,7 @@ describe("loadConfig", () => {
       maxSteps: 50,
       contextMaxTokens: 100_000,
       contextCompaction: "summary",
+      permissions: { allow: [] },
     });
   });
 

@@ -18,6 +18,10 @@ export const ModelConfigSchema = z.object({
   maxTokens: z.number().int().positive().optional(),
 });
 
+export const PermissionsConfigSchema = z.object({
+  allow: z.array(z.string()).default([]),
+});
+
 export const ConfigSchema = z.object({
   defaultModel: z.string().default(""),
   permissionMode: z.enum(["auto", "ask", "readonly"]).default("ask"),
@@ -26,10 +30,12 @@ export const ConfigSchema = z.object({
   maxSteps: z.number().int().positive().default(50),
   contextMaxTokens: z.number().int().positive().default(100_000),
   contextCompaction: z.enum(["summary", "truncate"]).default("summary"),
+  permissions: PermissionsConfigSchema.default({ allow: [] }),
 });
 
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
+export type PermissionsConfig = z.infer<typeof PermissionsConfigSchema>;
 export type StarConfig = z.infer<typeof ConfigSchema>;
 
 export interface CliOverrides {
