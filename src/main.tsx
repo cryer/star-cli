@@ -10,6 +10,7 @@ import { createModel } from "./llm/provider";
 import { resumeSession } from "./session/resume";
 import { type SessionMeta, SessionStore } from "./session/store";
 import { createDefaultRegistry } from "./tools";
+import { VERSION } from "./version";
 
 const SYSTEM_PROMPT = `You are Star CLI, an AI coding agent running in the user's terminal.
 You help with software engineering tasks: reading, writing and editing code, running shell commands, and managing todos.
@@ -105,7 +106,7 @@ const program = new Command();
 program
   .name("star")
   .description("Star CLI — an AI agent command-line interface")
-  .version("0.1.0")
+  .version(VERSION)
   .option("-m, --model <model>", "model to use")
   .option("--permission-mode <mode>", "permission mode: auto | ask | readonly")
   .option("-p, --print <prompt>", "non-interactive print mode")

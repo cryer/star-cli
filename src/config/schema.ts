@@ -16,6 +16,8 @@ export const ModelConfigSchema = z.object({
   provider: z.string(),
   model: z.string(),
   maxTokens: z.number().int().positive().optional(),
+  promptPrice: z.number().nonnegative().optional(),
+  completionPrice: z.number().nonnegative().optional(),
 });
 
 export const PermissionsConfigSchema = z.object({

@@ -13,6 +13,7 @@ import { SessionStore } from "../session/store";
 import { TodoStore, createDefaultRegistry } from "../tools";
 import { undoLastSnapshot } from "../tools/fs/snapshots";
 import { formatTodos } from "../tools/todo";
+import { VERSION } from "../version";
 import type { ChatBackend } from "./backend";
 import { compactSession, exportSession } from "./commands/actions";
 import { registerBuiltinCommands } from "./commands/builtin";
@@ -23,9 +24,11 @@ import { type PermissionDecision, PermissionPrompt } from "./components/Permissi
 import { StatusBar } from "./components/StatusBar";
 import { StreamingMessage } from "./components/StreamingMessage";
 import { ToolCallCard, type ToolCardData, formatToolCard } from "./components/ToolCallCard";
+import { estimateCost } from "./cost";
 import { type DiffPreview, generateDiffPreview } from "./diff-preview";
 import { buildDisplayMessages, summarizeArgs } from "./format";
 import { resolveMentions } from "./mentions";
+import { checkForUpdate } from "./update-check";
 
 const FLUSH_INTERVAL_MS = 30;
 
@@ -125,6 +128,13 @@ export function Repl({
       pendingRef.current?.resolve(false);
     };
   }, [attachConfirmHandler]);
+
+  useEffect(() => {
+    if (process.env.STAR_NO_UPDATE_CHECK === "1") return;
+    void checkForUpdate(VERSION).then((message) => {
+      if (message) pushMessage("system", message);
+    });
+  }, [pushMessage]);
 
   const interrupt = useCallback(() => {
     abortRef.current?.abort();
@@ -241,7 +251,10 @@ export function Repl({
         await store.load(cwd);
         return formatTodos(store.list());
       },
-      showUsage: () => formatUsage(usageRef.current),
+      showUsage: () => {
+        const modelConfig = config.models.find((m) => m.name === modelNameRef.current);
+        return `${formatUsage(usageRef.current)}\n${estimateCost(usageRef.current, modelNameRef.current, modelConfig)}`;
+      },
       compactContext: async () => {
         let summaryModel = null;
         try {
