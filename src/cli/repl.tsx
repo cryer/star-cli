@@ -23,6 +23,7 @@ import { type PermissionDecision, PermissionPrompt } from "./components/Permissi
 import { StatusBar } from "./components/StatusBar";
 import { StreamingMessage } from "./components/StreamingMessage";
 import { ToolCallCard, type ToolCardData, formatToolCard } from "./components/ToolCallCard";
+import { type DiffPreview, generateDiffPreview } from "./diff-preview";
 import { buildDisplayMessages, summarizeArgs } from "./format";
 import { resolveMentions } from "./mentions";
 
@@ -45,6 +46,7 @@ function formatUsage(usage: UsageStats): string {
 
 interface PendingPermission {
   request: PermissionRequest;
+  preview: DiffPreview | null;
   resolve: (approved: boolean) => void;
 }
 
@@ -102,16 +104,17 @@ export function Repl({
 
   const attachConfirmHandler = useCallback(
     (target: ChatBackend) => {
-      target.confirmHandler = (req) => {
+      target.confirmHandler = async (req) => {
         if (isAllowedByRules([...alwaysAllowedRef.current], req)) {
-          return Promise.resolve(true);
+          return true;
         }
+        const preview = await generateDiffPreview(req.toolName, req.args, cwd).catch(() => null);
         return new Promise<boolean>((resolve) => {
-          setPendingPermission({ request: req, resolve });
+          setPendingPermission({ request: req, preview, resolve });
         });
       };
     },
-    [setPendingPermission],
+    [setPendingPermission, cwd],
   );
 
   useEffect(() => {
@@ -403,7 +406,13 @@ export function Repl({
         </Box>
       )}
       {streamingText !== null && <StreamingMessage text={streamingText} />}
-      {pending && <PermissionPrompt request={pending.request} onDecision={handleDecision} />}
+      {pending && (
+        <PermissionPrompt
+          request={pending.request}
+          preview={pending.preview}
+          onDecision={handleDecision}
+        />
+      )}
       <InputBox
         isStreaming={isStreaming}
         disabled={pending !== null}
