@@ -24,6 +24,7 @@ function makeCtx(overrides: Partial<CommandContext> = {}) {
     compactContext: async () => "compact result",
     exportSession: async (p) => `exported ${p}`,
     undo: async () => "undo result",
+    permissionMode: async (args) => (args ? `mode set ${args}` : "mode list"),
     initProject: async (args) => `init ${args}`,
     runDoctor: async () => "doctor report",
     ...overrides,
@@ -108,6 +109,19 @@ describe("CommandRegistry", () => {
     const { ctx, calls } = makeCtx();
     await q?.run("", ctx);
     expect(calls).toEqual([{ type: "exit" }]);
+  });
+
+  it("/permission shows the mode list without args and sets a mode with args", async () => {
+    const registry = makeRegistry();
+    const { ctx, calls } = makeCtx();
+
+    await registry.get("permission")?.run("", ctx);
+    await registry.get("permission")?.run("yolo", ctx);
+
+    expect(calls).toEqual([
+      { type: "system", text: "mode list" },
+      { type: "system", text: "mode set yolo" },
+    ]);
   });
 
   it("/help lists all commands", async () => {

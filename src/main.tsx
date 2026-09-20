@@ -121,7 +121,7 @@ program
   .description("Star CLI — an AI agent command-line interface")
   .version(VERSION)
   .option("-m, --model <model>", "model to use")
-  .option("--permission-mode <mode>", "permission mode: auto | ask | readonly")
+  .option("--permission-mode <mode>", "permission mode: ask | auto | readonly | yolo")
   .option("-p, --print <prompt>", "non-interactive print mode")
   .option("--json", "output NDJSON events on stdout (print mode only)")
   .option("-r, --resume <sessionId>", "resume a previous session")

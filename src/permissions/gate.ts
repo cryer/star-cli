@@ -60,6 +60,11 @@ export function checkPermission(
   ctx: PermissionContext,
   allowRules: readonly string[] = [],
 ): PermissionDecision {
+  // yolo bypasses every check, including the hard safety rules below.
+  if (mode === "yolo") {
+    return "allow";
+  }
+
   const command = getStringArg(req.args, "command");
   const filePath = getStringArg(req.args, "path");
 

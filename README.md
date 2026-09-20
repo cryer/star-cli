@@ -37,7 +37,7 @@ Config file: `~/.star-cli/config.toml` (project-level override: `.star/config.to
 
 ```toml
 defaultModel = "gpt"
-permissionMode = "ask"   # auto | ask | readonly
+permissionMode = "ask"   # ask | auto | readonly | yolo
 contextMaxTokens = 100000
 contextCompaction = "summary"   # summary | truncate — how over-budget history is compacted
 
@@ -81,7 +81,7 @@ star                          start the interactive REPL
 star -p "prompt"              non-interactive print mode (pipe-friendly)
 star -p "prompt" --json       NDJSON event stream on stdout (text/tool/usage/error lines)
 star -m gpt                   pick a model
-star --permission-mode auto   auto | ask | readonly
+star --permission-mode auto   ask | auto | readonly | yolo
 star -r <sessionId>           resume a previous session
 ```
 
@@ -96,6 +96,7 @@ star -r <sessionId>           resume a previous session
 | `/tasks` | list background tasks (id, status, runtime, exit code) |
 | `/cost` | show API token usage and estimated $ cost (needs per-model pricing in config) |
 | `/config` | show resolved config |
+| `/permission [mode]` | show / set the global permission mode (`ask`, `auto`, `readonly`, `yolo`) — saved to config |
 | `/compact` | compact conversation history to free up context |
 | `/export [path]` | export the current session to a Markdown file |
 | `/undo` | undo the last conversation turn: revert its file changes (write_file/edit_file) and retract its messages — earlier turns are never touched |
@@ -146,7 +147,9 @@ Missing, binary, oversized (>100KB), or sensitive files (`.env`, private keys) a
 
 ## Built-in tools
 
-`read_file`, `write_file`, `edit_file`, `glob`, `grep`, `bash`, `web_fetch`, `web_search` (DuckDuckGo, no API key needed), `todo_read`, `todo_write`, `task_list`, `task_output`, `task_kill` — each declares a permission level (`read` / `write` / `exec`) enforced by the permission gate. Hard safety rules (dangerous shell commands, paths outside the working directory, secret files like `.env` / private keys) are denied in every mode and cannot be overridden by allow-rules.
+`read_file`, `write_file`, `edit_file`, `glob`, `grep`, `bash`, `web_fetch`, `web_search` (DuckDuckGo, no API key needed), `todo_read`, `todo_write`, `task_list`, `task_output`, `task_kill` — each declares a permission level (`read` / `write` / `exec`) enforced by the permission gate. Hard safety rules (dangerous shell commands, paths outside the working directory, secret files like `.env` / private keys) are denied in `ask` / `auto` / `readonly` and cannot be overridden by allow-rules.
+
+Permission modes: `ask` (reads allowed, writes/exec ask) · `auto` (everything allowed except the hard-denied rules above) · `readonly` (read-only) · `yolo` (allow everything, never ask — **all safety checks disabled**, use at your own risk). Switch at runtime with `/permission` (persisted to the config file) or at startup with `--permission-mode`.
 
 Every successful `write_file` / `edit_file` first snapshots the file's previous content (in-memory, last 50 writes per session); `/undo` restores the most recent snapshot, deleting the file if it didn't exist before.
 

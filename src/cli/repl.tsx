@@ -1,7 +1,7 @@
 import { Box, Text, render, useApp, useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentLoop } from "../agent/loop";
-import { addAllowRule } from "../config/save";
+import { addAllowRule, savePermissionMode } from "../config/save";
 import type { StarConfig } from "../config/schema";
 import type { CoreMessage } from "../core/messages";
 import { createModel } from "../llm/provider";
@@ -113,6 +113,7 @@ export function Repl({
   const [spinnerTick, setSpinnerTick] = useState(0);
   const [activity, setActivity] = useState<string | null>(null);
   const [bgLabels, setBgLabels] = useState<string[]>(() => runningTaskLabels());
+  const [permissionModeState, setPermissionModeState] = useState(permissionMode);
 
   const backendRef = useRef<ChatBackend>(backend);
   const nextIdRef = useRef(initialDisplay.length);
@@ -540,6 +541,29 @@ export function Repl({
           "\n",
         );
       },
+      permissionMode: async (args) => {
+        const current = config.permissionMode;
+        if (!args) {
+          const mark = (m: string) => (m === current ? "*" : " ");
+          return [
+            "Permission modes (* = current):",
+            `${mark("ask")} ask      — reads allowed; writes/exec ask for confirmation`,
+            `${mark("auto")} auto     — everything allowed except hard-denied dangerous commands/paths`,
+            `${mark("readonly")} readonly — read-only; all writes/exec denied`,
+            `${mark("yolo")} yolo     — allow everything, never ask (disables ALL safety checks)`,
+          ].join("\n");
+        }
+        const mode = args.toLowerCase();
+        if (!["ask", "auto", "readonly", "yolo"].includes(mode)) {
+          return `Unknown permission mode: ${args} (expected ask | auto | readonly | yolo)`;
+        }
+        config.permissionMode = mode as StarConfig["permissionMode"];
+        setPermissionModeState(mode);
+        await savePermissionMode(mode);
+        return mode === "yolo"
+          ? "Permission mode set to yolo — ALL safety checks disabled, tools run without asking. Saved to config."
+          : `Permission mode set to ${mode}. Saved to config.`;
+      },
       initProject: async (args) => {
         let model = null;
         try {
@@ -670,7 +694,7 @@ export function Repl({
       />
       <StatusBar
         model={modelName}
-        permissionMode={permissionMode}
+        permissionMode={permissionModeState}
         tokens={usageRef.current.totalTokens}
         backgroundTasks={bgLabels}
       />

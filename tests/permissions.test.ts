@@ -146,7 +146,7 @@ describe("sensitive files", () => {
   const sensitive = [".env", ".env.local", ".env.production", "id_rsa", "certs/server.pem"];
   for (const file of sensitive) {
     for (const toolName of ["write_file", "edit_file"]) {
-      it(`denies ${toolName} on ${file} in all modes`, () => {
+      it(`denies ${toolName} on ${file} in ask/auto/readonly modes`, () => {
         for (const mode of ["auto", "ask", "readonly"] as const) {
           expect(checkPermission(mode, req(toolName, { path: file }, "write"), ctx)).toBe("deny");
         }
@@ -160,6 +160,24 @@ describe("sensitive files", () => {
         "allow",
       );
     }
+  });
+});
+
+describe("yolo mode", () => {
+  it("allows everything without asking, including hard-denied operations", () => {
+    expect(checkPermission("yolo", req("bash", { command: "rm -rf /" }, "exec"), ctx)).toBe(
+      "allow",
+    );
+    expect(checkPermission("yolo", req("bash", { command: "shutdown now" }, "exec"), ctx)).toBe(
+      "allow",
+    );
+    expect(checkPermission("yolo", req("write_file", { path: ".env" }, "write"), ctx)).toBe(
+      "allow",
+    );
+    expect(
+      checkPermission("yolo", req("write_file", { path: "../outside.txt" }, "write"), ctx),
+    ).toBe("allow");
+    expect(checkPermission("yolo", req("read_file", { path: "x.ts" }, "read"), ctx)).toBe("allow");
   });
 });
 

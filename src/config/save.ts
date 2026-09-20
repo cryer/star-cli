@@ -24,3 +24,17 @@ export async function addAllowRule(rule: string): Promise<boolean> {
   await fs.promises.writeFile(filePath, stringify(raw), "utf8");
   return true;
 }
+
+export async function savePermissionMode(mode: string): Promise<void> {
+  const filePath = globalConfigPath();
+  let raw: Record<string, unknown> = {};
+  try {
+    const content = await fs.promises.readFile(filePath, "utf8");
+    raw = parse(content) as Record<string, unknown>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  raw.permissionMode = mode;
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.promises.writeFile(filePath, stringify(raw), "utf8");
+}

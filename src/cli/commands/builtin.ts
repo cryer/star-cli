@@ -122,6 +122,15 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
   });
 
   registry.register({
+    name: "permission",
+    description: "Show or set the global permission mode (ask | auto | readonly | yolo)",
+    usage: "/permission [ask|auto|readonly|yolo]",
+    async run(args, ctx) {
+      ctx.addSystemMessage(await ctx.permissionMode(args.trim()));
+    },
+  });
+
+  registry.register({
     name: "undo",
     description:
       "Undo the last conversation turn: revert its file changes (write_file/edit_file) and retract its messages",

@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config/loader";
 import { globalConfigPath } from "../src/config/paths";
-import { addAllowRule } from "../src/config/save";
+import { addAllowRule, savePermissionMode } from "../src/config/save";
 import { buildAllowRule, isAllowedByRules, parseAllowRule } from "../src/permissions/allow";
 import { checkPermission } from "../src/permissions/gate";
 import type { PermissionContext, PermissionRequest } from "../src/permissions/types";
@@ -196,5 +196,43 @@ describe("addAllowRule persistence", () => {
     expect(checkPermission(config.permissionMode, request, ctx, config.permissions.allow)).toBe(
       "allow",
     );
+  });
+});
+
+describe("savePermissionMode persistence", () => {
+  let home: string;
+  let cwd: string;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "star-home-"));
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), "star-cwd-"));
+    vi.stubEnv("STAR_HOME", home);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("writes permissionMode to config.toml and reloads it", async () => {
+    await savePermissionMode("yolo");
+    const config = await loadConfig(cwd);
+    expect(config.permissionMode).toBe("yolo");
+  });
+
+  it("preserves other config keys", async () => {
+    fs.writeFileSync(globalConfigPath(), 'defaultModel = "fast"\n');
+    await savePermissionMode("auto");
+    const config = await loadConfig(cwd);
+    expect(config.permissionMode).toBe("auto");
+    expect(config.defaultModel).toBe("fast");
+  });
+
+  it("a persisted yolo mode bypasses hard rules after reload", async () => {
+    await savePermissionMode("yolo");
+    const config = await loadConfig(cwd);
+    const request = req("write_file", { path: ".env" }, "write");
+    expect(checkPermission(config.permissionMode, request, ctx)).toBe("allow");
   });
 });
