@@ -57,7 +57,8 @@ describe("executeShellBang", () => {
   });
 
   afterEach(() => {
-    rmSync(cwd, { recursive: true, force: true });
+    // aborted child processes may still hold the dir on Windows; retry the cleanup
+    rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   });
 
   it("runs a real command and merges output", async () => {
@@ -124,7 +125,8 @@ describe("shell output context injection", () => {
   });
 
   afterEach(() => {
-    rmSync(cwd, { recursive: true, force: true });
+    // aborted child processes may still hold the dir on Windows; retry the cleanup
+    rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   });
 
   it("makes prior shell output visible in the next model request", async () => {
