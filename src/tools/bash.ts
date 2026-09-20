@@ -8,7 +8,7 @@ const MAX_OUTPUT = 30000;
 const DEFAULT_TIMEOUT = 120;
 const MAX_TIMEOUT = 600;
 
-interface ShellSpec {
+export interface ShellSpec {
   shell: string;
   wrap: (command: string) => string[];
   label: string;
@@ -27,7 +27,7 @@ function findOnPath(exe: string, exclude?: (dir: string) => boolean): string | n
   return null;
 }
 
-function resolveShell(): ShellSpec {
+export function resolveShell(): ShellSpec {
   if (process.platform !== "win32") {
     return { shell: "sh", wrap: (c) => ["-c", c], label: "sh" };
   }

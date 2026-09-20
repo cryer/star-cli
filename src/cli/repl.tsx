@@ -17,6 +17,8 @@ import { VERSION } from "../version";
 import type { ChatBackend } from "./backend";
 import { compactSession, exportSession } from "./commands/actions";
 import { registerBuiltinCommands } from "./commands/builtin";
+import { formatDoctorReport, runDoctor } from "./commands/doctor";
+import { initProject } from "./commands/init-project";
 import { type CommandContext, CommandRegistry, parseSlashCommand } from "./commands/registry";
 import { InputBox } from "./components/InputBox";
 import { type DisplayMessage, MessageList } from "./components/MessageList";
@@ -279,6 +281,17 @@ export function Repl({
       exportSession: (arg) =>
         exportSession({ backend: backendRef.current, sessionStore, cwd, arg }),
       undo: () => undoLastSnapshot(),
+      initProject: async (args) => {
+        let model = null;
+        try {
+          model = createModel(config, modelNameRef.current);
+        } catch {
+          model = null;
+        }
+        const result = await initProject({ cwd, args, model });
+        return result.message;
+      },
+      runDoctor: async () => formatDoctorReport(await runDoctor({ cwd, config })),
       describeConfig: () =>
         [
           `defaultModel: ${config.defaultModel || "(none)"}`,

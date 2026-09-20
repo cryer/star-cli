@@ -23,6 +23,8 @@ function makeCtx(overrides: Partial<CommandContext> = {}) {
     compactContext: async () => "compact result",
     exportSession: async (p) => `exported ${p}`,
     undo: async () => "undo result",
+    initProject: async (args) => `init ${args}`,
+    runDoctor: async () => "doctor report",
     ...overrides,
   };
   return { ctx, calls };

@@ -120,4 +120,22 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
       ctx.addSystemMessage(await ctx.undo());
     },
   });
+
+  registry.register({
+    name: "init",
+    description: "Generate an AGENTS.md for the current project",
+    usage: "/init [force]",
+    async run(args, ctx) {
+      ctx.addSystemMessage(await ctx.initProject(args));
+    },
+  });
+
+  registry.register({
+    name: "doctor",
+    description: "Run environment and configuration checks",
+    usage: "/doctor",
+    async run(_args, ctx) {
+      ctx.addSystemMessage(await ctx.runDoctor());
+    },
+  });
 }
