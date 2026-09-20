@@ -10,6 +10,8 @@ import { buildAllowRule, isAllowedByRules } from "../permissions/allow";
 import type { PermissionRequest } from "../permissions/types";
 import { formatSessionList, resumeSession } from "../session/resume";
 import { SessionStore } from "../session/store";
+import { formatTaskFinished, formatTaskList } from "../tasks/format";
+import { type TaskSnapshot, defaultTaskManager } from "../tasks/manager";
 import { TodoStore, createDefaultRegistry } from "../tools";
 import { undoLastSnapshot } from "../tools/fs/snapshots";
 import { formatTodos } from "../tools/todo";
@@ -98,6 +100,7 @@ export function Repl({
   const [pending, setPending] = useState<PendingPermission | null>(null);
   const [, setCardsVersion] = useState(0);
   const [spinnerTick, setSpinnerTick] = useState(0);
+  const [bgCount, setBgCount] = useState(() => defaultTaskManager.runningCount());
 
   const backendRef = useRef<ChatBackend>(backend);
   const nextIdRef = useRef(initialDisplay.length);
@@ -153,6 +156,20 @@ export function Repl({
     });
   }, [pushMessage]);
 
+  useEffect(() => {
+    const onUpdate = (task: TaskSnapshot) => {
+      setBgCount(defaultTaskManager.runningCount());
+      if (task.status !== "running") {
+        pushMessage("system", formatTaskFinished(task));
+      }
+    };
+    defaultTaskManager.on("update", onUpdate);
+    return () => {
+      defaultTaskManager.off("update", onUpdate);
+      defaultTaskManager.cleanup();
+    };
+  }, [pushMessage]);
+
   const interrupt = useCallback(() => {
     abortRef.current?.abort();
     const p = pendingRef.current;
@@ -161,6 +178,17 @@ export function Repl({
       p.resolve(false);
     }
   }, [setPendingPermission]);
+
+  const handleExit = useCallback(() => {
+    const killed = defaultTaskManager.cleanup();
+    if (killed.length > 0) {
+      pushMessage(
+        "system",
+        `Stopped ${killed.length} background task(s): ${killed.map((t) => t.id).join(", ")}`,
+      );
+    }
+    exit();
+  }, [exit, pushMessage]);
 
   useInput((_input, key) => {
     if (key.escape) interrupt();
@@ -372,7 +400,7 @@ export function Repl({
         setMessages([]);
         setEpoch((e) => e + 1);
       },
-      exit: () => exit(),
+      exit: () => handleExit(),
       listModels: () => {
         const models = listModels(config);
         if (models.length === 0) return "No models configured.";
@@ -395,6 +423,7 @@ export function Repl({
         await store.load(cwd);
         return formatTodos(store.list());
       },
+      listTasks: () => formatTaskList(defaultTaskManager.list()),
       showUsage: () => {
         const modelConfig = config.models.find((m) => m.name === modelNameRef.current);
         return `${formatUsage(usageRef.current)}\n${estimateCost(usageRef.current, modelNameRef.current, modelConfig)}`;
@@ -452,7 +481,7 @@ export function Repl({
     registerBuiltinCommands(reg);
     registerCustomCommands(reg, cwd);
     return Object.assign(reg, { ctx });
-  }, [pushMessage, exit, config, cwd, switchModel, resume, sessionStore, runStream]);
+  }, [pushMessage, handleExit, config, cwd, switchModel, resume, sessionStore, runStream]);
 
   const runShellBang = useCallback(
     async (raw: string) => {
@@ -548,12 +577,13 @@ export function Repl({
         commands={commandHints}
         onSubmit={handleSubmit}
         onInterrupt={interrupt}
-        onExit={exit}
+        onExit={handleExit}
       />
       <StatusBar
         model={modelName}
         permissionMode={permissionMode}
         tokens={usageRef.current.totalTokens}
+        backgroundTasks={bgCount}
       />
     </Box>
   );
@@ -570,6 +600,10 @@ export interface ReplOptions {
 }
 
 export function renderRepl(backend: ChatBackend, opts: ReplOptions) {
+  // Backstop for abnormal exits: never leave orphaned background processes.
+  process.on("exit", () => {
+    defaultTaskManager.cleanup();
+  });
   return render(
     <Repl
       backend={backend}

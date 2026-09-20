@@ -77,6 +77,15 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
   });
 
   registry.register({
+    name: "tasks",
+    description: "List background shell tasks",
+    usage: "/tasks",
+    run(_args, ctx) {
+      ctx.addSystemMessage(ctx.listTasks());
+    },
+  });
+
+  registry.register({
     name: "cost",
     description: "Show API token usage for this session",
     usage: "/cost",

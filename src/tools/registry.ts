@@ -4,6 +4,7 @@ import { globTool } from "./fs/glob";
 import { grepTool } from "./fs/grep";
 import { readFileTool } from "./fs/read";
 import { writeFileTool } from "./fs/write";
+import { taskKillTool, taskListTool, taskOutputTool } from "./tasks";
 import { createTodoTools } from "./todo";
 import type { Tool } from "./types";
 import { webFetchTool } from "./web/fetch";
@@ -22,6 +23,9 @@ export class ToolRegistry {
       bashTool,
       webFetchTool,
       webSearchTool,
+      taskListTool,
+      taskOutputTool,
+      taskKillTool,
       ...createTodoTools(),
     ]) {
       this.register(tool);

@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { defaultTaskManager } from "../tasks/manager";
 import type { Tool, ToolResult } from "./types";
 
 const MAX_OUTPUT = 30000;
@@ -65,9 +66,15 @@ const schema = z.object({
     .optional()
     .describe("Timeout in seconds (default 120, max 600)"),
   description: z.string().optional().describe("Short description of what the command does"),
+  run_in_background: z
+    .boolean()
+    .optional()
+    .describe(
+      "Run the command in the background and return a task id immediately (default false). Use task_output/task_kill to inspect or stop it.",
+    ),
 });
 
-function killTree(child: ChildProcess): void {
+export function killTree(child: ChildProcess): void {
   if (process.platform === "win32" && child.pid) {
     spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
       windowsHide: true,
@@ -91,10 +98,21 @@ function truncateMiddle(s: string): string {
 export const bashTool: Tool<typeof schema> = {
   name: "bash",
   description:
-    "Execute a shell command (Git Bash on Windows when available, otherwise cmd; sh elsewhere). Stdout and stderr are merged. Output is truncated to 30000 characters.",
+    "Execute a shell command (Git Bash on Windows when available, otherwise cmd; sh elsewhere). Stdout and stderr are merged. Output is truncated to 30000 characters. Set run_in_background for long-running commands; it returns a task id for task_list/task_output/task_kill.",
   permission: "exec",
   parameters: schema,
   execute(args, ctx) {
+    if (args.run_in_background) {
+      const task = defaultTaskManager.start({
+        command: args.command,
+        description: args.description,
+        cwd: ctx.cwd,
+        timeoutSeconds: args.timeout,
+      });
+      return Promise.resolve({
+        content: `Background task started: ${task.id}\ncommand: ${args.command}\ndescription: ${args.description ?? "(none)"}`,
+      });
+    }
     const timeoutSeconds = Math.min(args.timeout ?? DEFAULT_TIMEOUT, MAX_TIMEOUT);
     const spec = resolveShell();
     return new Promise<ToolResult>((resolve) => {

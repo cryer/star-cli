@@ -17,6 +17,7 @@ function makeCtx(overrides: Partial<CommandContext> = {}) {
     listSessions: async () => "sessions list",
     resumeSession: async (id) => `resumed ${id}`,
     showTodos: async () => "todos",
+    listTasks: () => "tasks list",
     showUsage: () =>
       "API usage this session: 3 requests, 1234 prompt + 567 completion = 1801 tokens",
     describeConfig: () => "config summary",

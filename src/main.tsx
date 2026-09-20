@@ -10,6 +10,7 @@ import type { CoreMessage } from "./core/messages";
 import { createModel } from "./llm/provider";
 import { resumeSession } from "./session/resume";
 import { type SessionMeta, SessionStore } from "./session/store";
+import { defaultTaskManager } from "./tasks/manager";
 import { createDefaultRegistry } from "./tools";
 import { VERSION } from "./version";
 
@@ -109,6 +110,7 @@ async function printMode(
     }
   }
   if (!json) process.stdout.write("\n");
+  defaultTaskManager.cleanup();
   return exitCode;
 }
 
