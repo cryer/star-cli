@@ -4,7 +4,7 @@
 
 An AI agent command-line interface written in TypeScript — multi-model LLM access, streaming terminal UI, tool calling, permission control, and session persistence.
 
-Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers · built-in fs / bash / web tools with a permission gate · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume (`/resume`, `star -r`) · file-write snapshots with `/undo` · persistent permission allow-rules · TODO task tracking · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
+Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers · built-in fs / bash / web tools with a permission gate · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume (`/resume`, `star -r`) · file-write snapshots with `/undo` · persistent permission allow-rules · TODO task tracking · background shell tasks with status-bar visibility (`/tasks`) · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
 
 ## Requirements
 
@@ -93,6 +93,7 @@ star -r <sessionId>           resume a previous session
 | `/model [name]` | list / switch models |
 | `/resume [id]` | list / resume sessions |
 | `/todo` | show TODO list |
+| `/tasks` | list background tasks (id, status, runtime, exit code) |
 | `/cost` | show API token usage and estimated $ cost (needs per-model pricing in config) |
 | `/config` | show resolved config |
 | `/compact` | compact conversation history to free up context |
@@ -118,6 +119,10 @@ Prefix input with `!` to run a command locally without involving the model:
 
 Output renders as a tool card and is injected into the conversation so the model can see it afterwards. Dangerous commands are still blocked, and `ESC` / `Ctrl+C` aborts execution.
 
+## Background tasks
+
+The model can run long shell commands in the background via `bash` with `run_in_background: true` (same permission gate as foreground commands). While anything runs in the background, the status bar shows `bg: N`; when a task finishes, fails, times out, or is stopped, a system message reports the outcome. `/tasks` lists every task with status, runtime, and exit code, and the model can inspect or stop tasks with the `task_list` / `task_output` / `task_kill` tools. Remaining tasks are killed when the REPL exits.
+
 ## Custom slash commands
 
 Drop Markdown files into `.star/commands/<name>.md` (project) or `~/.star-cli/commands/<name>.md` (global) to define your own commands — `/review src/` then sends the file's contents (with `$ARGUMENTS` replaced by your arguments) to the model as a prompt. An optional first line `<!-- description: does a thing -->` sets the description shown in `/help` and autocomplete. Names must match `[a-z0-9-]+`; built-in commands win on conflicts.
@@ -141,7 +146,7 @@ Missing, binary, oversized (>100KB), or sensitive files (`.env`, private keys) a
 
 ## Built-in tools
 
-`read_file`, `write_file`, `edit_file`, `glob`, `grep`, `bash`, `web_fetch`, `web_search` (DuckDuckGo, no API key needed), `todo_read`, `todo_write` — each declares a permission level (`read` / `write` / `exec`) enforced by the permission gate. Hard safety rules (dangerous shell commands, paths outside the working directory, secret files like `.env` / private keys) are denied in every mode and cannot be overridden by allow-rules.
+`read_file`, `write_file`, `edit_file`, `glob`, `grep`, `bash`, `web_fetch`, `web_search` (DuckDuckGo, no API key needed), `todo_read`, `todo_write`, `task_list`, `task_output`, `task_kill` — each declares a permission level (`read` / `write` / `exec`) enforced by the permission gate. Hard safety rules (dangerous shell commands, paths outside the working directory, secret files like `.env` / private keys) are denied in every mode and cannot be overridden by allow-rules.
 
 Every successful `write_file` / `edit_file` first snapshots the file's previous content (in-memory, last 50 writes per session); `/undo` restores the most recent snapshot, deleting the file if it didn't exist before.
 
