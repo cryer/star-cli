@@ -43,7 +43,7 @@ export function clearSnapshots(): void {
 export async function undoLastSnapshot(): Promise<string> {
   const snapshot = stack.pop();
   if (!snapshot) {
-    return "Nothing to undo.";
+    return "Nothing to undo (/undo only reverts file changes made by write_file/edit_file, and none are recorded yet).";
   }
   if (snapshot.existed && snapshot.content !== null) {
     await mkdir(path.dirname(snapshot.path), { recursive: true });

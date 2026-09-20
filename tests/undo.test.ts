@@ -75,7 +75,7 @@ describe("file snapshots and undo", () => {
   });
 
   it("reports when there is nothing to undo", async () => {
-    expect(await undoLastSnapshot()).toBe("Nothing to undo.");
+    expect(await undoLastSnapshot()).toContain("Nothing to undo");
   });
 
   it("evicts the oldest snapshot beyond the 50-entry cap", async () => {
@@ -89,6 +89,6 @@ describe("file snapshots and undo", () => {
       expect(readFileSync(path.join(dir, "cap.txt"), "utf8")).toBe(`v${i - 1}`);
     }
     // the v0 -> v1 snapshot was evicted
-    expect(await undoLastSnapshot()).toBe("Nothing to undo.");
+    expect(await undoLastSnapshot()).toContain("Nothing to undo");
   });
 });

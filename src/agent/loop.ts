@@ -97,6 +97,8 @@ export class AgentLoop {
           }
         }
       } catch (error) {
+        // A user-initiated abort is a normal end of the turn, not an error.
+        if (signal.aborted) return;
         yield { type: "error", error: error instanceof Error ? error : new Error(String(error)) };
         return;
       }

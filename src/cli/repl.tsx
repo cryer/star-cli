@@ -411,7 +411,10 @@ export function Repl({
           }
         }
       } catch (error) {
-        if (!(error instanceof DOMException && error.name === "AbortError")) {
+        const aborted =
+          controller.signal.aborted ||
+          (error instanceof DOMException && error.name === "AbortError");
+        if (!aborted) {
           pushMessage(
             "system",
             `Error: ${error instanceof Error ? formatStreamError(error) : String(error)}`,

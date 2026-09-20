@@ -226,4 +226,90 @@ describe("streamChat", () => {
       expect(events[0].error.message).toBe("boom");
     }
   });
+
+  it("ends via the idle watchdog when the source stays open after the finish chunk", async () => {
+    // The AI SDK holds the finish part until the source stream closes, so a
+    // relay that sends everything but keeps the socket open can only be
+    // rescued by the watchdog.
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "text-delta", textDelta: "Hi" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "stop",
+              usage: { promptTokens: 1, completionTokens: 1 },
+            });
+            // deliberately never closes
+          },
+        }),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+
+    const events = await collect(
+      streamChat({
+        model,
+        messages: [{ role: "user", content: "hi" }],
+        idleTimeoutMs: 50,
+      }),
+    );
+
+    expect(events).toEqual([
+      { type: "text-delta", text: "Hi" },
+      { type: "finish", finishReason: "idle-timeout", usage: undefined },
+    ]);
+  });
+
+  it("ends the stream gracefully when no part arrives within the idle timeout", async () => {
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "text-delta", textDelta: "partial" });
+            // never emits finish and never closes
+          },
+        }),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+
+    const events = await collect(
+      streamChat({
+        model,
+        messages: [{ role: "user", content: "hi" }],
+        idleTimeoutMs: 50,
+      }),
+    );
+
+    expect(events).toEqual([
+      { type: "text-delta", text: "partial" },
+      { type: "finish", finishReason: "idle-timeout", usage: undefined },
+    ]);
+  });
+
+  it("suppresses stream error parts caused by a user-initiated abort", async () => {
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: convertArrayToReadableStream([
+          { type: "error", error: new Error("This operation was aborted") },
+        ]),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+    const controller = new AbortController();
+    controller.abort();
+
+    const events = await collect(
+      streamChat({
+        model,
+        messages: [{ role: "user", content: "hi" }],
+        abortSignal: controller.signal,
+        idleTimeoutMs: 50,
+      }),
+    );
+
+    expect(events.some((e) => e.type === "error")).toBe(false);
+  });
 });
