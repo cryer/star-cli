@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDisplayMessages } from "../src/cli/format";
+import { buildDisplayMessages, formatStreamError } from "../src/cli/format";
 import type { CoreMessage } from "../src/core/messages";
 
 describe("buildDisplayMessages", () => {
@@ -35,5 +35,18 @@ describe("buildDisplayMessages", () => {
 
   it("returns an empty list for empty input", () => {
     expect(buildDisplayMessages([])).toEqual([]);
+  });
+});
+
+describe("formatStreamError", () => {
+  it("appends a truncation hint to truncated JSON stream errors", () => {
+    const error = new SyntaxError("Unexpected end of JSON input");
+    expect(formatStreamError(error)).toBe(
+      "Unexpected end of JSON input (response stream was truncated — try again)",
+    );
+  });
+
+  it("leaves other error messages unchanged", () => {
+    expect(formatStreamError(new Error("socket hang up"))).toBe("socket hang up");
   });
 });

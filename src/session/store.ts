@@ -29,6 +29,10 @@ function generateId(now: Date): string {
   return `${stamp}-${suffix}`;
 }
 
+function debugWarn(message: string): void {
+  if (process.env.STAR_DEBUG === "1") process.stderr.write(`[star-cli] ${message}\n`);
+}
+
 function messageText(message: CoreMessage): string {
   const content = message.content;
   if (typeof content === "string") return content;
@@ -69,15 +73,22 @@ export class SessionStore {
 
   static async open(id: string): Promise<SessionStore | null> {
     const store = new SessionStore(id);
+    let raw: string;
     try {
-      const raw = await fs.readFile(store.metaPath(), "utf8");
-      const meta = JSON.parse(raw) as SessionMeta;
-      if (meta.id !== id) return null;
-      store.initialized = true;
-      return store;
+      raw = await fs.readFile(store.metaPath(), "utf8");
     } catch {
       return null;
     }
+    try {
+      const meta = JSON.parse(raw) as SessionMeta;
+      if (meta.id !== id) return null;
+    } catch {
+      // meta.json is corrupt (e.g. truncated write); open anyway and let
+      // meta() fall back to defaults so messages stay resumable.
+      debugWarn(`session ${id}: corrupt meta.json, using defaults`);
+    }
+    store.initialized = true;
+    return store;
   }
 
   static async list(cwd?: string): Promise<SessionMeta[]> {
@@ -154,16 +165,26 @@ export class SessionStore {
       try {
         messages.push(JSON.parse(trimmed) as CoreMessage);
       } catch {
-        // 忽略解析失败的行
+        debugWarn(`session ${this.id}: skipping corrupt messages.jsonl line`);
       }
     }
     return messages;
   }
 
+  private fallbackMeta(): SessionMeta {
+    const now = Date.now();
+    return { id: this.id, title: "", model: "", cwd: "", createdAt: now, updatedAt: now };
+  }
+
   async meta(): Promise<SessionMeta> {
     await this.ensureInitialized();
-    const raw = await fs.readFile(this.metaPath(), "utf8");
-    return JSON.parse(raw) as SessionMeta;
+    try {
+      const raw = await fs.readFile(this.metaPath(), "utf8");
+      return JSON.parse(raw) as SessionMeta;
+    } catch {
+      debugWarn(`session ${this.id}: unreadable meta.json, using defaults`);
+      return this.fallbackMeta();
+    }
   }
 
   async setTitle(title: string): Promise<void> {

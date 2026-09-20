@@ -39,6 +39,16 @@ describe("ThinkingIndicator", () => {
     app.unmount();
   });
 
+  it("renders the spinner frame selected by the frame prop", async () => {
+    for (let frame = 0; frame < SPINNER_FRAMES.length; frame++) {
+      const app = renderApp(createElement(ThinkingIndicator, { frame }));
+      await tick();
+      const output = stripAnsi(app.lastFrame() ?? "");
+      expect(output).toContain(`${SPINNER_FRAMES[frame]} star is thinking`);
+      app.unmount();
+    }
+  });
+
   it("streams a dim reasoning tail below the spinner", async () => {
     const app = renderApp(createElement(ThinkingIndicator, { reasoning: "planning next step" }));
     await tick();

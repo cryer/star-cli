@@ -1,4 +1,5 @@
 import { Box, Text } from "ink";
+import { memo } from "react";
 import { previewLines } from "../format";
 
 export interface ToolCardData {
@@ -9,7 +10,7 @@ export interface ToolCardData {
   isError?: boolean;
 }
 
-export function ToolCallCard({ card }: { card: ToolCardData }) {
+export const ToolCallCard = memo(function ToolCallCard({ card }: { card: ToolCardData }) {
   const color = card.isError ? "red" : "magenta";
   const preview = card.result !== undefined ? previewLines(card.result, 10) : null;
   return (
@@ -27,7 +28,7 @@ export function ToolCallCard({ card }: { card: ToolCardData }) {
       )}
     </Box>
   );
-}
+});
 
 export function formatToolCard(card: ToolCardData): string {
   const header = `${card.name} ${card.argsSummary}${card.isError ? " [error]" : ""}`;

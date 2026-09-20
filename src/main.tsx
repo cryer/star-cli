@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { AgentLoop } from "./agent/loop";
+import { formatStreamError } from "./cli/format";
 import { resolveMentions } from "./cli/mentions";
 import { UsageTracker, eventToJsonLine } from "./cli/print-json";
 import { renderRepl } from "./cli/repl";
@@ -52,41 +53,49 @@ async function printMode(
   }
   const usage = new UsageTracker();
   let exitCode = 0;
-  for await (const event of loop.stream(resolved.input, controller.signal, {
-    persistAs: prompt,
-  })) {
-    if (json) {
-      const line = eventToJsonLine(event);
-      if (line) process.stdout.write(`${line}\n`);
-    }
-    switch (event.type) {
-      case "text-delta":
-        if (!json) process.stdout.write(event.text);
-        break;
-      case "reasoning":
-        break;
-      case "tool-call":
-        if (!json) process.stderr.write(`\n[tool] ${event.name} ${JSON.stringify(event.args)}\n`);
-        break;
-      case "tool-result": {
-        if (!json) {
-          const preview =
-            event.content.length > 500
-              ? `${event.content.slice(0, 500)}... (truncated)`
-              : event.content;
-          process.stderr.write(`[result] ${event.isError ? "ERROR: " : ""}${preview}\n`);
-        }
-        break;
+  try {
+    for await (const event of loop.stream(resolved.input, controller.signal, {
+      persistAs: prompt,
+    })) {
+      if (json) {
+        const line = eventToJsonLine(event);
+        if (line) process.stdout.write(`${line}\n`);
       }
-      case "finish":
-        usage.add(event.usage);
-        break;
-      case "error":
-        if (!json) process.stderr.write(`\n[error] ${event.error.message}\n`);
-        exitCode = 1;
-        break;
+      switch (event.type) {
+        case "text-delta":
+          if (!json) process.stdout.write(event.text);
+          break;
+        case "reasoning":
+          break;
+        case "tool-call":
+          if (!json) process.stderr.write(`\n[tool] ${event.name} ${JSON.stringify(event.args)}\n`);
+          break;
+        case "tool-result": {
+          if (!json) {
+            const preview =
+              event.content.length > 500
+                ? `${event.content.slice(0, 500)}... (truncated)`
+                : event.content;
+            process.stderr.write(`[result] ${event.isError ? "ERROR: " : ""}${preview}\n`);
+          }
+          break;
+        }
+        case "finish":
+          usage.add(event.usage);
+          break;
+        case "error":
+          if (!json) process.stderr.write(`\n[error] ${formatStreamError(event.error)}\n`);
+          exitCode = 1;
+          break;
+      }
+      if (exitCode !== 0) break;
     }
-    if (exitCode !== 0) break;
+  } catch (error) {
+    if (!(error instanceof DOMException && error.name === "AbortError")) {
+      const message = error instanceof Error ? formatStreamError(error) : String(error);
+      process.stderr.write(`\n[error] ${message}\n`);
+      exitCode = 1;
+    }
   }
   const usageLine = usage.toJsonLine();
   if (usageLine) {

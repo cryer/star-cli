@@ -34,12 +34,11 @@ import {
 import { ToolCallCard, type ToolCardData, formatToolCard } from "./components/ToolCallCard";
 import { estimateCost } from "./cost";
 import { type DiffPreview, generateDiffPreview } from "./diff-preview";
-import { buildDisplayMessages, summarizeArgs } from "./format";
+import { buildDisplayMessages, formatStreamError, summarizeArgs } from "./format";
 import { resolveMentions } from "./mentions";
 import { executeShellBang } from "./shell-bang";
+import { type FlushState, nextFlush, startTicker } from "./ticker";
 import { checkForUpdate } from "./update-check";
-
-const FLUSH_INTERVAL_MS = 30;
 
 export interface UsageStats {
   requests: number;
@@ -92,10 +91,13 @@ export function Repl({
   const [thinking, setThinking] = useState(false);
   const [thinkingText, setThinkingText] = useState("");
   const [thoughtSummary, setThoughtSummary] = useState<string | null>(null);
-  const [usageVersion, setUsageVersion] = useState(0);
+  // usageVersion / cardsVersion bump counters: values are never read; setting them
+  // re-renders so usageRef / toolCardsRef contents flow into StatusBar and the cards.
+  const [, setUsageVersion] = useState(0);
   const [modelName, setModelName] = useState(model);
   const [pending, setPending] = useState<PendingPermission | null>(null);
-  const [cardsVersion, setCardsVersion] = useState(0);
+  const [, setCardsVersion] = useState(0);
+  const [spinnerTick, setSpinnerTick] = useState(0);
 
   const backendRef = useRef<ChatBackend>(backend);
   const nextIdRef = useRef(initialDisplay.length);
@@ -103,7 +105,8 @@ export function Repl({
   const streamedRef = useRef("");
   const thinkingRef = useRef(false);
   const reasoningRef = useRef("");
-  const flushTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const tickerStopRef = useRef<(() => void) | null>(null);
+  const flushedRef = useRef<FlushState>({ streamed: "", reasoning: "" });
   const toolCardsRef = useRef(new Map<string, ToolCardData>());
   const pendingRef = useRef<PendingPermission | null>(null);
   const alwaysAllowedRef = useRef(new Set<string>());
@@ -137,7 +140,7 @@ export function Repl({
   useEffect(() => {
     attachConfirmHandler(backendRef.current);
     return () => {
-      if (flushTimerRef.current !== null) clearInterval(flushTimerRef.current);
+      tickerStopRef.current?.();
       abortRef.current?.abort();
       pendingRef.current?.resolve(false);
     };
@@ -256,10 +259,19 @@ export function Repl({
       setThoughtSummary(null);
       setStreamingText("");
       setIsStreaming(true);
-      flushTimerRef.current = setInterval(() => {
-        setStreamingText(streamedRef.current);
-        setThinkingText(reasoningRef.current);
-      }, FLUSH_INTERVAL_MS);
+      flushedRef.current = { streamed: "", reasoning: "" };
+      tickerStopRef.current = startTicker((tick) => {
+        setSpinnerTick(tick);
+        const next: FlushState = {
+          streamed: streamedRef.current,
+          reasoning: reasoningRef.current,
+        };
+        if (nextFlush(flushedRef.current, next) !== null) {
+          flushedRef.current = next;
+          setStreamingText(next.streamed);
+          setThinkingText(next.reasoning);
+        }
+      });
       try {
         for await (const event of backendRef.current.stream(resolved.input, controller.signal, {
           persistAs: input,
@@ -287,8 +299,11 @@ export function Repl({
           } else if (event.type === "tool-result") {
             const card = toolCardsRef.current.get(event.id);
             if (card) {
-              card.result = event.content;
-              card.isError = event.isError ?? false;
+              toolCardsRef.current.set(event.id, {
+                ...card,
+                result: event.content,
+                isError: event.isError ?? false,
+              });
               setCardsVersion((v) => v + 1);
             }
             thinkingRef.current = true;
@@ -306,18 +321,19 @@ export function Repl({
               sessionStore?.addUsage(event.usage).catch(() => {});
             }
           } else if (event.type === "error") {
-            pushMessage("system", `Error: ${event.error.message}`);
+            pushMessage("system", `Error: ${formatStreamError(event.error)}`);
           }
         }
       } catch (error) {
         if (!(error instanceof DOMException && error.name === "AbortError")) {
-          pushMessage("system", `Error: ${error instanceof Error ? error.message : String(error)}`);
+          pushMessage(
+            "system",
+            `Error: ${error instanceof Error ? formatStreamError(error) : String(error)}`,
+          );
         }
       } finally {
-        if (flushTimerRef.current !== null) {
-          clearInterval(flushTimerRef.current);
-          flushTimerRef.current = null;
-        }
+        tickerStopRef.current?.();
+        tickerStopRef.current = null;
         abortRef.current = null;
         setIsStreaming(false);
         thinkingRef.current = false;
@@ -510,13 +526,13 @@ export function Repl({
     <Box flexDirection="column">
       <MessageList key={`messages-${epoch}`} messages={messages} />
       {cards.length > 0 && (
-        <Box key={`cards-${cardsVersion}`} flexDirection="column">
+        <Box flexDirection="column">
           {cards.map((card) => (
             <ToolCallCard key={card.id} card={card} />
           ))}
         </Box>
       )}
-      {thinking && <ThinkingIndicator reasoning={thinkingText} />}
+      {thinking && <ThinkingIndicator reasoning={thinkingText} frame={spinnerTick} />}
       {!thinking && thoughtSummary !== null && <Text dimColor>{thoughtSummary}</Text>}
       {streamingText !== null && <StreamingMessage text={streamingText} />}
       {pending && (
@@ -535,7 +551,6 @@ export function Repl({
         onExit={exit}
       />
       <StatusBar
-        key={`status-${usageVersion}`}
         model={modelName}
         permissionMode={permissionMode}
         tokens={usageRef.current.totalTokens}

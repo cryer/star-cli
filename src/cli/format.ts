@@ -17,6 +17,13 @@ export function previewLines(text: string, maxLines = 10): { text: string; trunc
   return { text: lines.slice(0, maxLines).join("\n"), truncated: true };
 }
 
+export function formatStreamError(error: Error): string {
+  if (error.message.includes("Unexpected end of JSON input")) {
+    return `${error.message} (response stream was truncated — try again)`;
+  }
+  return error.message;
+}
+
 export function coreMessageText(message: CoreMessage): string {
   const content = message.content;
   if (typeof content === "string") return content;

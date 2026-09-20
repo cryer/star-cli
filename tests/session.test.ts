@@ -131,6 +131,47 @@ describe("SessionStore", () => {
     expect(await store.messages()).toEqual([{ role: "user", content: "完好" }]);
   });
 
+  it("skips a corrupt line in the middle of messages.jsonl", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "user", content: "前" });
+    await store.append({ role: "assistant", content: "后" });
+    const file = path.join(store.dir, "messages.jsonl");
+    const lines = fs.readFileSync(file, "utf8").split("\n");
+    lines.splice(1, 0, "{broken");
+    fs.writeFileSync(file, lines.join("\n"));
+
+    expect(await store.messages()).toEqual([
+      { role: "user", content: "前" },
+      { role: "assistant", content: "后" },
+    ]);
+  });
+
+  it("falls back to default meta when meta.json is corrupt", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "user", content: "hi" });
+    fs.writeFileSync(path.join(store.dir, "meta.json"), "{not json");
+
+    const reopened = await SessionStore.open(store.id);
+    expect(reopened).not.toBeNull();
+    const meta = await reopened?.meta();
+    expect(meta?.id).toBe(store.id);
+    expect(meta?.title).toBe("");
+
+    // messages remain resumable and appends heal the corrupt meta file
+    expect(await reopened?.messages()).toEqual([{ role: "user", content: "hi" }]);
+    await reopened?.append({ role: "assistant", content: "there" });
+    expect(JSON.parse(fs.readFileSync(path.join(store.dir, "meta.json"), "utf8")).id).toBe(
+      store.id,
+    );
+  });
+
+  it("open still returns null when meta.json is missing entirely", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "user", content: "hi" });
+    fs.rmSync(path.join(store.dir, "meta.json"));
+    expect(await SessionStore.open(store.id)).toBeNull();
+  });
+
   it("sets the title from the first user message (max 60 chars)", async () => {
     const store = await SessionStore.create("/a", "m");
     await store.append({ role: "assistant", content: "先说话的不是用户" });

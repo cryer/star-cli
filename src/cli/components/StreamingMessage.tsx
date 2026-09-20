@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
+import { memo } from "react";
 
-export function StreamingMessage({ text }: { text: string }) {
+export const StreamingMessage = memo(function StreamingMessage({ text }: { text: string }) {
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Text bold color="green">
@@ -9,4 +10,4 @@ export function StreamingMessage({ text }: { text: string }) {
       <Text color="green">{text}</Text>
     </Box>
   );
-}
+});

@@ -1,4 +1,5 @@
 import { Box, Static, Text } from "ink";
+import { memo } from "react";
 
 export interface DisplayMessage {
   id: number;
@@ -14,7 +15,7 @@ const roleStyles: Record<DisplayMessage["role"], { label: string; color: string 
   tool: { label: "tool", color: "magenta" },
 };
 
-export function MessageList({ messages }: { messages: DisplayMessage[] }) {
+export const MessageList = memo(function MessageList({ messages }: { messages: DisplayMessage[] }) {
   return (
     <Static items={messages}>
       {(message) => {
@@ -31,4 +32,4 @@ export function MessageList({ messages }: { messages: DisplayMessage[] }) {
       }}
     </Static>
   );
-}
+});

@@ -1,8 +1,6 @@
 import { Box, Text } from "ink";
-import { useEffect, useState } from "react";
 
 export const SPINNER_FRAMES = ["-", "\\", "|", "/"];
-const FRAME_INTERVAL_MS = 100;
 export const REASONING_TAIL_LENGTH = 200;
 export const THOUGHT_SUMMARY_LENGTH = 100;
 
@@ -12,19 +10,17 @@ export function truncateTail(text: string, max: number): string {
   return `…${flat.slice(flat.length - max)}`;
 }
 
-export function ThinkingIndicator({ reasoning }: { reasoning?: string }) {
-  const [frame, setFrame] = useState(0);
-  useEffect(() => {
-    const timer = setInterval(
-      () => setFrame((f) => (f + 1) % SPINNER_FRAMES.length),
-      FRAME_INTERVAL_MS,
-    );
-    return () => clearInterval(timer);
-  }, []);
+// The spinner frame is driven by the caller's render ticker (see cli/ticker.ts);
+// keeping no internal interval avoids a second full-tree Ink rewrite per frame.
+export function ThinkingIndicator({
+  reasoning,
+  frame = 0,
+}: { reasoning?: string; frame?: number }) {
   const tail = reasoning ? truncateTail(reasoning, REASONING_TAIL_LENGTH) : "";
+  const spinner = SPINNER_FRAMES[frame % SPINNER_FRAMES.length];
   return (
     <Box flexDirection="column">
-      <Text dimColor>{SPINNER_FRAMES[frame]} star is thinking…</Text>
+      <Text dimColor>{spinner} star is thinking…</Text>
       {tail !== "" && <Text dimColor> {tail}</Text>}
     </Box>
   );
