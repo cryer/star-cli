@@ -7,6 +7,7 @@ import { type CoreMessage, reconcileToolCalls, retractLastTurn } from "../core/m
 import { checkPermission } from "../permissions/gate";
 import type { PermissionRequest } from "../permissions/types";
 import type { SessionStore } from "../session/store";
+import { beginTurn } from "../tools/fs/snapshots";
 import type { ToolRegistry } from "../tools/registry";
 import type { ToolResult } from "../tools/types";
 
@@ -28,6 +29,11 @@ interface PendingToolCall {
 export class AgentLoop {
   private messages: CoreMessage[] = [];
   private readonly opts: AgentLoopOptions;
+  // Seq + user-message index of each turn started via stream(); lets /undo
+  // match a retracted turn to the file snapshots it produced. Cleared when
+  // history is replaced wholesale (resume/compact), because indices no longer
+  // line up — in that case /undo only retracts messages, never wrong files.
+  private turnMarkers: { seq: number; userIndex: number }[] = [];
   confirmHandler?: (req: PermissionRequest) => Promise<boolean>;
 
   constructor(opts: AgentLoopOptions) {
@@ -43,17 +49,27 @@ export class AgentLoop {
 
   async loadMessages(messages: CoreMessage[]): Promise<void> {
     this.messages = reconcileToolCalls(messages);
+    this.turnMarkers = [];
   }
 
   // Drops the final user message and everything after it, and persists the
   // trimmed history so a later /resume does not bring the turn back.
-  // Returns the number of messages removed (0 = nothing to retract).
-  async retractLastTurn(): Promise<number> {
+  // `turn` is the retracted turn's snapshot seq when it could be verified
+  // against the marker recorded at turn start — undefined means the caller
+  // must not revert any file snapshots.
+  async retractLastTurn(): Promise<{ removed: number; turn?: number }> {
     const result = retractLastTurn([...this.messages]);
-    if (result.removed === 0) return 0;
+    if (result.removed === 0) return { removed: 0 };
+    const userIndex = result.messages.length;
     this.messages = result.messages;
     await this.opts.sessionStore?.replaceMessages([...this.messages]);
-    return result.removed;
+    const last = this.turnMarkers[this.turnMarkers.length - 1];
+    let turn: number | undefined;
+    if (last && last.userIndex === userIndex) {
+      turn = last.seq;
+      this.turnMarkers.pop();
+    }
+    return { removed: result.removed, turn };
   }
 
   async appendContextMessage(text: string, role: "user" | "system" = "user"): Promise<void> {
@@ -73,6 +89,7 @@ export class AgentLoop {
   ): AsyncGenerator<StreamEvent> {
     const userMessage: CoreMessage = { role: "user", content: input };
     this.messages.push(userMessage);
+    this.turnMarkers.push({ seq: beginTurn(), userIndex: this.messages.length - 1 });
     await this.persist(
       opts?.persistAs !== undefined ? { role: "user", content: opts.persistAs } : userMessage,
     );

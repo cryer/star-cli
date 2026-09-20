@@ -1,11 +1,15 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentLoop } from "../src/agent/loop";
 import type { StarConfig } from "../src/config/schema";
+import type { StreamEvent } from "../src/core/events";
 import { type CoreMessage, retractLastTurn } from "../src/core/messages";
 import { SessionStore } from "../src/session/store";
+import { createDefaultRegistry } from "../src/tools";
+import { clearSnapshots, undoTurnSnapshots } from "../src/tools/fs/snapshots";
 
 function makeConfig(): StarConfig {
   return {
@@ -18,6 +22,67 @@ function makeConfig(): StarConfig {
     contextCompaction: "summary",
     permissions: { allow: [] },
   };
+}
+
+type Chunk =
+  | { type: "text-delta"; textDelta: string }
+  | {
+      type: "tool-call";
+      toolCallType: "function";
+      toolCallId: string;
+      toolName: string;
+      args: string;
+    }
+  | {
+      type: "finish";
+      finishReason: "stop" | "tool-calls";
+      usage: { promptTokens: number; completionTokens: number };
+    };
+
+function textRound(text: string): Chunk[] {
+  return [
+    { type: "text-delta", textDelta: text },
+    { type: "finish", finishReason: "stop", usage: { promptTokens: 5, completionTokens: 3 } },
+  ];
+}
+
+function toolCallRound(id: string, name: string, args: unknown): Chunk[] {
+  return [
+    {
+      type: "tool-call",
+      toolCallType: "function",
+      toolCallId: id,
+      toolName: name,
+      args: JSON.stringify(args),
+    },
+    {
+      type: "finish",
+      finishReason: "tool-calls",
+      usage: { promptTokens: 5, completionTokens: 3 },
+    },
+  ];
+}
+
+function mockModel(rounds: Chunk[][]): MockLanguageModelV1 {
+  let call = 0;
+  return new MockLanguageModelV1({
+    doStream: async () => {
+      const chunks = rounds[Math.min(call, rounds.length - 1)] ?? [];
+      call++;
+      return {
+        stream: convertArrayToReadableStream(chunks),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      };
+    },
+  });
+}
+
+async function collect(gen: AsyncGenerator<StreamEvent>): Promise<StreamEvent[]> {
+  const events: StreamEvent[] = [];
+  for await (const event of gen) {
+    events.push(event);
+  }
+  return events;
 }
 
 describe("retractLastTurn", () => {
@@ -102,7 +167,9 @@ describe("AgentLoop.retractLastTurn", () => {
     ]);
     await store.replaceMessages([...loop.getMessages()]);
 
-    expect(await loop.retractLastTurn()).toBe(2);
+    // History loaded wholesale carries no turn marker, so no file snapshots
+    // may be reverted for it.
+    expect(await loop.retractLastTurn()).toEqual({ removed: 2, turn: undefined });
     expect(loop.getMessages().map((m) => m.role)).toEqual(["system", "user", "assistant"]);
 
     const persisted = await store.messages();
@@ -117,6 +184,54 @@ describe("AgentLoop.retractLastTurn", () => {
       cwd: "/tmp/work",
       sessionStore: null,
     });
-    expect(await loop.retractLastTurn()).toBe(0);
+    expect(await loop.retractLastTurn()).toEqual({ removed: 0 });
+  });
+});
+
+describe("turn-scoped undo (end to end)", () => {
+  let cwd: string;
+
+  beforeEach(() => {
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), "star-turn-undo-"));
+    clearSnapshots();
+  });
+
+  afterEach(() => {
+    clearSnapshots();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("reverts only the retracted turn's file changes", async () => {
+    const loop = new AgentLoop({
+      model: mockModel([
+        toolCallRound("c1", "write_file", { path: "f.txt", content: "from-turn-1" }),
+        textRound("wrote it"),
+        textRound("just chatting"),
+      ]),
+      registry: createDefaultRegistry(),
+      config: makeConfig(),
+      cwd,
+      sessionStore: null,
+    });
+
+    await collect(loop.stream("write f.txt", new AbortController().signal));
+    expect(fs.readFileSync(path.join(cwd, "f.txt"), "utf8")).toBe("from-turn-1");
+
+    await collect(loop.stream("chat", new AbortController().signal));
+
+    // Undo the pure-chat turn: messages retracted, turn-1 file untouched.
+    const undoChat = await loop.retractLastTurn();
+    expect(undoChat.removed).toBe(2);
+    expect(undoChat.turn).toBeDefined();
+    expect(await undoTurnSnapshots(undoChat.turn as number)).toEqual([]);
+    expect(fs.readFileSync(path.join(cwd, "f.txt"), "utf8")).toBe("from-turn-1");
+
+    // Undo the writing turn: its file change goes away with the messages.
+    const undoWrite = await loop.retractLastTurn();
+    expect(undoWrite.turn).toBeDefined();
+    const reverted = await undoTurnSnapshots(undoWrite.turn as number);
+    expect(reverted.some((m) => m.includes("f.txt"))).toBe(true);
+    expect(fs.existsSync(path.join(cwd, "f.txt"))).toBe(false);
+    expect(loop.getMessages()).toHaveLength(0);
   });
 });

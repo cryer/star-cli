@@ -2,7 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { Tool } from "../types";
-import { pushSnapshot } from "./snapshots";
+import { currentTurnSeq, pushSnapshot } from "./snapshots";
 
 const schema = z.object({
   path: z.string().describe("File path, absolute or relative to the working directory"),
@@ -57,6 +57,7 @@ export const editFileTool: Tool<typeof schema> = {
       content,
       toolName: "edit_file",
       timestamp: Date.now(),
+      turn: currentTurnSeq(),
     });
     return { content: `Edited ${args.path}: ${count} replacement${count > 1 ? "s" : ""}` };
   },

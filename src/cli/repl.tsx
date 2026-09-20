@@ -13,7 +13,7 @@ import { SessionStore } from "../session/store";
 import { formatTaskFinished, formatTaskList, formatTaskStarted } from "../tasks/format";
 import { type TaskSnapshot, defaultTaskManager } from "../tasks/manager";
 import { TodoStore, createDefaultRegistry } from "../tools";
-import { undoLastSnapshot } from "../tools/fs/snapshots";
+import { undoTurnSnapshots } from "../tools/fs/snapshots";
 import { formatTodos } from "../tools/todo";
 import { VERSION } from "../version";
 import type { ChatBackend } from "./backend";
@@ -516,14 +516,17 @@ export function Repl({
       exportSession: (arg) =>
         exportSession({ backend: backendRef.current, sessionStore, cwd, arg }),
       undo: async () => {
-        const fileResult = await undoLastSnapshot();
-        if (!fileResult.startsWith("Nothing to undo")) return fileResult;
         const current = backendRef.current;
-        if (!(current instanceof AgentLoop)) return fileResult;
-        const removed = await current.retractLastTurn();
-        if (removed === 0) {
-          return "Nothing to undo (no file changes and no conversation turn to retract).";
+        if (!(current instanceof AgentLoop)) {
+          return "Nothing to undo.";
         }
+        // Turn-scoped undo: retract the last turn's messages, and revert file
+        // changes only when they provably belong to that same turn.
+        const { removed, turn } = await current.retractLastTurn();
+        if (removed === 0) {
+          return "Nothing to undo (no conversation turn to retract).";
+        }
+        const reverted = turn !== undefined ? await undoTurnSnapshots(turn) : [];
         // Mirror the retraction on screen: drop the last prompt and everything
         // the turn produced (answer chunks, tool cards, notifications).
         setMessages((prev) => {
@@ -533,7 +536,9 @@ export function Repl({
           return prev;
         });
         setEpoch((e) => e + 1);
-        return `Retracted the last conversation turn (${removed} messages).`;
+        return [...reverted, `Retracted the last conversation turn (${removed} messages).`].join(
+          "\n",
+        );
       },
       initProject: async (args) => {
         let model = null;

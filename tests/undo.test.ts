@@ -3,7 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { editFileTool } from "../src/tools/fs/edit";
-import { clearSnapshots, snapshotCount, undoLastSnapshot } from "../src/tools/fs/snapshots";
+import {
+  beginTurn,
+  clearSnapshots,
+  snapshotCount,
+  undoLastSnapshot,
+  undoTurnSnapshots,
+} from "../src/tools/fs/snapshots";
 import { writeFileTool } from "../src/tools/fs/write";
 
 let dir: string;
@@ -90,5 +96,31 @@ describe("file snapshots and undo", () => {
     }
     // the v0 -> v1 snapshot was evicted
     expect(await undoLastSnapshot()).toContain("Nothing to undo");
+  });
+});
+
+describe("turn-scoped snapshots", () => {
+  it("undoTurnSnapshots reverts only the given turn's changes, newest first", async () => {
+    writeFileSync(path.join(dir, "t1.txt"), "a0");
+    const turnOne = beginTurn();
+    await writeFileTool.execute({ path: "t1.txt", content: "a1" }, ctx());
+    const turnTwo = beginTurn();
+    await writeFileTool.execute({ path: "t1.txt", content: "a2" }, ctx());
+    await writeFileTool.execute({ path: "t2.txt", content: "new" }, ctx());
+
+    const revertedTwo = await undoTurnSnapshots(turnTwo);
+    expect(revertedTwo).toHaveLength(2);
+    expect(readFileSync(path.join(dir, "t1.txt"), "utf8")).toBe("a1");
+    expect(existsSync(path.join(dir, "t2.txt"))).toBe(false);
+
+    const revertedOne = await undoTurnSnapshots(turnOne);
+    expect(revertedOne).toHaveLength(1);
+    expect(readFileSync(path.join(dir, "t1.txt"), "utf8")).toBe("a0");
+    expect(snapshotCount()).toBe(0);
+  });
+
+  it("returns an empty list when the turn made no file changes", async () => {
+    const turn = beginTurn();
+    expect(await undoTurnSnapshots(turn)).toEqual([]);
   });
 });

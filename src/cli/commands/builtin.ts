@@ -124,7 +124,7 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
   registry.register({
     name: "undo",
     description:
-      "Revert the last file change made by write_file or edit_file; retracts the last conversation turn when there is none",
+      "Undo the last conversation turn: revert its file changes (write_file/edit_file) and retract its messages",
     usage: "/undo",
     async run(_args, ctx) {
       ctx.addSystemMessage(await ctx.undo());
