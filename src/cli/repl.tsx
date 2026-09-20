@@ -10,7 +10,7 @@ import { buildAllowRule, isAllowedByRules } from "../permissions/allow";
 import type { PermissionRequest } from "../permissions/types";
 import { formatSessionList, resumeSession } from "../session/resume";
 import { SessionStore } from "../session/store";
-import { formatTaskFinished, formatTaskList } from "../tasks/format";
+import { formatTaskFinished, formatTaskList, formatTaskStarted } from "../tasks/format";
 import { type TaskSnapshot, defaultTaskManager } from "../tasks/manager";
 import { TodoStore, createDefaultRegistry } from "../tools";
 import { undoLastSnapshot } from "../tools/fs/snapshots";
@@ -33,10 +33,15 @@ import {
   ThinkingIndicator,
   truncateTail,
 } from "./components/ThinkingIndicator";
-import { ToolCallCard, type ToolCardData, formatToolCard } from "./components/ToolCallCard";
+import { type ToolCardData, formatToolCard } from "./components/ToolCallCard";
 import { estimateCost } from "./cost";
 import { type DiffPreview, generateDiffPreview } from "./diff-preview";
-import { buildDisplayMessages, formatStreamError, summarizeArgs } from "./format";
+import {
+  buildDisplayMessages,
+  formatStreamError,
+  splitCommittableLines,
+  summarizeArgs,
+} from "./format";
 import { resolveMentions } from "./mentions";
 import { executeShellBang } from "./shell-bang";
 import { type FlushState, nextFlush, startTicker } from "./ticker";
@@ -51,6 +56,13 @@ export interface UsageStats {
 
 function emptyUsage(): UsageStats {
   return { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+}
+
+function runningTaskLabels(): string[] {
+  return defaultTaskManager
+    .list()
+    .filter((t) => t.status === "running")
+    .map((t) => t.description ?? t.command);
 }
 
 function formatUsage(usage: UsageStats): string {
@@ -93,14 +105,14 @@ export function Repl({
   const [thinking, setThinking] = useState(false);
   const [thinkingText, setThinkingText] = useState("");
   const [thoughtSummary, setThoughtSummary] = useState<string | null>(null);
-  // usageVersion / cardsVersion bump counters: values are never read; setting them
-  // re-renders so usageRef / toolCardsRef contents flow into StatusBar and the cards.
+  // usageVersion bump counter: the value is never read; setting it re-renders
+  // so usageRef contents flow into StatusBar.
   const [, setUsageVersion] = useState(0);
   const [modelName, setModelName] = useState(model);
   const [pending, setPending] = useState<PendingPermission | null>(null);
-  const [, setCardsVersion] = useState(0);
   const [spinnerTick, setSpinnerTick] = useState(0);
-  const [bgCount, setBgCount] = useState(() => defaultTaskManager.runningCount());
+  const [activity, setActivity] = useState<string | null>(null);
+  const [bgLabels, setBgLabels] = useState<string[]>(() => runningTaskLabels());
 
   const backendRef = useRef<ChatBackend>(backend);
   const nextIdRef = useRef(initialDisplay.length);
@@ -115,10 +127,26 @@ export function Repl({
   const alwaysAllowedRef = useRef(new Set<string>());
   const modelNameRef = useRef(model);
   const usageRef = useRef<UsageStats>(initialUsage ? { ...initialUsage } : emptyUsage());
+  // Number of assistant chunks already committed to static history this turn;
+  // 0 means the next streamed text still needs the "star" header.
+  const turnChunksRef = useRef(0);
 
-  const pushMessage = useCallback((role: DisplayMessage["role"], text: string, note?: string) => {
-    setMessages((prev) => [...prev, { id: nextIdRef.current++, role, text, note }]);
-  }, []);
+  const pushMessage = useCallback(
+    (role: DisplayMessage["role"], text: string, note?: string, tight?: boolean) => {
+      setMessages((prev) => [...prev, { id: nextIdRef.current++, role, text, note, tight }]);
+    },
+    [],
+  );
+
+  const pushAssistantChunk = useCallback(
+    (text: string, tight: boolean) => {
+      const role: DisplayMessage["role"] =
+        turnChunksRef.current === 0 ? "assistant" : "assistant-cont";
+      turnChunksRef.current += 1;
+      pushMessage(role, text, undefined, tight);
+    },
+    [pushMessage],
+  );
 
   const setPendingPermission = useCallback((p: PendingPermission | null) => {
     pendingRef.current = p;
@@ -158,10 +186,11 @@ export function Repl({
 
   useEffect(() => {
     const onUpdate = (task: TaskSnapshot) => {
-      setBgCount(defaultTaskManager.runningCount());
-      if (task.status !== "running") {
-        pushMessage("system", formatTaskFinished(task));
-      }
+      setBgLabels(runningTaskLabels());
+      pushMessage(
+        "system",
+        task.status === "running" ? formatTaskStarted(task) : formatTaskFinished(task),
+      );
     };
     defaultTaskManager.on("update", onUpdate);
     return () => {
@@ -282,14 +311,32 @@ export function Repl({
       streamedRef.current = "";
       thinkingRef.current = true;
       reasoningRef.current = "";
+      turnChunksRef.current = 0;
       setThinking(true);
       setThinkingText("");
       setThoughtSummary(null);
       setStreamingText("");
       setIsStreaming(true);
       flushedRef.current = { streamed: "", reasoning: "" };
+      // Move the current streaming buffer into static history. Used at tool-call
+      // boundaries (to keep chronological order) and by the ticker for long
+      // answers, so the live redraw area — and with it the visible flicker —
+      // stays small no matter how long the answer gets.
+      const commitStreamed = (tight: boolean) => {
+        if (streamedRef.current.length === 0) return;
+        pushAssistantChunk(streamedRef.current, tight);
+        streamedRef.current = "";
+        flushedRef.current = { ...flushedRef.current, streamed: "" };
+        setStreamingText("");
+      };
       tickerStopRef.current = startTicker((tick) => {
         setSpinnerTick(tick);
+        const split = splitCommittableLines(streamedRef.current, 8);
+        if (split) {
+          pushAssistantChunk(split.committed, true);
+          streamedRef.current = split.rest;
+          flushedRef.current = { ...flushedRef.current, streamed: "" };
+        }
         const next: FlushState = {
           streamed: streamedRef.current,
           reasoning: reasoningRef.current,
@@ -318,22 +365,33 @@ export function Repl({
           } else if (event.type === "reasoning") {
             reasoningRef.current += event.text;
           } else if (event.type === "tool-call") {
+            // Flush the text spoken before this call into history first, so the
+            // card lands in chronological order instead of after the whole turn.
+            commitStreamed(true);
             toolCardsRef.current.set(event.id, {
               id: event.id,
               name: event.name,
               argsSummary: summarizeArgs(event.args),
             });
-            setCardsVersion((v) => v + 1);
+            setActivity(`running ${event.name}: ${summarizeArgs(event.args, 60)}`);
           } else if (event.type === "tool-result") {
-            const card = toolCardsRef.current.get(event.id);
-            if (card) {
-              toolCardsRef.current.set(event.id, {
+            const card = toolCardsRef.current.get(event.id) ?? {
+              id: event.id,
+              name: event.name,
+              argsSummary: "",
+            };
+            toolCardsRef.current.delete(event.id);
+            // Rendered once, straight into static history — no live card region
+            // that would have to be erased (and could linger) at turn end.
+            pushMessage(
+              "tool",
+              formatToolCard({
                 ...card,
                 result: event.content,
                 isError: event.isError ?? false,
-              });
-              setCardsVersion((v) => v + 1);
-            }
+              }),
+            );
+            setActivity(null);
             thinkingRef.current = true;
             reasoningRef.current = "";
             setThinking(true);
@@ -369,20 +427,23 @@ export function Repl({
         setThinking(false);
         setThinkingText("");
         setThoughtSummary(null);
+        setActivity(null);
         const finalText = streamedRef.current;
         streamedRef.current = "";
         setStreamingText(null);
+        const interrupted = controller.signal.aborted;
         if (finalText.length > 0) {
-          pushMessage(
-            "assistant",
-            controller.signal.aborted ? `${finalText} [interrupted]` : finalText,
-          );
+          pushAssistantChunk(`${finalText}${interrupted ? " [interrupted]" : ""}`, false);
+        } else if (interrupted && turnChunksRef.current > 0) {
+          pushAssistantChunk("[interrupted]", false);
         }
+        // Cards whose result event never arrived (e.g. hard abort) still get
+        // flushed so no call vanishes from the transcript.
         for (const card of toolCardsRef.current.values()) {
           pushMessage("tool", formatToolCard(card));
         }
         toolCardsRef.current.clear();
-        setCardsVersion((v) => v + 1);
+        turnChunksRef.current = 0;
         const p = pendingRef.current;
         if (p) {
           setPendingPermission(null);
@@ -390,7 +451,7 @@ export function Repl({
         }
       }
     },
-    [pushMessage, setPendingPermission, sessionStore, cwd],
+    [pushMessage, pushAssistantChunk, setPendingPermission, sessionStore, cwd],
   );
 
   const registry = useMemo(() => {
@@ -549,21 +610,22 @@ export function Repl({
     [registry],
   );
 
-  const cards = [...toolCardsRef.current.values()];
-
   return (
     <Box flexDirection="column">
       <MessageList key={`messages-${epoch}`} messages={messages} />
-      {cards.length > 0 && (
-        <Box flexDirection="column">
-          {cards.map((card) => (
-            <ToolCallCard key={card.id} card={card} />
-          ))}
-        </Box>
+      {(thinking || activity !== null) && (
+        <ThinkingIndicator
+          reasoning={thinkingText}
+          frame={spinnerTick}
+          activity={activity ?? undefined}
+        />
       )}
-      {thinking && <ThinkingIndicator reasoning={thinkingText} frame={spinnerTick} />}
-      {!thinking && thoughtSummary !== null && <Text dimColor>{thoughtSummary}</Text>}
-      {streamingText !== null && <StreamingMessage text={streamingText} />}
+      {!thinking && activity === null && thoughtSummary !== null && (
+        <Text dimColor>{thoughtSummary}</Text>
+      )}
+      {streamingText !== null && (streamingText !== "" || turnChunksRef.current === 0) && (
+        <StreamingMessage text={streamingText} continuation={turnChunksRef.current > 0} />
+      )}
       {pending && (
         <PermissionPrompt
           request={pending.request}
@@ -583,7 +645,7 @@ export function Repl({
         model={modelName}
         permissionMode={permissionMode}
         tokens={usageRef.current.totalTokens}
-        backgroundTasks={bgCount}
+        backgroundTasks={bgLabels}
       />
     </Box>
   );

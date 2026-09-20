@@ -12,15 +12,19 @@ export function truncateTail(text: string, max: number): string {
 
 // The spinner frame is driven by the caller's render ticker (see cli/ticker.ts);
 // keeping no internal interval avoids a second full-tree Ink rewrite per frame.
+// `activity` replaces the default label, e.g. while a tool call is executing.
 export function ThinkingIndicator({
   reasoning,
   frame = 0,
-}: { reasoning?: string; frame?: number }) {
+  activity,
+}: { reasoning?: string; frame?: number; activity?: string }) {
   const tail = reasoning ? truncateTail(reasoning, REASONING_TAIL_LENGTH) : "";
   const spinner = SPINNER_FRAMES[frame % SPINNER_FRAMES.length];
   return (
     <Box flexDirection="column">
-      <Text dimColor>{spinner} star is thinking…</Text>
+      <Text dimColor>
+        {spinner} {activity ?? "star is thinking…"}
+      </Text>
       {tail !== "" && <Text dimColor> {tail}</Text>}
     </Box>
   );

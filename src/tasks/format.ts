@@ -26,6 +26,11 @@ export function formatTaskList(tasks: TaskSnapshot[]): string {
   return `Background tasks:\n${tasks.map(formatTaskLine).join("\n")}`;
 }
 
+export function formatTaskStarted(task: TaskSnapshot): string {
+  const label = task.description ? `${task.description} (${task.command})` : task.command;
+  return `Background task ${task.id} started: ${label}`;
+}
+
 export function formatTaskFinished(task: TaskSnapshot): string {
   const exit =
     task.exitCode === null || task.exitCode === undefined ? "" : ` (exit ${task.exitCode})`;

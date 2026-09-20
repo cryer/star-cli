@@ -17,6 +17,22 @@ export function previewLines(text: string, maxLines = 10): { text: string; trunc
   return { text: lines.slice(0, maxLines).join("\n"), truncated: true };
 }
 
+// Splits a streaming buffer into a committable head (complete lines) and a
+// remainder, once the buffer holds at least minCompleteLines complete lines.
+// The last line is always kept in the remainder: it may still be growing.
+// Returns null when there is nothing worth committing yet.
+export function splitCommittableLines(
+  text: string,
+  minCompleteLines: number,
+): { committed: string; rest: string } | null {
+  const lastNewline = text.lastIndexOf("\n");
+  if (lastNewline < 0) return null;
+  const complete = text.slice(0, lastNewline);
+  const completeLines = complete.split("\n").length;
+  if (completeLines < minCompleteLines) return null;
+  return { committed: complete, rest: text.slice(lastNewline + 1) };
+}
+
 export function formatStreamError(error: Error): string {
   if (error.message.includes("Unexpected end of JSON input")) {
     return `${error.message} (response stream was truncated — try again)`;

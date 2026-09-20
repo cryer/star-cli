@@ -2,7 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { formatTaskList } from "../src/tasks/format";
+import { formatTaskList, formatTaskStarted } from "../src/tasks/format";
 import {
   DEFAULT_TASK_TIMEOUT,
   MAX_TASK_OUTPUT,
@@ -145,6 +145,26 @@ describe("TaskManager", () => {
 describe("formatTaskList", () => {
   it("says so when there are no tasks", () => {
     expect(formatTaskList([])).toBe("No background tasks.");
+  });
+});
+
+describe("formatTaskStarted", () => {
+  const base: TaskSnapshot = {
+    id: "task-3",
+    command: "pnpm test",
+    status: "running",
+    startedAt: Date.now(),
+    output: "",
+  };
+
+  it("includes the description when present", () => {
+    expect(formatTaskStarted({ ...base, description: "run tests" })).toBe(
+      "Background task task-3 started: run tests (pnpm test)",
+    );
+  });
+
+  it("falls back to the bare command", () => {
+    expect(formatTaskStarted(base)).toBe("Background task task-3 started: pnpm test");
   });
 });
 
