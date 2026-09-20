@@ -46,3 +46,19 @@ export function reconcileToolCalls(messages: CoreMessage[]): CoreMessage[] {
   flushPending();
   return result;
 }
+
+// Removes the last conversation turn: the final user message and everything
+// after it (assistant text, tool calls and results belonging to that turn).
+// A leading system message is never touched. Returns the trimmed list and
+// how many messages were dropped (0 = nothing to retract).
+export function retractLastTurn(messages: CoreMessage[]): {
+  messages: CoreMessage[];
+  removed: number;
+} {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "user") {
+      return { messages: messages.slice(0, i), removed: messages.length - i };
+    }
+  }
+  return { messages, removed: 0 };
+}

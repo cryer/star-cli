@@ -98,7 +98,7 @@ star -r <sessionId>           resume a previous session
 | `/config` | show resolved config |
 | `/compact` | compact conversation history to free up context |
 | `/export [path]` | export the current session to a Markdown file |
-| `/undo` | revert the last file write/edit made by a tool |
+| `/undo` | revert the last file write/edit made by a tool; when there is none, retract the last conversation turn instead |
 | `/init [force]` | scan the project and generate an AGENTS.md (LLM-polished when a model is available) |
 | `/doctor` | environment self-check (Node, shell, config, API key status, sessions dir writability) |
 | `/clear` | clear the screen |

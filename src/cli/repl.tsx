@@ -515,7 +515,26 @@ export function Repl({
       },
       exportSession: (arg) =>
         exportSession({ backend: backendRef.current, sessionStore, cwd, arg }),
-      undo: () => undoLastSnapshot(),
+      undo: async () => {
+        const fileResult = await undoLastSnapshot();
+        if (!fileResult.startsWith("Nothing to undo")) return fileResult;
+        const current = backendRef.current;
+        if (!(current instanceof AgentLoop)) return fileResult;
+        const removed = await current.retractLastTurn();
+        if (removed === 0) {
+          return "Nothing to undo (no file changes and no conversation turn to retract).";
+        }
+        // Mirror the retraction on screen: drop the last prompt and everything
+        // the turn produced (answer chunks, tool cards, notifications).
+        setMessages((prev) => {
+          for (let i = prev.length - 1; i >= 0; i--) {
+            if (prev[i]?.role === "user") return prev.slice(0, i);
+          }
+          return prev;
+        });
+        setEpoch((e) => e + 1);
+        return `Retracted the last conversation turn (${removed} messages).`;
+      },
       initProject: async (args) => {
         let model = null;
         try {

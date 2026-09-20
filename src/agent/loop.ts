@@ -3,7 +3,7 @@ import { tool as aiTool } from "ai";
 import type { StarConfig } from "../config/schema";
 import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
 import type { StreamEvent } from "../core/events";
-import { type CoreMessage, reconcileToolCalls } from "../core/messages";
+import { type CoreMessage, reconcileToolCalls, retractLastTurn } from "../core/messages";
 import { checkPermission } from "../permissions/gate";
 import type { PermissionRequest } from "../permissions/types";
 import type { SessionStore } from "../session/store";
@@ -43,6 +43,17 @@ export class AgentLoop {
 
   async loadMessages(messages: CoreMessage[]): Promise<void> {
     this.messages = reconcileToolCalls(messages);
+  }
+
+  // Drops the final user message and everything after it, and persists the
+  // trimmed history so a later /resume does not bring the turn back.
+  // Returns the number of messages removed (0 = nothing to retract).
+  async retractLastTurn(): Promise<number> {
+    const result = retractLastTurn([...this.messages]);
+    if (result.removed === 0) return 0;
+    this.messages = result.messages;
+    await this.opts.sessionStore?.replaceMessages([...this.messages]);
+    return result.removed;
   }
 
   async appendContextMessage(text: string, role: "user" | "system" = "user"): Promise<void> {
