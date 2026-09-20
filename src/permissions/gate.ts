@@ -21,6 +21,10 @@ const DANGEROUS_COMMAND_PATTERNS = [
   /\bpoweroff\b/i,
 ];
 
+export function isDangerousCommand(command: string): boolean {
+  return DANGEROUS_COMMAND_PATTERNS.some((pattern) => pattern.test(command));
+}
+
 function getStringArg(args: unknown, key: string): string | undefined {
   if (typeof args === "object" && args !== null) {
     const value = (args as Record<string, unknown>)[key];
@@ -59,11 +63,7 @@ export function checkPermission(
   const command = getStringArg(req.args, "command");
   const filePath = getStringArg(req.args, "path");
 
-  if (
-    req.toolName === "bash" &&
-    command !== undefined &&
-    DANGEROUS_COMMAND_PATTERNS.some((pattern) => pattern.test(command))
-  ) {
+  if (req.toolName === "bash" && command !== undefined && isDangerousCommand(command)) {
     return "deny";
   }
 

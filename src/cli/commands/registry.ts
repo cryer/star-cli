@@ -14,6 +14,7 @@ export interface CommandContext {
   undo(): Promise<string>;
   initProject(args: string): Promise<string>;
   runDoctor(): Promise<string>;
+  submitPrompt?(text: string): void | Promise<void>;
 }
 
 export interface SlashCommand {

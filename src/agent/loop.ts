@@ -45,6 +45,12 @@ export class AgentLoop {
     this.messages = messages;
   }
 
+  async appendContextMessage(text: string, role: "user" | "system" = "user"): Promise<void> {
+    const message: CoreMessage = { role, content: text };
+    this.messages.push(message);
+    await this.persist(message);
+  }
+
   private async persist(message: CoreMessage): Promise<void> {
     await this.opts.sessionStore?.append(message);
   }

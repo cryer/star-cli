@@ -17,6 +17,7 @@ import { VERSION } from "../version";
 import type { ChatBackend } from "./backend";
 import { compactSession, exportSession } from "./commands/actions";
 import { registerBuiltinCommands } from "./commands/builtin";
+import { registerCustomCommands } from "./commands/custom";
 import { formatDoctorReport, runDoctor } from "./commands/doctor";
 import { initProject } from "./commands/init-project";
 import { type CommandContext, CommandRegistry, parseSlashCommand } from "./commands/registry";
@@ -30,6 +31,7 @@ import { estimateCost } from "./cost";
 import { type DiffPreview, generateDiffPreview } from "./diff-preview";
 import { buildDisplayMessages, summarizeArgs } from "./format";
 import { resolveMentions } from "./mentions";
+import { executeShellBang } from "./shell-bang";
 import { checkForUpdate } from "./update-check";
 
 const FLUSH_INTERVAL_MS = 30;
@@ -223,91 +225,6 @@ export function Repl({
     return `Resumed session ${id} (${resumed.messages.length} messages).`;
   }, []);
 
-  const registry = useMemo(() => {
-    const ctx: CommandContext = {
-      addSystemMessage: (text) => pushMessage("system", text),
-      clearMessages: () => {
-        setMessages([]);
-        setEpoch((e) => e + 1);
-      },
-      exit: () => exit(),
-      listModels: () => {
-        const models = listModels(config);
-        if (models.length === 0) return "No models configured.";
-        const lines = models.map(
-          (m) =>
-            `${m.name === modelNameRef.current ? "*" : " "} ${m.name} (${m.provider}/${m.model})`,
-        );
-        return `Models (* = current):\n${lines.join("\n")}`;
-      },
-      switchModel,
-      listSessions: async () => {
-        const metas = await SessionStore.list(cwd);
-        return metas.length === 0
-          ? "No sessions found for this directory."
-          : formatSessionList(metas);
-      },
-      resumeSession: resume,
-      showTodos: async () => {
-        const store = new TodoStore();
-        await store.load(cwd);
-        return formatTodos(store.list());
-      },
-      showUsage: () => {
-        const modelConfig = config.models.find((m) => m.name === modelNameRef.current);
-        return `${formatUsage(usageRef.current)}\n${estimateCost(usageRef.current, modelNameRef.current, modelConfig)}`;
-      },
-      compactContext: async () => {
-        let summaryModel = null;
-        try {
-          summaryModel = createModel(config, modelNameRef.current);
-        } catch {
-          summaryModel = null;
-        }
-        const result = await compactSession({
-          backend: backendRef.current,
-          sessionStore,
-          config,
-          model: summaryModel,
-        });
-        if (result.compacted && result.messages) {
-          const display = buildDisplayMessages(result.messages);
-          nextIdRef.current = display.length;
-          setMessages(display);
-          setEpoch((e) => e + 1);
-        }
-        return result.message;
-      },
-      exportSession: (arg) =>
-        exportSession({ backend: backendRef.current, sessionStore, cwd, arg }),
-      undo: () => undoLastSnapshot(),
-      initProject: async (args) => {
-        let model = null;
-        try {
-          model = createModel(config, modelNameRef.current);
-        } catch {
-          model = null;
-        }
-        const result = await initProject({ cwd, args, model });
-        return result.message;
-      },
-      runDoctor: async () => formatDoctorReport(await runDoctor({ cwd, config })),
-      describeConfig: () =>
-        [
-          `defaultModel: ${config.defaultModel || "(none)"}`,
-          `permissionMode: ${config.permissionMode}`,
-          `providers (${config.providers.length}): ${config.providers.map((p) => p.name).join(", ") || "(none)"}`,
-          `models (${config.models.length}): ${config.models.map((m) => m.name).join(", ") || "(none)"}`,
-          `maxSteps: ${config.maxSteps}`,
-          `contextMaxTokens: ${config.contextMaxTokens}`,
-          `permissions.allow (${config.permissions.allow.length}): ${config.permissions.allow.join(", ") || "(none)"}`,
-        ].join("\n"),
-    };
-    const reg = new CommandRegistry();
-    registerBuiltinCommands(reg);
-    return Object.assign(reg, { ctx });
-  }, [pushMessage, exit, config, cwd, switchModel, resume, sessionStore]);
-
   const runStream = useCallback(
     async (input: string) => {
       const resolved = await resolveMentions(input, cwd);
@@ -396,8 +313,140 @@ export function Repl({
     [pushMessage, setPendingPermission, sessionStore, cwd],
   );
 
+  const registry = useMemo(() => {
+    const ctx: CommandContext = {
+      addSystemMessage: (text) => pushMessage("system", text),
+      clearMessages: () => {
+        setMessages([]);
+        setEpoch((e) => e + 1);
+      },
+      exit: () => exit(),
+      listModels: () => {
+        const models = listModels(config);
+        if (models.length === 0) return "No models configured.";
+        const lines = models.map(
+          (m) =>
+            `${m.name === modelNameRef.current ? "*" : " "} ${m.name} (${m.provider}/${m.model})`,
+        );
+        return `Models (* = current):\n${lines.join("\n")}`;
+      },
+      switchModel,
+      listSessions: async () => {
+        const metas = await SessionStore.list(cwd);
+        return metas.length === 0
+          ? "No sessions found for this directory."
+          : formatSessionList(metas);
+      },
+      resumeSession: resume,
+      showTodos: async () => {
+        const store = new TodoStore();
+        await store.load(cwd);
+        return formatTodos(store.list());
+      },
+      showUsage: () => {
+        const modelConfig = config.models.find((m) => m.name === modelNameRef.current);
+        return `${formatUsage(usageRef.current)}\n${estimateCost(usageRef.current, modelNameRef.current, modelConfig)}`;
+      },
+      compactContext: async () => {
+        let summaryModel = null;
+        try {
+          summaryModel = createModel(config, modelNameRef.current);
+        } catch {
+          summaryModel = null;
+        }
+        const result = await compactSession({
+          backend: backendRef.current,
+          sessionStore,
+          config,
+          model: summaryModel,
+        });
+        if (result.compacted && result.messages) {
+          const display = buildDisplayMessages(result.messages);
+          nextIdRef.current = display.length;
+          setMessages(display);
+          setEpoch((e) => e + 1);
+        }
+        return result.message;
+      },
+      exportSession: (arg) =>
+        exportSession({ backend: backendRef.current, sessionStore, cwd, arg }),
+      undo: () => undoLastSnapshot(),
+      initProject: async (args) => {
+        let model = null;
+        try {
+          model = createModel(config, modelNameRef.current);
+        } catch {
+          model = null;
+        }
+        const result = await initProject({ cwd, args, model });
+        return result.message;
+      },
+      runDoctor: async () => formatDoctorReport(await runDoctor({ cwd, config })),
+      submitPrompt: async (text) => {
+        await runStream(text);
+      },
+      describeConfig: () =>
+        [
+          `defaultModel: ${config.defaultModel || "(none)"}`,
+          `permissionMode: ${config.permissionMode}`,
+          `providers (${config.providers.length}): ${config.providers.map((p) => p.name).join(", ") || "(none)"}`,
+          `models (${config.models.length}): ${config.models.map((m) => m.name).join(", ") || "(none)"}`,
+          `maxSteps: ${config.maxSteps}`,
+          `contextMaxTokens: ${config.contextMaxTokens}`,
+          `permissions.allow (${config.permissions.allow.length}): ${config.permissions.allow.join(", ") || "(none)"}`,
+        ].join("\n"),
+    };
+    const reg = new CommandRegistry();
+    registerBuiltinCommands(reg);
+    registerCustomCommands(reg, cwd);
+    return Object.assign(reg, { ctx });
+  }, [pushMessage, exit, config, cwd, switchModel, resume, sessionStore, runStream]);
+
+  const runShellBang = useCallback(
+    async (raw: string) => {
+      pushMessage("user", `!${raw.trim()}`);
+      const controller = new AbortController();
+      abortRef.current = controller;
+      try {
+        const outcome = await executeShellBang(raw, cwd, controller.signal);
+        if (!outcome.ok) {
+          pushMessage(
+            "system",
+            outcome.reason === "dangerous"
+              ? `Refused to run dangerous command: ${raw.trim()}`
+              : "Usage: !<command>",
+          );
+          return;
+        }
+        pushMessage(
+          "tool",
+          formatToolCard({
+            id: `bang-${nextIdRef.current}`,
+            name: "bash",
+            argsSummary: outcome.command,
+            result: outcome.output,
+            isError: outcome.isError,
+          }),
+        );
+        const current = backendRef.current;
+        if (current instanceof AgentLoop) {
+          await current.appendContextMessage(outcome.contextMessage);
+        }
+      } finally {
+        if (abortRef.current === controller) {
+          abortRef.current = null;
+        }
+      }
+    },
+    [cwd, pushMessage],
+  );
+
   const handleSubmit = useCallback(
     (text: string) => {
+      if (text.startsWith("!")) {
+        void runShellBang(text.slice(1));
+        return;
+      }
       if (text.startsWith("/")) {
         const parsed = parseSlashCommand(text);
         if (!parsed) return;
@@ -411,7 +460,7 @@ export function Repl({
       }
       void runStream(text);
     },
-    [registry, pushMessage, runStream],
+    [registry, pushMessage, runStream, runShellBang],
   );
 
   const commandHints = useMemo(
