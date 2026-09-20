@@ -56,9 +56,16 @@ describe("executeShellBang", () => {
     cwd = mkdtempSync(path.join(tmpdir(), "star-bang-test-"));
   });
 
-  afterEach(() => {
-    // aborted child processes may still hold the dir on Windows; retry the cleanup
-    rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  afterEach(async () => {
+    // aborted Git Bash process trees can linger on Windows runners; best-effort cleanup
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try {
+        rmSync(cwd, { recursive: true, force: true });
+        return;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
   });
 
   it("runs a real command and merges output", async () => {
@@ -124,9 +131,16 @@ describe("shell output context injection", () => {
     cwd = mkdtempSync(path.join(tmpdir(), "star-bang-ctx-"));
   });
 
-  afterEach(() => {
-    // aborted child processes may still hold the dir on Windows; retry the cleanup
-    rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  afterEach(async () => {
+    // aborted Git Bash process trees can linger on Windows runners; best-effort cleanup
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try {
+        rmSync(cwd, { recursive: true, force: true });
+        return;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
   });
 
   it("makes prior shell output visible in the next model request", async () => {
