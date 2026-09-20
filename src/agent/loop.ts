@@ -10,6 +10,7 @@ import type { SessionStore } from "../session/store";
 import { beginTurn } from "../tools/fs/snapshots";
 import type { ToolRegistry } from "../tools/registry";
 import type { ToolResult } from "../tools/types";
+import { MAX_SUBAGENT_DEPTH, createSubagentTool } from "./subagent";
 
 export interface AgentLoopOptions {
   model: LanguageModel;
@@ -18,6 +19,10 @@ export interface AgentLoopOptions {
   cwd: string;
   system?: string;
   sessionStore?: SessionStore | null;
+  // Depth of this loop in the subagent chain (0 = main agent). At
+  // MAX_SUBAGENT_DEPTH the subagent tool is not registered, so subagents
+  // cannot spawn further subagents.
+  subagentDepth?: number;
 }
 
 export const PLAN_MODE_PROMPT =
@@ -43,6 +48,19 @@ export class AgentLoop {
     this.opts = opts;
     if (opts.system) {
       this.messages.push({ role: "system", content: opts.system });
+    }
+    const depth = opts.subagentDepth ?? 0;
+    if (opts.registry && depth < MAX_SUBAGENT_DEPTH) {
+      opts.registry.register(
+        createSubagentTool({
+          model: opts.model,
+          config: opts.config,
+          cwd: opts.cwd,
+          system: opts.system,
+          depth,
+          getConfirmHandler: () => this.confirmHandler,
+        }),
+      );
     }
   }
 
