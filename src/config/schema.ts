@@ -31,6 +31,10 @@ export const ConfigSchema = z.object({
   models: z.array(ModelConfigSchema).default([]),
   maxSteps: z.number().int().positive().default(50),
   contextMaxTokens: z.number().int().positive().default(100_000),
+  // Seconds without any stream part before a stalled response is ended
+  // gracefully (some relays never send the terminal chunks). Applies once
+  // streaming has started; the first part gets a longer, fixed allowance.
+  streamIdleTimeoutSec: z.number().positive().default(20),
   contextCompaction: z.enum(["summary", "truncate"]).default("summary"),
   permissions: PermissionsConfigSchema.default({ allow: [] }),
 });

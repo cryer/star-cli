@@ -54,6 +54,7 @@ describe("loadConfig", () => {
       models: [],
       maxSteps: 50,
       contextMaxTokens: 100_000,
+      streamIdleTimeoutSec: 20,
       contextCompaction: "summary",
       permissions: { allow: [] },
     });

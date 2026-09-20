@@ -10,11 +10,17 @@ export interface StreamChatOptions {
   maxTokens?: number;
   // Idle watchdog: some relays deliver the final content but never send the
   // terminal chunks (or never close the socket). If no stream part arrives
-  // within this window, the stream is ended gracefully with what we have.
+  // within this window once streaming has started, the stream is ended
+  // gracefully with what we have.
   idleTimeoutMs?: number;
+  // Separate, longer allowance for the very first part: thinking models and
+  // slow relays can take a while before producing anything, and a false
+  // timeout here would kill a healthy request.
+  firstPartTimeoutMs?: number;
 }
 
-const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
+const DEFAULT_IDLE_TIMEOUT_MS = 20_000;
+const DEFAULT_FIRST_PART_TIMEOUT_MS = 120_000;
 
 export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<StreamEvent> {
   const controller = new AbortController();
@@ -28,12 +34,14 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
     maxTokens: opts.maxTokens,
   });
   const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+  const firstPartTimeoutMs = opts.firstPartTimeoutMs ?? DEFAULT_FIRST_PART_TIMEOUT_MS;
   const iterator = result.fullStream[Symbol.asyncIterator]();
+  let seenPart = false;
   try {
     for (;;) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const idle = new Promise<null>((resolve) => {
-        timer = setTimeout(() => resolve(null), idleTimeoutMs);
+        timer = setTimeout(() => resolve(null), seenPart ? idleTimeoutMs : firstPartTimeoutMs);
       });
       const next = await Promise.race([iterator.next(), idle]);
       if (timer) clearTimeout(timer);
@@ -45,6 +53,7 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
         return;
       }
       if (next.done) return;
+      seenPart = true;
       const part = next.value;
       switch (part.type) {
         case "text-delta":

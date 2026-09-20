@@ -243,6 +243,7 @@ export class AgentLoop {
       messages: this.messages,
       tools: aiTools,
       abortSignal: signal,
+      idleTimeoutMs: this.opts.config.streamIdleTimeoutSec * 1000,
     });
   }
 

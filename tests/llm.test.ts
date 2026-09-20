@@ -20,6 +20,7 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     maxSteps: 50,
     contextMaxTokens: 100_000,
     contextCompaction: "summary",
+    streamIdleTimeoutSec: 20,
     permissions: { allow: [] },
     ...overrides,
   };
@@ -311,5 +312,69 @@ describe("streamChat", () => {
     );
 
     expect(events.some((e) => e.type === "error")).toBe(false);
+  });
+
+  it("waits for a slow first part beyond the mid-stream idle timeout", async () => {
+    // Thinking models and slow relays can take far longer than the idle
+    // window before producing anything; the first part gets its own budget.
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: new ReadableStream({
+          async start(controller) {
+            await new Promise((resolve) => setTimeout(resolve, 80));
+            controller.enqueue({ type: "text-delta", textDelta: "late" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "stop",
+              usage: { promptTokens: 1, completionTokens: 1 },
+            });
+            controller.close();
+          },
+        }),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+
+    const events = await collect(
+      streamChat({
+        model,
+        messages: [{ role: "user", content: "hi" }],
+        idleTimeoutMs: 30,
+        firstPartTimeoutMs: 500,
+      }),
+    );
+
+    expect(events).toEqual([
+      { type: "text-delta", text: "late" },
+      {
+        type: "finish",
+        finishReason: "stop",
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      },
+    ]);
+  });
+
+  it("ends gracefully when the first part never arrives", async () => {
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: new ReadableStream({
+          start() {
+            // never enqueues and never closes
+          },
+        }),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+
+    const events = await collect(
+      streamChat({
+        model,
+        messages: [{ role: "user", content: "hi" }],
+        idleTimeoutMs: 10_000,
+        firstPartTimeoutMs: 50,
+      }),
+    );
+
+    expect(events).toEqual([{ type: "finish", finishReason: "idle-timeout", usage: undefined }]);
   });
 });

@@ -20,6 +20,7 @@ function makeConfig(): StarConfig {
     maxSteps: 50,
     contextMaxTokens: 100_000,
     contextCompaction: "summary",
+    streamIdleTimeoutSec: 20,
     permissions: { allow: [] },
   };
 }

@@ -40,6 +40,9 @@ defaultModel = "gpt"
 permissionMode = "ask"   # ask | auto | readonly | yolo
 contextMaxTokens = 100000
 contextCompaction = "summary"   # summary | truncate — how over-budget history is compacted
+# Seconds with no stream output before a stalled response is ended gracefully
+# (some relays never close the stream). The first token gets a fixed 120s allowance.
+streamIdleTimeoutSec = 20
 
 [permissions]
 # persistent allow-rules, written automatically when you pick "a" (always) on a permission prompt
