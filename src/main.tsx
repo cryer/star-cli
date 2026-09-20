@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { AgentLoop } from "./agent/loop";
 import { resolveMentions } from "./cli/mentions";
+import { UsageTracker, eventToJsonLine } from "./cli/print-json";
 import { renderRepl } from "./cli/repl";
 import { loadConfigSync } from "./config/loader";
 import type { StarConfig } from "./config/schema";
@@ -33,7 +34,12 @@ async function createLoop(
   });
 }
 
-async function printMode(loop: AgentLoop, prompt: string, cwd: string): Promise<number> {
+async function printMode(
+  loop: AgentLoop,
+  prompt: string,
+  cwd: string,
+  json: boolean,
+): Promise<number> {
   const controller = new AbortController();
   process.on("SIGINT", () => controller.abort());
   const resolved = await resolveMentions(prompt, cwd);
@@ -43,50 +49,54 @@ async function printMode(loop: AgentLoop, prompt: string, cwd: string): Promise<
   for (const skip of resolved.skipped) {
     process.stderr.write(`[skipped] @${skip.path}: ${skip.reason}\n`);
   }
-  let requests = 0;
-  let promptTokens = 0;
-  let completionTokens = 0;
-  let totalTokens = 0;
+  const usage = new UsageTracker();
   let exitCode = 0;
   for await (const event of loop.stream(resolved.input, controller.signal, {
     persistAs: prompt,
   })) {
+    if (json) {
+      const line = eventToJsonLine(event);
+      if (line) process.stdout.write(`${line}\n`);
+    }
     switch (event.type) {
       case "text-delta":
-        process.stdout.write(event.text);
+        if (!json) process.stdout.write(event.text);
         break;
       case "tool-call":
-        process.stderr.write(`\n[tool] ${event.name} ${JSON.stringify(event.args)}\n`);
+        if (!json) process.stderr.write(`\n[tool] ${event.name} ${JSON.stringify(event.args)}\n`);
         break;
       case "tool-result": {
-        const preview =
-          event.content.length > 500
-            ? `${event.content.slice(0, 500)}... (truncated)`
-            : event.content;
-        process.stderr.write(`[result] ${event.isError ? "ERROR: " : ""}${preview}\n`);
+        if (!json) {
+          const preview =
+            event.content.length > 500
+              ? `${event.content.slice(0, 500)}... (truncated)`
+              : event.content;
+          process.stderr.write(`[result] ${event.isError ? "ERROR: " : ""}${preview}\n`);
+        }
         break;
       }
       case "finish":
-        if (event.usage) {
-          requests += 1;
-          promptTokens += event.usage.promptTokens;
-          completionTokens += event.usage.completionTokens;
-          totalTokens += event.usage.totalTokens;
-        }
+        usage.add(event.usage);
         break;
       case "error":
-        process.stderr.write(`\n[error] ${event.error.message}\n`);
+        if (!json) process.stderr.write(`\n[error] ${event.error.message}\n`);
         exitCode = 1;
         break;
     }
     if (exitCode !== 0) break;
   }
-  if (requests > 0) {
-    process.stderr.write(
-      `[usage] ${requests} requests, ${promptTokens} prompt + ${completionTokens} completion = ${totalTokens} tokens\n`,
-    );
+  const usageLine = usage.toJsonLine();
+  if (usageLine) {
+    if (json) {
+      process.stdout.write(`${usageLine}\n`);
+    } else {
+      const t = usage.totals;
+      process.stderr.write(
+        `[usage] ${t.requests} requests, ${t.promptTokens} prompt + ${t.completionTokens} completion = ${t.totalTokens} tokens\n`,
+      );
+    }
   }
-  process.stdout.write("\n");
+  if (!json) process.stdout.write("\n");
   return exitCode;
 }
 
@@ -99,9 +109,17 @@ program
   .option("-m, --model <model>", "model to use")
   .option("--permission-mode <mode>", "permission mode: auto | ask | readonly")
   .option("-p, --print <prompt>", "non-interactive print mode")
+  .option("--json", "output NDJSON events on stdout (print mode only)")
   .option("-r, --resume <sessionId>", "resume a previous session")
   .action(async (opts) => {
     const cwd = process.cwd();
+
+    if (opts.json && opts.print === undefined) {
+      console.error(
+        '--json requires print mode: use star -p "..." --json (the interactive REPL does not support JSON output).',
+      );
+      process.exit(1);
+    }
 
     let config: StarConfig;
     try {
@@ -147,7 +165,7 @@ program
     if (opts.print) {
       // Let the loop drain instead of process.exit(): force-exiting on Windows
       // can hit a libuv assertion while undici keep-alive handles are closing.
-      process.exitCode = await printMode(loop, opts.print, cwd);
+      process.exitCode = await printMode(loop, opts.print, cwd, Boolean(opts.json));
       return;
     }
 
