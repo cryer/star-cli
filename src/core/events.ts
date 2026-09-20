@@ -6,6 +6,7 @@ export interface TokenUsage {
 
 export type StreamEvent =
   | { type: "text-delta"; text: string }
+  | { type: "reasoning"; text: string }
   | { type: "tool-call"; id: string; name: string; args: unknown }
   | { type: "tool-result"; id: string; name: string; content: string; isError?: boolean }
   | { type: "finish"; finishReason: string; usage?: TokenUsage }

@@ -11,6 +11,7 @@ import { createDefaultRegistry } from "../src/tools";
 
 type Chunk =
   | { type: "text-delta"; textDelta: string }
+  | { type: "reasoning"; textDelta: string }
   | {
       type: "tool-call";
       toolCallType: "function";
@@ -129,6 +130,32 @@ describe("AgentLoop", () => {
     const last = messages[messages.length - 1];
     expect(last?.role).toBe("assistant");
     expect(last?.content).toEqual([{ type: "text", text: "Hello world" }]);
+  });
+
+  it("passes reasoning events through without adding them to history", async () => {
+    const loop = makeLoop(
+      mockModel([
+        [
+          { type: "reasoning", textDelta: "let me think" },
+          { type: "text-delta", textDelta: "answer" },
+          {
+            type: "finish",
+            finishReason: "stop",
+            usage: { promptTokens: 5, completionTokens: 3 },
+          },
+        ],
+      ]),
+    );
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    expect(events[0]).toEqual({ type: "reasoning", text: "let me think" });
+    expect(events[1]).toEqual({ type: "text-delta", text: "answer" });
+
+    const messages = loop.getMessages();
+    const last = messages[messages.length - 1];
+    expect(last?.role).toBe("assistant");
+    expect(last?.content).toEqual([{ type: "text", text: "answer" }]);
   });
 
   it("executes a tool call and continues with the result", async () => {

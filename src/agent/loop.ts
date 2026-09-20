@@ -84,6 +84,8 @@ export class AgentLoop {
           if (event.type === "text-delta") {
             text += event.text;
             yield event;
+          } else if (event.type === "reasoning") {
+            yield event;
           } else if (event.type === "tool-call") {
             toolCalls.push({ id: event.id, name: event.name, args: event.args });
             yield event;

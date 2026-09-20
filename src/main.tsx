@@ -63,6 +63,8 @@ async function printMode(
       case "text-delta":
         if (!json) process.stdout.write(event.text);
         break;
+      case "reasoning":
+        break;
       case "tool-call":
         if (!json) process.stderr.write(`\n[tool] ${event.name} ${JSON.stringify(event.args)}\n`);
         break;

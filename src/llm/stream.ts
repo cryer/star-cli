@@ -23,6 +23,9 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
       case "text-delta":
         yield { type: "text-delta", text: part.textDelta };
         break;
+      case "reasoning":
+        yield { type: "reasoning", text: part.textDelta };
+        break;
       case "tool-call":
         yield {
           type: "tool-call",

@@ -11,6 +11,7 @@ import { createDefaultRegistry } from "../src/tools";
 
 type Chunk =
   | { type: "text-delta"; textDelta: string }
+  | { type: "reasoning"; textDelta: string }
   | {
       type: "tool-call";
       toolCallType: "function";
@@ -143,6 +144,11 @@ describe("eventToJsonLine", () => {
     });
   });
 
+  it("serializes reasoning events", () => {
+    const line = eventToJsonLine({ type: "reasoning", text: "let me think" });
+    expect(line).toBe('{"type":"reasoning","text":"let me think"}');
+  });
+
   it("returns null for finish events (folded into the usage summary)", () => {
     expect(eventToJsonLine({ type: "finish", finishReason: "stop" })).toBeNull();
   });
@@ -257,6 +263,32 @@ describe("print mode NDJSON over AgentLoop", () => {
     expect(text).toBe("The file says hello");
 
     expect(parsed.find((e) => e.type === "usage")).toMatchObject({ requests: 2 });
+  });
+
+  it("emits reasoning event lines when the model streams reasoning", async () => {
+    const loop = makeLoop(
+      mockModel([
+        [
+          { type: "reasoning", textDelta: "hmm" },
+          { type: "text-delta", textDelta: "hi" },
+          {
+            type: "finish",
+            finishReason: "stop",
+            usage: { promptTokens: 5, completionTokens: 3 },
+          },
+        ],
+      ]),
+    );
+
+    const events: StreamEvent[] = [];
+    for await (const event of loop.stream("hi", new AbortController().signal)) {
+      events.push(event);
+    }
+    const { lines } = toNdjson(events);
+
+    const parsed = lines.map((line) => JSON.parse(line));
+    expect(parsed[0]).toEqual({ type: "reasoning", text: "hmm" });
+    expect(parsed[1]).toEqual({ type: "text-delta", text: "hi" });
   });
 
   it("emits an error event line when the loop fails", async () => {

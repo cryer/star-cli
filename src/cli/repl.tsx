@@ -1,4 +1,4 @@
-import { Box, render, useApp, useInput } from "ink";
+import { Box, Text, render, useApp, useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentLoop } from "../agent/loop";
 import { addAllowRule } from "../config/save";
@@ -26,6 +26,11 @@ import { type DisplayMessage, MessageList } from "./components/MessageList";
 import { type PermissionDecision, PermissionPrompt } from "./components/PermissionPrompt";
 import { StatusBar } from "./components/StatusBar";
 import { StreamingMessage } from "./components/StreamingMessage";
+import {
+  THOUGHT_SUMMARY_LENGTH,
+  ThinkingIndicator,
+  truncateTail,
+} from "./components/ThinkingIndicator";
 import { ToolCallCard, type ToolCardData, formatToolCard } from "./components/ToolCallCard";
 import { estimateCost } from "./cost";
 import { type DiffPreview, generateDiffPreview } from "./diff-preview";
@@ -84,6 +89,9 @@ export function Repl({
   const [epoch, setEpoch] = useState(0);
   const [streamingText, setStreamingText] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [thinking, setThinking] = useState(false);
+  const [thinkingText, setThinkingText] = useState("");
+  const [thoughtSummary, setThoughtSummary] = useState<string | null>(null);
   const [usageVersion, setUsageVersion] = useState(0);
   const [modelName, setModelName] = useState(model);
   const [pending, setPending] = useState<PendingPermission | null>(null);
@@ -93,6 +101,8 @@ export function Repl({
   const nextIdRef = useRef(initialDisplay.length);
   const abortRef = useRef<AbortController | null>(null);
   const streamedRef = useRef("");
+  const thinkingRef = useRef(false);
+  const reasoningRef = useRef("");
   const flushTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const toolCardsRef = useRef(new Map<string, ToolCardData>());
   const pendingRef = useRef<PendingPermission | null>(null);
@@ -239,17 +249,34 @@ export function Repl({
       const controller = new AbortController();
       abortRef.current = controller;
       streamedRef.current = "";
+      thinkingRef.current = true;
+      reasoningRef.current = "";
+      setThinking(true);
+      setThinkingText("");
+      setThoughtSummary(null);
       setStreamingText("");
       setIsStreaming(true);
       flushTimerRef.current = setInterval(() => {
         setStreamingText(streamedRef.current);
+        setThinkingText(reasoningRef.current);
       }, FLUSH_INTERVAL_MS);
       try {
         for await (const event of backendRef.current.stream(resolved.input, controller.signal, {
           persistAs: input,
         })) {
           if (event.type === "text-delta") {
+            if (thinkingRef.current) {
+              thinkingRef.current = false;
+              setThinking(false);
+              if (reasoningRef.current.length > 0) {
+                setThoughtSummary(
+                  `thought: ${truncateTail(reasoningRef.current, THOUGHT_SUMMARY_LENGTH)}`,
+                );
+              }
+            }
             streamedRef.current += event.text;
+          } else if (event.type === "reasoning") {
+            reasoningRef.current += event.text;
           } else if (event.type === "tool-call") {
             toolCardsRef.current.set(event.id, {
               id: event.id,
@@ -264,6 +291,10 @@ export function Repl({
               card.isError = event.isError ?? false;
               setCardsVersion((v) => v + 1);
             }
+            thinkingRef.current = true;
+            reasoningRef.current = "";
+            setThinking(true);
+            setThinkingText("");
           } else if (event.type === "finish") {
             if (event.usage) {
               const usage = usageRef.current;
@@ -289,6 +320,11 @@ export function Repl({
         }
         abortRef.current = null;
         setIsStreaming(false);
+        thinkingRef.current = false;
+        reasoningRef.current = "";
+        setThinking(false);
+        setThinkingText("");
+        setThoughtSummary(null);
         const finalText = streamedRef.current;
         streamedRef.current = "";
         setStreamingText(null);
@@ -480,6 +516,8 @@ export function Repl({
           ))}
         </Box>
       )}
+      {thinking && <ThinkingIndicator reasoning={thinkingText} />}
+      {!thinking && thoughtSummary !== null && <Text dimColor>{thoughtSummary}</Text>}
       {streamingText !== null && <StreamingMessage text={streamingText} />}
       {pending && (
         <PermissionPrompt

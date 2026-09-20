@@ -106,6 +106,39 @@ describe("streamChat", () => {
     ]);
   });
 
+  it("maps reasoning stream parts to reasoning events", async () => {
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: convertArrayToReadableStream([
+          { type: "reasoning", textDelta: "pondering " },
+          { type: "reasoning", textDelta: "deeply" },
+          { type: "text-delta", textDelta: "Hi" },
+          {
+            type: "finish",
+            finishReason: "stop",
+            usage: { promptTokens: 3, completionTokens: 5 },
+          },
+        ]),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+
+    const events = await collect(
+      streamChat({ model, messages: [{ role: "user", content: "hi" }] }),
+    );
+
+    expect(events).toEqual([
+      { type: "reasoning", text: "pondering " },
+      { type: "reasoning", text: "deeply" },
+      { type: "text-delta", text: "Hi" },
+      {
+        type: "finish",
+        finishReason: "stop",
+        usage: { promptTokens: 3, completionTokens: 5, totalTokens: 8 },
+      },
+    ]);
+  });
+
   it("sanitizes non-finite usage numbers to zero", async () => {
     const model = new MockLanguageModelV1({
       doStream: async () => ({
