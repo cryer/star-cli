@@ -4,7 +4,7 @@
 
 An AI agent command-line interface written in TypeScript — multi-model LLM access, streaming terminal UI, tool calling, permission control, and session persistence.
 
-Features: streaming REPL with slash commands · OpenAI / Anthropic / OpenAI-compatible providers · built-in fs / bash / web tools with a permission gate · `@file` mentions · conversation compaction (`/compact`) · session persistence and resume (`/resume`, `star -r`) · file-write snapshots with `/undo` · persistent permission allow-rules · TODO task tracking · Markdown session export (`/export`).
+Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers · built-in fs / bash / web tools with a permission gate · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume (`/resume`, `star -r`) · file-write snapshots with `/undo` · persistent permission allow-rules · TODO task tracking · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
 
 ## Requirements
 
@@ -56,6 +56,9 @@ apiKeyEnv = "OPENAI_API_KEY"
 name = "gpt"
 provider = "openai"
 model = "gpt-4o"
+# optional per-model pricing (USD per 1M tokens) — enables the $ estimate in /cost
+promptPrice = 2.5
+completionPrice = 10
 
 [[providers]]
 name = "claude"
@@ -76,6 +79,7 @@ API keys resolve from the environment variable first (`apiKeyEnv`), then the `ap
 ```
 star                          start the interactive REPL
 star -p "prompt"              non-interactive print mode (pipe-friendly)
+star -p "prompt" --json       NDJSON event stream on stdout (text/tool/usage/error lines)
 star -m gpt                   pick a model
 star --permission-mode auto   auto | ask | readonly
 star -r <sessionId>           resume a previous session
@@ -89,16 +93,41 @@ star -r <sessionId>           resume a previous session
 | `/model [name]` | list / switch models |
 | `/resume [id]` | list / resume sessions |
 | `/todo` | show TODO list |
-| `/cost` | show API token usage for this session |
+| `/cost` | show API token usage and estimated $ cost (needs per-model pricing in config) |
 | `/config` | show resolved config |
 | `/compact` | compact conversation history to free up context |
 | `/export [path]` | export the current session to a Markdown file |
 | `/undo` | revert the last file write/edit made by a tool |
+| `/init [force]` | scan the project and generate an AGENTS.md (LLM-polished when a model is available) |
+| `/doctor` | environment self-check (Node, shell, config, API key status, sessions dir writability) |
 | `/clear` | clear the screen |
 | `/exit` | quit |
 | `/q` | quit (alias of `/exit`) |
 
-Keys: `ESC` / `Ctrl+C` interrupts the current stream; on a permission prompt: `y` allow, `n` deny, `a` always allow — the generated allow-rule (e.g. `bash(npm test)`) is saved to `permissions.allow` in the config file and survives restarts. Input editing: arrow keys move the cursor, `Ctrl+A`/`Ctrl+E` jump to start/end, `Ctrl+U`/`Ctrl+K` delete before/after the cursor, `Ctrl+W` deletes the previous word, up/down recall history. Typing `/` shows slash-command suggestions — `↑`/`↓` to highlight, `Tab` (or `→` at end of input) to complete, `ESC` to dismiss.
+Keys: `ESC` / `Ctrl+C` interrupts the current stream; on a permission prompt: `y` allow, `n` deny, `a` always allow — the generated allow-rule (e.g. `bash(npm test)`) is saved to `permissions.allow` in the config file and survives restarts. Write/edit prompts include a colored diff preview of the pending change. Input editing: arrow keys move the cursor, `Ctrl+A`/`Ctrl+E` jump to start/end, `Ctrl+U`/`Ctrl+K` delete before/after the cursor, `Ctrl+W` deletes the previous word, up/down recall history. Typing `/` shows slash-command suggestions — `↑`/`↓` to highlight, `Tab` (or `→` at end of input) to complete, `ESC` to dismiss.
+
+While the model is working, a spinner (`- \ | /`) shows `star is thinking…`; reasoning models also stream a dimmed tail of their thinking (last ~200 chars), which collapses to a one-line summary once the answer starts.
+
+## !shell passthrough
+
+Prefix input with `!` to run a command locally without involving the model:
+
+```
+!git status
+```
+
+Output renders as a tool card and is injected into the conversation so the model can see it afterwards. Dangerous commands are still blocked, and `ESC` / `Ctrl+C` aborts execution.
+
+## Custom slash commands
+
+Drop Markdown files into `.star/commands/<name>.md` (project) or `~/.star-cli/commands/<name>.md` (global) to define your own commands — `/review src/` then sends the file's contents (with `$ARGUMENTS` replaced by your arguments) to the model as a prompt. An optional first line `<!-- description: does a thing -->` sets the description shown in `/help` and autocomplete. Names must match `[a-z0-9-]+`; built-in commands win on conflicts.
+
+```markdown
+<!-- description: review code for issues -->
+Review the following code and list concrete issues: $ARGUMENTS
+```
+
+The REPL also checks npm for a newer release on startup (async, non-blocking; disable with `STAR_NO_UPDATE_CHECK=1`).
 
 ## @file mentions
 
