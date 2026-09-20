@@ -3,7 +3,7 @@ import { tool as aiTool } from "ai";
 import type { StarConfig } from "../config/schema";
 import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
 import type { StreamEvent } from "../core/events";
-import type { CoreMessage } from "../core/messages";
+import { type CoreMessage, reconcileToolCalls } from "../core/messages";
 import { checkPermission } from "../permissions/gate";
 import type { PermissionRequest } from "../permissions/types";
 import type { SessionStore } from "../session/store";
@@ -42,7 +42,7 @@ export class AgentLoop {
   }
 
   async loadMessages(messages: CoreMessage[]): Promise<void> {
-    this.messages = messages;
+    this.messages = reconcileToolCalls(messages);
   }
 
   async appendContextMessage(text: string, role: "user" | "system" = "user"): Promise<void> {
@@ -120,29 +120,61 @@ export class AgentLoop {
 
       if (toolCalls.length === 0) return;
 
-      for (const call of toolCalls) {
-        const result = await this.executeTool(call, signal);
-        const toolMessage: CoreMessage = {
-          role: "tool",
-          content: [
-            {
-              type: "tool-result",
-              toolCallId: call.id,
-              toolName: call.name,
-              result: result.content,
-            },
-          ],
-        };
-        this.messages.push(toolMessage);
-        await this.persist(toolMessage);
-        yield {
-          type: "tool-result",
-          id: call.id,
-          name: call.name,
-          content: result.content,
-          isError: result.isError,
-        };
+      const answered = new Set<string>();
+      try {
+        for (const call of toolCalls) {
+          if (signal.aborted) break;
+          const result = await this.executeTool(call, signal);
+          const toolMessage: CoreMessage = {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: call.id,
+                toolName: call.name,
+                result: result.content,
+              },
+            ],
+          };
+          this.messages.push(toolMessage);
+          await this.persist(toolMessage);
+          answered.add(call.id);
+          yield {
+            type: "tool-result",
+            id: call.id,
+            name: call.name,
+            content: result.content,
+            isError: result.isError,
+          };
+        }
+      } finally {
+        // The assistant message carrying these tool calls is already persisted,
+        // so every call must be closed with a tool message even when execution
+        // is aborted or blows up mid-batch; otherwise the stored history can
+        // no longer be sent to the API.
+        for (const call of toolCalls) {
+          if (answered.has(call.id)) continue;
+          const content = signal.aborted
+            ? "Tool execution interrupted by user."
+            : "Tool execution interrupted before a result was produced.";
+          const synthetic: CoreMessage = {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: call.id,
+                toolName: call.name,
+                result: content,
+              },
+            ],
+          };
+          this.messages.push(synthetic);
+          await this.persist(synthetic).catch(() => {});
+          yield { type: "tool-result", id: call.id, name: call.name, content, isError: true };
+        }
       }
+
+      if (signal.aborted) return;
     }
 
     yield {
@@ -213,13 +245,18 @@ export class AgentLoop {
       return { content: `Permission denied for tool "${call.name}".`, isError: true };
     }
     if (decision === "ask") {
-      const approved = this.confirmHandler
-        ? await this.confirmHandler({
-            toolName: call.name,
-            args: call.args,
-            level: tool.permission,
-          })
-        : false;
+      let approved = false;
+      try {
+        approved = this.confirmHandler
+          ? await this.confirmHandler({
+              toolName: call.name,
+              args: call.args,
+              level: tool.permission,
+            })
+          : false;
+      } catch {
+        approved = false;
+      }
       if (!approved) {
         return { content: `User rejected tool "${call.name}".`, isError: true };
       }
