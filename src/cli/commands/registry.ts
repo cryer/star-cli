@@ -14,6 +14,7 @@ export interface CommandContext {
   exportSession(path: string): Promise<string>;
   undo(): Promise<string>;
   permissionMode(args: string): Promise<string>;
+  planMode(): Promise<string>;
   initProject(args: string): Promise<string>;
   runDoctor(): Promise<string>;
   submitPrompt?(text: string): void | Promise<void>;

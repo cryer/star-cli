@@ -23,6 +23,7 @@ import { registerCustomCommands } from "./commands/custom";
 import { formatDoctorReport, runDoctor } from "./commands/doctor";
 import { initProject } from "./commands/init-project";
 import { type CommandContext, CommandRegistry, parseSlashCommand } from "./commands/registry";
+import { type ExitPlanDecision, ExitPlanPrompt } from "./components/ExitPlanPrompt";
 import { InputBox } from "./components/InputBox";
 import { type DisplayMessage, MessageList } from "./components/MessageList";
 import { type PermissionDecision, PermissionPrompt } from "./components/PermissionPrompt";
@@ -69,6 +70,9 @@ function runningTaskLabels(): string[] {
     .filter((t) => t.status === "running")
     .map((t) => t.description ?? t.command);
 }
+
+// Shift+Tab cycles these in order; yolo is reachable only via /permission.
+const SESSION_MODE_CYCLE = ["ask", "auto", "readonly", "plan"] as const;
 
 function formatUsage(usage: UsageStats): string {
   return `API usage this session: ${usage.requests} requests, ${usage.promptTokens} prompt + ${usage.completionTokens} completion = ${usage.totalTokens} tokens`;
@@ -119,6 +123,7 @@ export function Repl({
   const [activity, setActivity] = useState<string | null>(null);
   const [bgLabels, setBgLabels] = useState<string[]>(() => runningTaskLabels());
   const [permissionModeState, setPermissionModeState] = useState(permissionMode);
+  const [planApproval, setPlanApprovalState] = useState(false);
 
   const backendRef = useRef<ChatBackend>(backend);
   const nextIdRef = useRef(initialDisplay.length);
@@ -131,6 +136,10 @@ export function Repl({
   const toolCardsRef = useRef(new Map<string, ToolCardData>());
   const pendingRef = useRef<PendingPermission | null>(null);
   const alwaysAllowedRef = useRef(new Set<string>());
+  // Mode the session was in before plan mode was entered; restored on plan
+  // approval or /plan toggle. null when plan mode is not active.
+  const prevModeRef = useRef<StarConfig["permissionMode"] | null>(null);
+  const planApprovalRef = useRef(false);
   const modelNameRef = useRef(model);
   const usageRef = useRef<UsageStats>(initialUsage ? { ...initialUsage } : emptyUsage());
   // Number of assistant chunks already committed to static history this turn;
@@ -185,6 +194,28 @@ export function Repl({
     pendingRef.current = p;
     setPending(p);
   }, []);
+
+  const setPlanApproval = useCallback((v: boolean) => {
+    planApprovalRef.current = v;
+    setPlanApprovalState(v);
+  }, []);
+
+  // Session-scoped mode switch: mutates the shared config object the AgentLoop
+  // reads on every tool call. Entering plan mode remembers the previous mode
+  // for later restoration; unlike /permission nothing is written to config.
+  const applySessionMode = useCallback(
+    (mode: StarConfig["permissionMode"]) => {
+      if (mode === config.permissionMode) return;
+      if (mode === "plan") {
+        prevModeRef.current = config.permissionMode;
+      } else if (config.permissionMode === "plan") {
+        prevModeRef.current = null;
+      }
+      config.permissionMode = mode;
+      setPermissionModeState(mode);
+    },
+    [config],
+  );
 
   const attachConfirmHandler = useCallback(
     (target: ChatBackend) => {
@@ -254,6 +285,14 @@ export function Repl({
 
   useInput((_input, key) => {
     if (key.escape) interrupt();
+    if (key.shift && key.tab) {
+      // Don't yank the mode out from under a running turn or an open prompt.
+      if (abortRef.current || pendingRef.current || planApprovalRef.current) return;
+      const current = config.permissionMode as (typeof SESSION_MODE_CYCLE)[number];
+      const index = SESSION_MODE_CYCLE.indexOf(current);
+      const next = SESSION_MODE_CYCLE[(index + 1) % SESSION_MODE_CYCLE.length] ?? "ask";
+      applySessionMode(next);
+    }
   });
 
   const handleDecision = useCallback(
@@ -487,9 +526,34 @@ export function Repl({
           setPendingPermission(null);
           p.resolve(false);
         }
+        // A plan-mode turn that ran to completion ends in a plan, not in
+        // changes — offer to approve it and switch back to execution.
+        if (!interrupted && config.permissionMode === "plan") {
+          setPlanApproval(true);
+        }
       }
     },
-    [pushMessage, pushAssistantChunk, setPendingPermission, sessionStore, cwd],
+    [
+      pushMessage,
+      pushAssistantChunk,
+      setPendingPermission,
+      setPlanApproval,
+      sessionStore,
+      cwd,
+      config,
+    ],
+  );
+
+  const handlePlanDecision = useCallback(
+    (decision: ExitPlanDecision) => {
+      setPlanApproval(false);
+      if (decision === "no") return;
+      const restore = prevModeRef.current ?? "ask";
+      applySessionMode(restore);
+      pushMessage("system", `Plan approved — permission mode restored to ${restore}.`);
+      void runStream("The plan above is approved. Proceed with the implementation.");
+    },
+    [applySessionMode, pushMessage, runStream, setPlanApproval],
   );
 
   const registry = useMemo(() => {
@@ -594,11 +658,21 @@ export function Repl({
           return `Unknown permission mode: ${args} (expected ask | auto | readonly | yolo)`;
         }
         config.permissionMode = mode as StarConfig["permissionMode"];
+        prevModeRef.current = null;
         setPermissionModeState(mode);
         await savePermissionMode(mode);
         return mode === "yolo"
           ? "Permission mode set to yolo — ALL safety checks disabled, tools run without asking. Saved to config."
           : `Permission mode set to ${mode}. Saved to config.`;
+      },
+      planMode: async () => {
+        if (config.permissionMode === "plan") {
+          const restore = prevModeRef.current ?? "ask";
+          applySessionMode(restore);
+          return `Exited plan mode — permission mode back to ${restore} (this session only).`;
+        }
+        applySessionMode("plan");
+        return "Entered plan mode: the agent researches with read-only tools and presents a plan for approval before anything is executed. /plan again to exit.";
       },
       initProject: async (args) => {
         let model = null;
@@ -641,6 +715,7 @@ export function Repl({
     runStream,
     applyMessages,
     redrawMessages,
+    applySessionMode,
   ]);
 
   const runShellBang = useCallback(
@@ -732,9 +807,10 @@ export function Repl({
           onDecision={handleDecision}
         />
       )}
+      {planApproval && <ExitPlanPrompt onDecision={handlePlanDecision} />}
       <InputBox
         isStreaming={isStreaming}
-        disabled={pending !== null}
+        disabled={pending !== null || planApproval}
         commands={commandHints}
         onSubmit={handleSubmit}
         onInterrupt={interrupt}

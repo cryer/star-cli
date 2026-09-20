@@ -27,6 +27,9 @@ describe("mode × level matrix (safe requests)", () => {
     ["ask", "read", "allow"],
     ["ask", "write", "ask"],
     ["ask", "exec", "ask"],
+    ["plan", "read", "allow"],
+    ["plan", "write", "deny"],
+    ["plan", "exec", "deny"],
   ];
   for (const [mode, level, expected] of cases) {
     it(`${mode} + ${level} -> ${expected}`, () => {
@@ -106,6 +109,12 @@ describe("path outside cwd", () => {
     expect(
       checkPermission("readonly", req("write_file", { path: "../outside.txt" }, "write"), ctx),
     ).toBe("deny");
+  });
+
+  it("denies outside read in plan mode", () => {
+    expect(checkPermission("plan", req("read_file", { path: "../outside.txt" }, "read"), ctx)).toBe(
+      "deny",
+    );
   });
 
   it("allows paths inside cwd", () => {

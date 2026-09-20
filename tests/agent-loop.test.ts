@@ -226,6 +226,69 @@ describe("AgentLoop", () => {
     expect(existsSync(path.join(cwd, "out.txt"))).toBe(false);
   });
 
+  it("hides write/exec tools from the model in plan mode", async () => {
+    const loop = makeLoop(
+      mockModel([
+        toolCallRound("call-1", "write_file", {
+          path: "out.txt",
+          content: "secret",
+        }),
+      ]),
+      { permissionMode: "plan" },
+    );
+
+    const events = await collect(loop.stream("write out.txt", new AbortController().signal));
+
+    const error = events.find((e) => e.type === "error");
+    expect(error).toBeDefined();
+    if (error?.type === "error") {
+      expect(error.error.message).toContain("unavailable tool 'write_file'");
+    }
+    expect(events.some((e) => e.type === "tool-result")).toBe(false);
+    expect(existsSync(path.join(cwd, "out.txt"))).toBe(false);
+  });
+
+  it("still executes read tools in plan mode", async () => {
+    writeFileSync(path.join(cwd, "note.txt"), "read me", "utf8");
+    const loop = makeLoop(
+      mockModel([
+        toolCallRound("call-1", "read_file", { path: "note.txt" }),
+        textRound("plan ready"),
+      ]),
+      { permissionMode: "plan" },
+    );
+
+    const events = await collect(loop.stream("read note.txt", new AbortController().signal));
+
+    const toolResult = events.find((e) => e.type === "tool-result");
+    expect(toolResult).toMatchObject({ name: "read_file" });
+    if (toolResult?.type === "tool-result") {
+      expect(toolResult.isError).toBeFalsy();
+      expect(toolResult.content).toContain("read me");
+    }
+  });
+
+  it("adds the plan-mode system prompt only while plan mode is active", async () => {
+    const config = makeConfig({ permissionMode: "plan" });
+    const loop = new AgentLoop({
+      model: mockModel([textRound("a plan")]),
+      registry: createDefaultRegistry(),
+      config,
+      cwd,
+      system: "BASE PROMPT",
+    });
+
+    await collect(loop.stream("plan this", new AbortController().signal));
+    const head = loop.getMessages()[0];
+    expect(head?.role).toBe("system");
+    expect(head?.content).toContain("BASE PROMPT");
+    expect(head?.content).toContain("PLAN MODE");
+
+    config.permissionMode = "auto";
+    await collect(loop.stream("do it", new AbortController().signal));
+    expect(loop.getMessages()[0]?.content).toBe("BASE PROMPT");
+  });
+
   it("executes the tool when confirmHandler approves in ask mode", async () => {
     const loop = makeLoop(
       mockModel([

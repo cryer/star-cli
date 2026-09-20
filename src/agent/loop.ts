@@ -20,6 +20,9 @@ export interface AgentLoopOptions {
   sessionStore?: SessionStore | null;
 }
 
+export const PLAN_MODE_PROMPT =
+  "\n\nYou are currently in PLAN MODE. Research the task using only the read-only tools available to you, then present a concrete, step-by-step implementation plan as your final answer. You must not modify files, run shell commands, or otherwise change the system — write/exec tools are unavailable in this mode. Do not ask the user to run commands for you; note manual steps in the plan instead. The user will review your plan and approve it before any execution begins.";
+
 interface PendingToolCall {
   id: string;
   name: string;
@@ -87,6 +90,8 @@ export class AgentLoop {
     signal: AbortSignal,
     opts?: { persistAs?: string },
   ): AsyncGenerator<StreamEvent> {
+    this.syncSystemMessage();
+
     const userMessage: CoreMessage = { role: "user", content: input };
     this.messages.push(userMessage);
     this.turnMarkers.push({ seq: beginTurn(), userIndex: this.messages.length - 1 });
@@ -213,6 +218,27 @@ export class AgentLoop {
     };
   }
 
+  // The permission mode can change at runtime, so the system message is
+  // recomputed at the start of every turn instead of being frozen by the
+  // constructor. Also restores a system message after loadMessages() (resume,
+  // /model switch) replaced the history with one that has none.
+  private syncSystemMessage(): void {
+    const base = this.opts.system;
+    const plan = this.opts.config.permissionMode === "plan";
+    const content = plan
+      ? base
+        ? base + PLAN_MODE_PROMPT
+        : PLAN_MODE_PROMPT.trim()
+      : (base ?? null);
+    if (content === null) return;
+    const head = this.messages[0];
+    if (head?.role === "system" && typeof head.content === "string") {
+      if (head.content !== content) head.content = content;
+    } else if (head?.role !== "system") {
+      this.messages.unshift({ role: "system", content });
+    }
+  }
+
   private async applyCompactionSummary(compacted: CompactionResult): Promise<CoreMessage[]> {
     const { config, model } = this.opts;
     if (config.contextCompaction !== "summary" || !model) {
@@ -248,8 +274,12 @@ export class AgentLoop {
   }
 
   private buildAiTools(): Record<string, unknown> {
+    const plan = this.opts.config.permissionMode === "plan";
     const tools: Record<string, unknown> = {};
     for (const t of this.opts.registry.list()) {
+      // Plan mode hides write/exec tools from the model entirely; the
+      // permission gate stays as a backstop for anything still attempted.
+      if (plan && t.permission !== "read") continue;
       tools[t.name] = aiTool({
         description: t.description,
         parameters: t.parameters as never,

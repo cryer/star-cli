@@ -26,7 +26,7 @@ export const PermissionsConfigSchema = z.object({
 
 export const ConfigSchema = z.object({
   defaultModel: z.string().default(""),
-  permissionMode: z.enum(["auto", "ask", "readonly", "yolo"]).default("ask"),
+  permissionMode: z.enum(["auto", "ask", "readonly", "yolo", "plan"]).default("ask"),
   providers: z.array(ProviderConfigSchema).default([]),
   models: z.array(ModelConfigSchema).default([]),
   maxSteps: z.number().int().positive().default(50),
@@ -46,5 +46,5 @@ export type StarConfig = z.infer<typeof ConfigSchema>;
 
 export interface CliOverrides {
   model?: string;
-  permissionMode?: "auto" | "ask" | "readonly" | "yolo";
+  permissionMode?: "auto" | "ask" | "readonly" | "yolo" | "plan";
 }

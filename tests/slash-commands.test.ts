@@ -25,6 +25,7 @@ function makeCtx(overrides: Partial<CommandContext> = {}) {
     exportSession: async (p) => `exported ${p}`,
     undo: async () => "undo result",
     permissionMode: async (args) => (args ? `mode set ${args}` : "mode list"),
+    planMode: async () => "plan toggled",
     initProject: async (args) => `init ${args}`,
     runDoctor: async () => "doctor report",
     ...overrides,
@@ -122,6 +123,15 @@ describe("CommandRegistry", () => {
       { type: "system", text: "mode list" },
       { type: "system", text: "mode set yolo" },
     ]);
+  });
+
+  it("/plan toggles plan mode via the context hook", async () => {
+    const registry = makeRegistry();
+    const { ctx, calls } = makeCtx();
+
+    await registry.get("plan")?.run("", ctx);
+
+    expect(calls).toEqual([{ type: "system", text: "plan toggled" }]);
   });
 
   it("/help lists all commands", async () => {

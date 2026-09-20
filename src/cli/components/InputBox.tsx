@@ -78,6 +78,8 @@ export function InputBox({
       return;
     }
     if (key.tab) {
+      // Shift+Tab cycles permission modes at the Repl level; never complete.
+      if (key.shift) return;
       if (suggestions.length > 0) {
         completeHighlighted();
         return;

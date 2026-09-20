@@ -131,6 +131,15 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
   });
 
   registry.register({
+    name: "plan",
+    description: "Toggle plan mode: read-only research, then approve the plan before executing",
+    usage: "/plan",
+    async run(_args, ctx) {
+      ctx.addSystemMessage(await ctx.planMode());
+    },
+  });
+
+  registry.register({
     name: "undo",
     description:
       "Undo the last conversation turn: revert its file changes (write_file/edit_file) and retract its messages",

@@ -93,6 +93,9 @@ export function checkPermission(
   if (mode === "readonly") {
     return req.level === "read" ? "allow" : "deny";
   }
+  if (mode === "plan") {
+    return req.level === "read" ? "allow" : "deny";
+  }
   if (isAllowedByRules(allowRules, req)) {
     return "allow";
   }

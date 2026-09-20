@@ -1,6 +1,6 @@
 import type { PermissionLevel } from "../tools/types";
 
-export type PermissionMode = "auto" | "ask" | "readonly" | "yolo";
+export type PermissionMode = "auto" | "ask" | "readonly" | "yolo" | "plan";
 
 export type PermissionDecision = "allow" | "deny" | "ask";
 
