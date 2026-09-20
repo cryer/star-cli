@@ -47,6 +47,11 @@ import { executeShellBang } from "./shell-bang";
 import { type FlushState, nextFlush, startTicker } from "./ticker";
 import { checkForUpdate } from "./update-check";
 
+// Matches ansi-escapes' clearTerminal (Ink pulls the same sequence for its
+// own full redraws): erase screen + scrollback, cursor home.
+const CLEAR_TERMINAL =
+  process.platform === "win32" ? "\u001B[2J\u001B[0f" : "\u001B[2J\u001B[3J\u001B[H";
+
 export interface UsageStats {
   requests: number;
   promptTokens: number;
@@ -131,12 +136,39 @@ export function Repl({
   // Number of assistant chunks already committed to static history this turn;
   // 0 means the next streamed text still needs the "star" header.
   const turnChunksRef = useRef(0);
+  // Mirror of `messages` for code that needs the current list synchronously
+  // (e.g. computing the /undo cut point before redrawing).
+  const messagesRef = useRef<DisplayMessage[]>(initialDisplay);
 
   const pushMessage = useCallback(
     (role: DisplayMessage["role"], text: string, note?: string, tight?: boolean) => {
-      setMessages((prev) => [...prev, { id: nextIdRef.current++, role, text, note, tight }]);
+      setMessages((prev) => {
+        const next = [...prev, { id: nextIdRef.current++, role, text, note, tight }];
+        messagesRef.current = next;
+        return next;
+      });
     },
     [],
+  );
+
+  // Replace the whole history and remount the list (fresh Static instance).
+  const applyMessages = useCallback((next: DisplayMessage[]) => {
+    messagesRef.current = next;
+    setMessages(next);
+    setEpoch((e) => e + 1);
+  }, []);
+
+  // Ink's <Static> can only append — dropping items from state does not erase
+  // them from the terminal. Clear the screen first, then let the remounted
+  // Static rewrite the surviving history.
+  const redrawMessages = useCallback(
+    (next: DisplayMessage[]) => {
+      if (process.stdout.isTTY) {
+        process.stdout.write(CLEAR_TERMINAL);
+      }
+      applyMessages(next);
+    },
+    [applyMessages],
   );
 
   const pushAssistantChunk = useCallback(
@@ -277,24 +309,26 @@ export function Repl({
     [config, cwd, sessionStore, attachConfirmHandler],
   );
 
-  const resume = useCallback(async (id: string): Promise<string> => {
-    const current = backendRef.current;
-    if (!(current instanceof AgentLoop)) {
-      return "Current backend does not support resuming sessions.";
-    }
-    const resumed = await resumeSession(id);
-    if (!resumed) {
-      return `Session not found: ${id}`;
-    }
-    await current.loadMessages(resumed.messages);
-    const display = buildDisplayMessages(resumed.messages);
-    nextIdRef.current = display.length;
-    setMessages(display);
-    setEpoch((e) => e + 1);
-    usageRef.current = resumed.meta.usage ? { ...resumed.meta.usage } : emptyUsage();
-    setUsageVersion((v) => v + 1);
-    return `Resumed session ${id} (${resumed.messages.length} messages).`;
-  }, []);
+  const resume = useCallback(
+    async (id: string): Promise<string> => {
+      const current = backendRef.current;
+      if (!(current instanceof AgentLoop)) {
+        return "Current backend does not support resuming sessions.";
+      }
+      const resumed = await resumeSession(id);
+      if (!resumed) {
+        return `Session not found: ${id}`;
+      }
+      await current.loadMessages(resumed.messages);
+      const display = buildDisplayMessages(resumed.messages);
+      nextIdRef.current = display.length;
+      applyMessages(display);
+      usageRef.current = resumed.meta.usage ? { ...resumed.meta.usage } : emptyUsage();
+      setUsageVersion((v) => v + 1);
+      return `Resumed session ${id} (${resumed.messages.length} messages).`;
+    },
+    [applyMessages],
+  );
 
   const runStream = useCallback(
     async (input: string) => {
@@ -462,8 +496,7 @@ export function Repl({
     const ctx: CommandContext = {
       addSystemMessage: (text) => pushMessage("system", text),
       clearMessages: () => {
-        setMessages([]);
-        setEpoch((e) => e + 1);
+        redrawMessages([]);
       },
       exit: () => handleExit(),
       listModels: () => {
@@ -509,8 +542,7 @@ export function Repl({
         if (result.compacted && result.messages) {
           const display = buildDisplayMessages(result.messages);
           nextIdRef.current = display.length;
-          setMessages(display);
-          setEpoch((e) => e + 1);
+          applyMessages(display);
         }
         return result.message;
       },
@@ -529,14 +561,18 @@ export function Repl({
         }
         const reverted = turn !== undefined ? await undoTurnSnapshots(turn) : [];
         // Mirror the retraction on screen: drop the last prompt and everything
-        // the turn produced (answer chunks, tool cards, notifications).
-        setMessages((prev) => {
-          for (let i = prev.length - 1; i >= 0; i--) {
-            if (prev[i]?.role === "user") return prev.slice(0, i);
+        // the turn produced (answer chunks, tool cards, notifications). Static
+        // output cannot be edited in place, so the surviving history is
+        // redrawn from a cleared screen.
+        const visible = messagesRef.current;
+        let cut = -1;
+        for (let i = visible.length - 1; i >= 0; i--) {
+          if (visible[i]?.role === "user") {
+            cut = i;
+            break;
           }
-          return prev;
-        });
-        setEpoch((e) => e + 1);
+        }
+        redrawMessages(cut >= 0 ? visible.slice(0, cut) : visible);
         return [...reverted, `Retracted the last conversation turn (${removed} messages).`].join(
           "\n",
         );
@@ -586,6 +622,7 @@ export function Repl({
           `models (${config.models.length}): ${config.models.map((m) => m.name).join(", ") || "(none)"}`,
           `maxSteps: ${config.maxSteps}`,
           `contextMaxTokens: ${config.contextMaxTokens}`,
+          `streamIdleTimeoutSec: ${config.streamIdleTimeoutSec}`,
           `permissions.allow (${config.permissions.allow.length}): ${config.permissions.allow.join(", ") || "(none)"}`,
         ].join("\n"),
     };
@@ -593,7 +630,18 @@ export function Repl({
     registerBuiltinCommands(reg);
     registerCustomCommands(reg, cwd);
     return Object.assign(reg, { ctx });
-  }, [pushMessage, handleExit, config, cwd, switchModel, resume, sessionStore, runStream]);
+  }, [
+    pushMessage,
+    handleExit,
+    config,
+    cwd,
+    switchModel,
+    resume,
+    sessionStore,
+    runStream,
+    applyMessages,
+    redrawMessages,
+  ]);
 
   const runShellBang = useCallback(
     async (raw: string) => {
