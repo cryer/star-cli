@@ -32,6 +32,40 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
   });
 
   registry.register({
+    name: "new",
+    description: "Start a new session with a clean context",
+    usage: "/new",
+    async run(_args, ctx) {
+      if (!ctx.newSession) {
+        ctx.addSystemMessage("/new: this context cannot start a new session.");
+        return;
+      }
+      ctx.addSystemMessage(await ctx.newSession());
+    },
+  });
+
+  registry.register({
+    name: "clear-sessions",
+    description:
+      "Delete stored sessions: this directory by default, every session with --all (the current session is kept)",
+    usage: "/clear-sessions [--all]",
+    async run(args, ctx) {
+      const arg = args.trim();
+      if (arg !== "" && arg !== "--all") {
+        ctx.addSystemMessage(
+          `/clear-sessions: unknown argument "${arg}". Usage: /clear-sessions [--all]`,
+        );
+        return;
+      }
+      if (!ctx.clearSessions) {
+        ctx.addSystemMessage("/clear-sessions: this context cannot delete sessions.");
+        return;
+      }
+      ctx.addSystemMessage(await ctx.clearSessions(arg === "--all"));
+    },
+  });
+
+  registry.register({
     name: "exit",
     description: "Exit the application",
     usage: "/exit",

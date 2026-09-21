@@ -9,6 +9,7 @@ import { listModels } from "../llm/registry";
 import { buildAllowRule, isAllowedByRules } from "../permissions/allow";
 import type { PermissionRequest } from "../permissions/types";
 import { loadSessionSnapshots } from "../session/checkpoints";
+import { clearSessions } from "../session/clear";
 import { formatSessionEntries, listSessionEntries, resolveSessionId } from "../session/list";
 import { resumeSession } from "../session/resume";
 import { SessionStore } from "../session/store";
@@ -17,6 +18,7 @@ import { formatTaskFinished, formatTaskList, formatTaskStarted } from "../tasks/
 import { type TaskSnapshot, defaultTaskManager } from "../tasks/manager";
 import { TodoStore, createDefaultRegistry } from "../tools";
 import {
+  clearSnapshots,
   hydrateSnapshots,
   listSnapshots,
   rewindToSnapshot,
@@ -159,6 +161,9 @@ export function Repl({
   const planApprovalRef = useRef(false);
   const pendingRewindRef = useRef<PendingRewind | null>(null);
   const modelNameRef = useRef(model);
+  // Live session store: /new swaps it mid-session, so callbacks must go
+  // through the ref rather than the prop captured at mount.
+  const sessionStoreRef = useRef<SessionStore | null>(sessionStore);
   const usageRef = useRef<UsageStats>(initialUsage ? { ...initialUsage } : emptyUsage());
   // Number of assistant chunks already committed to static history this turn;
   // 0 means the next streamed text still needs the "star" header.
@@ -378,7 +383,7 @@ export function Repl({
           registry: createDefaultRegistry(),
           config,
           cwd,
-          sessionStore,
+          sessionStore: sessionStoreRef.current,
         });
         const prev = backendRef.current;
         if (prev instanceof AgentLoop) {
@@ -393,7 +398,7 @@ export function Repl({
         return `Failed to switch model: ${error instanceof Error ? error.message : String(error)}`;
       }
     },
-    [config, cwd, sessionStore, attachConfirmHandler],
+    [config, cwd, attachConfirmHandler],
   );
 
   const resume = useCallback(
@@ -535,7 +540,7 @@ export function Repl({
               usage.completionTokens += event.usage.completionTokens;
               usage.totalTokens += event.usage.totalTokens;
               setUsageVersion((v) => v + 1);
-              sessionStore?.addUsage(event.usage).catch(() => {});
+              sessionStoreRef.current?.addUsage(event.usage).catch(() => {});
             }
           } else if (event.type === "error") {
             pushMessage("system", `Error: ${formatStreamError(event.error)}`);
@@ -597,15 +602,7 @@ export function Repl({
         }
       }
     },
-    [
-      pushMessage,
-      pushAssistantChunk,
-      setPendingPermission,
-      setPlanApproval,
-      sessionStore,
-      cwd,
-      config,
-    ],
+    [pushMessage, pushAssistantChunk, setPendingPermission, setPlanApproval, cwd, config],
   );
 
   const handlePlanDecision = useCallback(
@@ -656,6 +653,33 @@ export function Repl({
         return formatSessionEntries(entries, { showCwd: all });
       },
       resumeSession: resume,
+      newSession: async () => {
+        const current = backendRef.current;
+        if (!(current instanceof AgentLoop)) {
+          return "Current backend does not support starting a new session.";
+        }
+        const store = await SessionStore.create(cwd, modelNameRef.current);
+        current.setSessionStore(store);
+        sessionStoreRef.current = store;
+        // Keep the leading system prompt, drop everything else.
+        const [first] = current.getMessages();
+        await current.loadMessages(first?.role === "system" ? [first] : []);
+        clearSnapshots();
+        redrawMessages([]);
+        usageRef.current = emptyUsage();
+        setUsageVersion((v) => v + 1);
+        return `Started a new session (${store.id}) with a clean context.`;
+      },
+      clearSessions: async (all) => {
+        const currentId = sessionStoreRef.current?.id;
+        const removed = await clearSessions(all ? undefined : cwd, currentId);
+        if (removed === 0) {
+          return all ? "No stored sessions to delete." : "No stored sessions for this directory.";
+        }
+        const scope = all ? "across all directories" : "for this directory";
+        const kept = currentId ? " The current session is still active." : "";
+        return `Deleted ${removed} session(s) ${scope}.${kept}`;
+      },
       showTodos: async () => {
         const store = new TodoStore();
         await store.load(cwd);
@@ -676,7 +700,7 @@ export function Repl({
         }
         const result = await compactSession({
           backend: backendRef.current,
-          sessionStore,
+          sessionStore: sessionStoreRef.current,
           config,
           model: summaryModel,
         });
@@ -688,7 +712,12 @@ export function Repl({
         return result.message;
       },
       exportSession: (arg) =>
-        exportSession({ backend: backendRef.current, sessionStore, cwd, arg }),
+        exportSession({
+          backend: backendRef.current,
+          sessionStore: sessionStoreRef.current,
+          cwd,
+          arg,
+        }),
       undo: async () => {
         const current = backendRef.current;
         if (!(current instanceof AgentLoop)) {
@@ -834,7 +863,6 @@ export function Repl({
     cwd,
     switchModel,
     resume,
-    sessionStore,
     runStream,
     applyMessages,
     redrawMessages,

@@ -58,23 +58,7 @@ export class AgentLoop {
       this.messages.push({ role: "system", content: opts.system });
     }
     if (opts.sessionStore) {
-      const store = opts.sessionStore;
-      setSnapshotHooks({
-        onPush: (snapshot) =>
-          store.appendCheckpoint(
-            {
-              id: snapshot.id,
-              timestamp: snapshot.timestamp,
-              path: snapshot.path,
-              existed: snapshot.existed,
-              toolName: snapshot.toolName,
-              turn: snapshot.turn,
-              messageIndex: snapshot.messageIndex,
-            },
-            snapshot.content,
-          ),
-        onRemove: (ids) => store.removeCheckpoints(ids),
-      });
+      this.bindSnapshotHooks(opts.sessionStore);
     }
     const depth = opts.subagentDepth ?? 0;
     if (opts.registry && depth < MAX_SUBAGENT_DEPTH) {
@@ -93,6 +77,34 @@ export class AgentLoop {
 
   getMessages(): readonly CoreMessage[] {
     return this.messages;
+  }
+
+  // Swaps the persistence target (/new starts a fresh session mid-REPL).
+  // Title generation is re-armed so the new session gets one after its first
+  // turn, and snapshot checkpoints now flow to the new store.
+  setSessionStore(store: SessionStore | null): void {
+    this.opts.sessionStore = store;
+    this.titleScheduled = false;
+    if (store) this.bindSnapshotHooks(store);
+  }
+
+  private bindSnapshotHooks(store: SessionStore): void {
+    setSnapshotHooks({
+      onPush: (snapshot) =>
+        store.appendCheckpoint(
+          {
+            id: snapshot.id,
+            timestamp: snapshot.timestamp,
+            path: snapshot.path,
+            existed: snapshot.existed,
+            toolName: snapshot.toolName,
+            turn: snapshot.turn,
+            messageIndex: snapshot.messageIndex,
+          },
+          snapshot.content,
+        ),
+      onRemove: (ids) => store.removeCheckpoints(ids),
+    });
   }
 
   async loadMessages(messages: CoreMessage[]): Promise<void> {

@@ -1,8 +1,19 @@
-# Star CLI
+<div align="center">
+
+# ⭐ Star CLI
+
+**An AI agent command-line interface written in TypeScript**
+
+Multi-model LLM access · streaming terminal UI · tool calling · permission control · session persistence
 
 [![CI](https://github.com/cryer/star-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/cryer/star-cli/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/@cryer/star-cli?color=crimson&logo=npm)](https://www.npmjs.com/package/@cryer/star-cli)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#requirements)
 
-An AI agent command-line interface written in TypeScript — multi-model LLM access, streaming terminal UI, tool calling, permission control, and session persistence.
+</div>
 
 Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers · built-in fs / bash / web tools with a permission gate · git integration (`/commit` drafts Conventional Commits messages, `/diff` shows a colored working-tree diff, repo status injected into the system prompt) · plan mode with read-only research and plan approval · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume with auto-generated titles (`/resume`, `star -r`) · subagent delegation for focused subtasks · lifecycle hooks (`PreToolUse`/`PostToolUse`/`Stop` shell commands from config) · file-write snapshots with `/undo` and checkpoint rollback with `/rewind` · persistent permission allow-rules · TODO task tracking · background shell tasks with status-bar visibility (`/tasks`) · terminal bell on long turns and background-task completion · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
 
@@ -96,6 +107,8 @@ star --permission-mode auto   ask | auto | readonly | yolo | plan
 star -r <sessionId>           resume a previous session (full or short id)
 star -r                       list sessions for the current directory
 star -c                       continue the most recent session for the current directory
+star --clear-sessions         delete stored sessions for the current directory
+star --clear-sessions all     delete every stored session
 ```
 
 ## Slash commands (REPL)
@@ -105,6 +118,8 @@ star -c                       continue the most recent session for the current d
 | `/help` | list commands |
 | `/model [name]` | list / switch models |
 | `/resume [id\|--all]` | list sessions for this directory (`--all`: every directory, with cwd shown) or resume a session by id |
+| `/new` | start a new session with a clean context (the old session stays on disk) |
+| `/clear-sessions [--all]` | delete stored sessions: this directory by default, every session with `--all` (the current session is kept) |
 | `/todo` | show TODO list |
 | `/tasks` | list background tasks (id, status, runtime, exit code) |
 | `/cost` | show API token usage and estimated $ cost (needs per-model pricing in config) |
@@ -221,7 +236,7 @@ Checkpoints are persisted under `~/.star-cli/sessions/<id>/checkpoints/` (an `in
 
 ## Sessions
 
-Sessions persist under `~/.star-cli/sessions/<id>/` (messages as JSONL + `meta.json`). List with `/resume` (only sessions started in the current directory, most recently active first, with message counts and relative times) or `/resume --all` (every directory, with each session's cwd shown), resume with `/resume <id>` or `star -r <id>` — both accept the short id shown in the list. `star -c` (`--continue`) jumps straight back into the most recently active session for the current directory, in the REPL and in print mode alike; when the directory has no sessions it says so and starts a fresh one. `-r` and `-c` are mutually exclusive, and a bare `star -r` prints the session list instead of erroring. Sessions are created lazily — opening the REPL and exiting without chatting leaves nothing on disk, and print mode (`-p`) doesn't create a session unless resuming with `-r` or `-c`. Token usage is accumulated in `meta.json`, so `/cost` reflects resumed history too. `/usage` is the global counterpart of `/cost` (which stays session-scoped): it aggregates every session's `meta.json` across all directories into a dashboard — grand totals, a per-day bar chart of the last 14 days with usage, and a per-model breakdown with a $ estimate for models that have pricing configured (models without pricing are listed but excluded from the total). Per-day numbers come from a `usageByDay` bucket map recorded from now on; usage recorded before that field existed only has grand totals and shows up as a single "earlier usage" line.
+Sessions persist under `~/.star-cli/sessions/<id>/` (messages as JSONL + `meta.json`). List with `/resume` (only sessions started in the current directory, most recently active first, with message counts and relative times) or `/resume --all` (every directory, with each session's cwd shown), resume with `/resume <id>` or `star -r <id>` — both accept the short id shown in the list. `star -c` (`--continue`) jumps straight back into the most recently active session for the current directory, in the REPL and in print mode alike; when the directory has no sessions it says so and starts a fresh one. `-r` and `-c` are mutually exclusive, and a bare `star -r` prints the session list instead of erroring. Sessions are created lazily — opening the REPL and exiting without chatting leaves nothing on disk, and print mode (`-p`) doesn't create a session unless resuming with `-r` or `-c`. Token usage is accumulated in `meta.json`, so `/cost` reflects resumed history too. `/usage` is the global counterpart of `/cost` (which stays session-scoped): it aggregates every session's `meta.json` across all directories into a dashboard — grand totals, a per-day bar chart of the last 14 days with usage, and a per-model breakdown with a $ estimate for models that have pricing configured (models without pricing are listed but excluded from the total). Per-day numbers come from a `usageByDay` bucket map recorded from now on; usage recorded before that field existed only has grand totals and shows up as a single "earlier usage" line. `/new` abandons the in-memory conversation and attaches a fresh lazy session store (the old session stays on disk); deletion is a separate explicit action — `/clear-sessions` removes the sessions recorded for the current directory, `/clear-sessions --all` wipes every session directory (including ones with an unreadable `meta.json`), and both keep the live session; `star --clear-sessions [all]` does the same non-interactively and exits.
 
 After the first turn of a session (the first user message gets its first assistant reply), a lightweight background LLM request — same model, capped at 20 output tokens — summarizes the first user message into a short title (≤50 chars, matching the message's language) and stores it in `meta.json`, where the `/resume` list picks it up. Title generation is fire-and-forget: it never blocks the REPL or print-mode output, it runs only when the session has no title yet (resumed sessions keep their existing title; untitled older sessions get one after their next turn), and if the request fails the title simply stays empty — untitled sessions show as `(无标题)` in the list. An unfinished request is abandoned when the process exits. It applies wherever a session is attached, including print mode when resuming with `-r`/`-c`.
 

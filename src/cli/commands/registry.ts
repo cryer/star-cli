@@ -22,6 +22,11 @@ export interface CommandContext {
   initProject(args: string): Promise<string>;
   runDoctor(): Promise<string>;
   submitPrompt?(text: string): void | Promise<void>;
+  // Starts a fresh session with a clean context (REPL-only).
+  newSession?(): Promise<string>;
+  // Deletes stored sessions: current directory by default, every directory
+  // when all is true. The live session is kept.
+  clearSessions?(all: boolean): Promise<string>;
   // Working directory of the session; commands that shell out (e.g. /commit,
   // /diff) fall back to process.cwd() when the host does not provide it.
   cwd?: string;

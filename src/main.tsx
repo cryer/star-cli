@@ -9,6 +9,7 @@ import type { StarConfig } from "./config/schema";
 import type { CoreMessage } from "./core/messages";
 import { createModel } from "./llm/provider";
 import { loadSessionSnapshots } from "./session/checkpoints";
+import { clearSessions } from "./session/clear";
 import {
   findLatestSession,
   formatSessionEntries,
@@ -137,6 +138,10 @@ program
   .option("--json", "output NDJSON events on stdout (print mode only)")
   .option("-r, --resume [sessionId]", "resume a previous session (lists sessions when no id given)")
   .option("-c, --continue", "continue the most recent session for the current directory")
+  .option(
+    "--clear-sessions [scope]",
+    "delete stored sessions for the current directory ('all' deletes every session) and exit",
+  )
   .action(async (opts) => {
     const cwd = process.cwd();
 
@@ -159,6 +164,22 @@ program
       } else {
         console.log(formatSessionEntries(entries));
       }
+      process.exit(0);
+    }
+
+    if (opts.clearSessions !== undefined) {
+      const scope = opts.clearSessions;
+      if (scope !== true && scope !== "all") {
+        console.error(`Invalid scope: ${scope}. Use --clear-sessions or --clear-sessions all.`);
+        process.exit(1);
+      }
+      const all = scope === "all";
+      const removed = await clearSessions(all ? undefined : cwd);
+      console.log(
+        all
+          ? `Deleted ${removed} session(s) across all directories.`
+          : `Deleted ${removed} session(s) for this directory.`,
+      );
       process.exit(0);
     }
 

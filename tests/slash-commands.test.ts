@@ -227,4 +227,49 @@ describe("CommandRegistry", () => {
       { type: "system", text: "all sessions list" },
     ]);
   });
+
+  it("/new starts a fresh session via the context hook", async () => {
+    const registry = makeRegistry();
+    const { ctx, calls } = makeCtx({
+      newSession: async () => "new session started",
+    });
+
+    await registry.get("new")?.run("", ctx);
+
+    expect(calls).toEqual([{ type: "system", text: "new session started" }]);
+  });
+
+  it("/clear-sessions clears this directory by default and everything with --all", async () => {
+    const registry = makeRegistry();
+    const cleared: boolean[] = [];
+    const { ctx, calls } = makeCtx({
+      clearSessions: async (all) => {
+        cleared.push(all);
+        return all ? "deleted all" : "deleted current dir";
+      },
+    });
+
+    await registry.get("clear-sessions")?.run("", ctx);
+    await registry.get("clear-sessions")?.run(" --all ", ctx);
+
+    expect(cleared).toEqual([false, true]);
+    expect(calls).toEqual([
+      { type: "system", text: "deleted current dir" },
+      { type: "system", text: "deleted all" },
+    ]);
+  });
+
+  it("/clear-sessions rejects unknown arguments", async () => {
+    const registry = makeRegistry();
+    const { ctx, calls } = makeCtx({ clearSessions: async () => "deleted" });
+
+    await registry.get("clear-sessions")?.run("everything", ctx);
+
+    expect(calls).toEqual([
+      {
+        type: "system",
+        text: '/clear-sessions: unknown argument "everything". Usage: /clear-sessions [--all]',
+      },
+    ]);
+  });
 });
