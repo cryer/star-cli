@@ -12,6 +12,7 @@ import { loadSessionSnapshots } from "../session/checkpoints";
 import { formatSessionEntries, listSessionEntries, resolveSessionId } from "../session/list";
 import { resumeSession } from "../session/resume";
 import { SessionStore } from "../session/store";
+import { collectUsageStats, formatUsageDashboard } from "../session/usage";
 import { formatTaskFinished, formatTaskList, formatTaskStarted } from "../tasks/format";
 import { type TaskSnapshot, defaultTaskManager } from "../tasks/manager";
 import { TodoStore, createDefaultRegistry } from "../tools";
@@ -648,6 +649,7 @@ export function Repl({
         const modelConfig = config.models.find((m) => m.name === modelNameRef.current);
         return `${formatUsage(usageRef.current)}\n${estimateCost(usageRef.current, modelNameRef.current, modelConfig)}`;
       },
+      showGlobalUsage: async () => formatUsageDashboard(await collectUsageStats(), config.models),
       compactContext: async () => {
         let summaryModel = null;
         try {

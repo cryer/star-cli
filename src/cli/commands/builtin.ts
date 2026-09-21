@@ -106,6 +106,15 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
   });
 
   registry.register({
+    name: "usage",
+    description: "Show token usage aggregated across all sessions",
+    usage: "/usage",
+    async run(_args, ctx) {
+      ctx.addSystemMessage(await ctx.showGlobalUsage());
+    },
+  });
+
+  registry.register({
     name: "config",
     description: "Show the current configuration",
     usage: "/config",

@@ -11,6 +11,7 @@ export interface CommandContext {
   showTodos(): Promise<string>;
   listTasks(): string;
   showUsage(): string;
+  showGlobalUsage(): Promise<string>;
   describeConfig(): string;
   compactContext(): Promise<string>;
   exportSession(path: string): Promise<string>;

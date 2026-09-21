@@ -16,6 +16,12 @@ export interface SessionUsage {
   totalTokens: number;
 }
 
+export interface DayUsageBucket {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
 export interface SessionMeta {
   id: string;
   title: string;
@@ -24,6 +30,10 @@ export interface SessionMeta {
   createdAt: number;
   updatedAt: number;
   usage?: SessionUsage;
+  // Per-day token buckets keyed by local date (YYYY-MM-DD), recorded alongside
+  // `usage` from the day this field was introduced; older sessions only have
+  // the grand totals in `usage`.
+  usageByDay?: Record<string, DayUsageBucket>;
 }
 
 function generateId(now: Date): string {
@@ -37,6 +47,11 @@ function generateId(now: Date): string {
 
 function debugWarn(message: string): void {
   if (process.env.STAR_DEBUG === "1") process.stderr.write(`[star-cli] ${message}\n`);
+}
+
+export function dayKey(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
 export class SessionStore {
@@ -217,6 +232,14 @@ export class SessionStore {
     usage.completionTokens += delta.completionTokens;
     usage.totalTokens += delta.totalTokens;
     meta.usage = usage;
+    const day = dayKey(new Date());
+    const byDay = meta.usageByDay ?? {};
+    const bucket = byDay[day] ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    bucket.promptTokens += delta.promptTokens;
+    bucket.completionTokens += delta.completionTokens;
+    bucket.totalTokens += delta.totalTokens;
+    byDay[day] = bucket;
+    meta.usageByDay = byDay;
     await fs.writeFile(this.metaPath(), JSON.stringify(meta, null, 2));
   }
 }

@@ -41,6 +41,7 @@ function makeCtx(overrides: Partial<CommandContext> = {}) {
     showTodos: async () => "todos",
     listTasks: () => "tasks list",
     showUsage: () => "usage",
+    showGlobalUsage: async () => "global usage dashboard",
     describeConfig: () => "config summary",
     compactContext: async () => "compact result",
     exportSession: async (p) => `exported ${p}`,

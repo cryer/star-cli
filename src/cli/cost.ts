@@ -5,7 +5,7 @@ export interface TokenUsage {
   completionTokens: number;
 }
 
-function formatDollars(cost: number): string {
+export function formatDollars(cost: number): string {
   let s = cost.toFixed(4).replace(/0+$/, "");
   if (s.endsWith(".")) {
     s += "00";

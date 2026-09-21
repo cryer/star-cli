@@ -20,6 +20,7 @@ function makeCtx(overrides: Partial<CommandContext> = {}) {
     listTasks: () => "tasks list",
     showUsage: () =>
       "API usage this session: 3 requests, 1234 prompt + 567 completion = 1801 tokens",
+    showGlobalUsage: async () => "global usage dashboard",
     describeConfig: () => "config summary",
     compactContext: async () => "compact result",
     exportSession: async (p) => `exported ${p}`,

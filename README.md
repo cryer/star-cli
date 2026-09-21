@@ -59,7 +59,7 @@ apiKeyEnv = "OPENAI_API_KEY"
 name = "gpt"
 provider = "openai"
 model = "gpt-4o"
-# optional per-model pricing (USD per 1M tokens) — enables the $ estimate in /cost
+# optional per-model pricing (USD per 1M tokens) — enables the $ estimate in /cost and /usage
 promptPrice = 2.5
 completionPrice = 10
 
@@ -106,6 +106,7 @@ star -c                       continue the most recent session for the current d
 | `/todo` | show TODO list |
 | `/tasks` | list background tasks (id, status, runtime, exit code) |
 | `/cost` | show API token usage and estimated $ cost (needs per-model pricing in config) |
+| `/usage` | token usage dashboard across all sessions: totals, per-day bar chart, per-model breakdown with $ estimate |
 | `/config` | show resolved config |
 | `/permission [mode]` | show / set the global permission mode (`ask`, `auto`, `readonly`, `yolo`) — saved to config |
 | `/plan` | toggle plan mode: read-only research, then approve the generated plan before it executes (session-only) |
@@ -214,7 +215,7 @@ Checkpoints are persisted under `~/.star-cli/sessions/<id>/checkpoints/` (an `in
 
 ## Sessions
 
-Sessions persist under `~/.star-cli/sessions/<id>/` (messages as JSONL + `meta.json`). List with `/resume` (only sessions started in the current directory, most recently active first, with message counts and relative times) or `/resume --all` (every directory, with each session's cwd shown), resume with `/resume <id>` or `star -r <id>` — both accept the short id shown in the list. `star -c` (`--continue`) jumps straight back into the most recently active session for the current directory, in the REPL and in print mode alike; when the directory has no sessions it says so and starts a fresh one. `-r` and `-c` are mutually exclusive, and a bare `star -r` prints the session list instead of erroring. Sessions are created lazily — opening the REPL and exiting without chatting leaves nothing on disk, and print mode (`-p`) doesn't create a session unless resuming with `-r` or `-c`. Token usage is accumulated in `meta.json`, so `/cost` reflects resumed history too.
+Sessions persist under `~/.star-cli/sessions/<id>/` (messages as JSONL + `meta.json`). List with `/resume` (only sessions started in the current directory, most recently active first, with message counts and relative times) or `/resume --all` (every directory, with each session's cwd shown), resume with `/resume <id>` or `star -r <id>` — both accept the short id shown in the list. `star -c` (`--continue`) jumps straight back into the most recently active session for the current directory, in the REPL and in print mode alike; when the directory has no sessions it says so and starts a fresh one. `-r` and `-c` are mutually exclusive, and a bare `star -r` prints the session list instead of erroring. Sessions are created lazily — opening the REPL and exiting without chatting leaves nothing on disk, and print mode (`-p`) doesn't create a session unless resuming with `-r` or `-c`. Token usage is accumulated in `meta.json`, so `/cost` reflects resumed history too. `/usage` is the global counterpart of `/cost` (which stays session-scoped): it aggregates every session's `meta.json` across all directories into a dashboard — grand totals, a per-day bar chart of the last 14 days with usage, and a per-model breakdown with a $ estimate for models that have pricing configured (models without pricing are listed but excluded from the total). Per-day numbers come from a `usageByDay` bucket map recorded from now on; usage recorded before that field existed only has grand totals and shows up as a single "earlier usage" line.
 
 After the first turn of a session (the first user message gets its first assistant reply), a lightweight background LLM request — same model, capped at 20 output tokens — summarizes the first user message into a short title (≤50 chars, matching the message's language) and stores it in `meta.json`, where the `/resume` list picks it up. Title generation is fire-and-forget: it never blocks the REPL or print-mode output, it runs only when the session has no title yet (resumed sessions keep their existing title; untitled older sessions get one after their next turn), and if the request fails the title simply stays empty — untitled sessions show as `(无标题)` in the list. An unfinished request is abandoned when the process exits. It applies wherever a session is attached, including print mode when resuming with `-r`/`-c`.
 
