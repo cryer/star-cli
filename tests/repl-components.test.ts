@@ -61,6 +61,7 @@ describe("StatusBar background tasks", () => {
   it("shows count and labels while tasks run", async () => {
     const app = renderApp(
       createElement(StatusBar, {
+        cwd: "/tmp/project",
         model: "gpt6",
         permissionMode: "auto",
         tokens: 0,
@@ -74,7 +75,12 @@ describe("StatusBar background tasks", () => {
 
   it("hides the segment when nothing runs", async () => {
     const app = renderApp(
-      createElement(StatusBar, { model: "gpt6", permissionMode: "auto", tokens: 0 }),
+      createElement(StatusBar, {
+        cwd: "/tmp/project",
+        model: "gpt6",
+        permissionMode: "auto",
+        tokens: 0,
+      }),
     );
     await tick();
     expect(stripAnsi(app.lastFrame() ?? "")).not.toContain("bg:");
@@ -85,6 +91,7 @@ describe("StatusBar background tasks", () => {
     const long = "x".repeat(80);
     const app = renderApp(
       createElement(StatusBar, {
+        cwd: "/tmp/project",
         model: "gpt6",
         permissionMode: "auto",
         tokens: 0,

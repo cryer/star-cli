@@ -1,31 +1,47 @@
 import { Box, Text, useInput } from "ink";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { type SlashCommandHint, filterCommands } from "../commands/suggest";
+import { type PathSuggestion, extractAtToken, suggestPaths } from "../path-suggest";
+
+export interface InputRefill {
+  text: string;
+  seq: number;
+}
 
 interface InputBoxProps {
   isStreaming: boolean;
   disabled?: boolean;
   commands?: SlashCommandHint[];
+  cwd?: string;
+  // Refill request (double-Esc edit): when seq changes, the input is replaced.
+  refill?: InputRefill;
   onSubmit(text: string): void;
   onInterrupt(): void;
   onExit(): void;
+  // Async clipboard-image read (Alt+V / Ctrl+V); staging is the parent's job.
+  onPasteImage?(): void;
 }
 
 export function InputBox({
   isStreaming,
   disabled,
   commands,
+  cwd,
+  refill,
   onSubmit,
   onInterrupt,
   onExit,
+  onPasteImage,
 }: InputBoxProps) {
   const [value, setValue] = useState("");
   const [cursor, setCursor] = useState(0);
   const [history, setHistory] = useState<string[]>([]);
   const [highlight, setHighlight] = useState(0);
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false);
+  const [pathSuggestions, setPathSuggestions] = useState<PathSuggestion[]>([]);
   const historyIndexRef = useRef<number | null>(null);
   const draftRef = useRef("");
+  const refillSeqRef = useRef(0);
 
   const edit = (next: string, nextCursor: number) => {
     setValue(next);
@@ -34,17 +50,55 @@ export function InputBox({
     setSuggestionsDismissed(false);
   };
 
-  const suggestions =
-    isStreaming || disabled || suggestionsDismissed || !commands
-      ? []
-      : filterCommands(value, commands);
-  const activeIndex = suggestions.length === 0 ? 0 : Math.min(highlight, suggestions.length - 1);
+  useEffect(() => {
+    if (refill && refill.seq !== refillSeqRef.current) {
+      refillSeqRef.current = refill.seq;
+      edit(refill.text, refill.text.length);
+    }
+  });
+
+  const suggestionsEnabled = !isStreaming && !disabled && !suggestionsDismissed;
+  const suggestions = suggestionsEnabled && commands ? filterCommands(value, commands) : [];
+
+  useEffect(() => {
+    if (!suggestionsEnabled || !cwd) {
+      setPathSuggestions([]);
+      return;
+    }
+    const token = extractAtToken(value, cursor);
+    if (!token) {
+      setPathSuggestions([]);
+      return;
+    }
+    let cancelled = false;
+    void suggestPaths(token.token, cwd).then((result) => {
+      if (!cancelled) setPathSuggestions(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [value, cursor, cwd, suggestionsEnabled]);
+
+  const showPathSuggestions = suggestions.length === 0 && pathSuggestions.length > 0;
+  const suggestionCount = suggestions.length > 0 ? suggestions.length : pathSuggestions.length;
+  const activeIndex = suggestionCount === 0 ? 0 : Math.min(highlight, suggestionCount - 1);
 
   const completeHighlighted = () => {
-    const cmd = suggestions[activeIndex];
-    if (!cmd) return;
-    const text = `/${cmd.name} `;
-    edit(text, text.length);
+    if (suggestions.length > 0) {
+      const cmd = suggestions[activeIndex];
+      if (!cmd) return;
+      const text = `/${cmd.name} `;
+      edit(text, text.length);
+      return;
+    }
+    const sugg = pathSuggestions[activeIndex];
+    const token = extractAtToken(value, cursor);
+    if (!sugg || !token) return;
+    const replacement = `@${sugg.path}${sugg.isDir ? "" : " "}`;
+    edit(
+      value.slice(0, token.start) + replacement + value.slice(token.end),
+      token.start + replacement.length,
+    );
   };
 
   useInput((input, key) => {
@@ -61,9 +115,17 @@ export function InputBox({
       onExit();
       return;
     }
-    if (isStreaming || disabled) return;
+    // Alt+V is the reliable binding: Windows Terminal (and cmd's conhost)
+    // intercept Ctrl+V as their own paste, so the key never reaches us.
+    if ((key.meta || key.ctrl) && input === "v") {
+      onPasteImage?.();
+      return;
+    }
+    if (disabled) return;
     if (key.escape) {
-      if (suggestions.length > 0) setSuggestionsDismissed(true);
+      // While streaming, Esc is the Repl-level interrupt; idle Esc only
+      // dismisses suggestions here (double-Esc editing lives in the Repl).
+      if (!isStreaming && suggestionCount > 0) setSuggestionsDismissed(true);
       return;
     }
     if (key.return) {
@@ -80,13 +142,13 @@ export function InputBox({
     if (key.tab) {
       // Shift+Tab cycles permission modes at the Repl level; never complete.
       if (key.shift) return;
-      if (suggestions.length > 0) {
+      if (suggestionCount > 0) {
         completeHighlighted();
         return;
       }
     } else if (key.upArrow) {
-      if (suggestions.length > 0) {
-        setHighlight((prev) => (prev - 1 + suggestions.length) % suggestions.length);
+      if (suggestionCount > 0) {
+        setHighlight((prev) => (prev - 1 + suggestionCount) % suggestionCount);
         return;
       }
       if (history.length === 0) return;
@@ -100,8 +162,8 @@ export function InputBox({
       edit(entry, entry.length);
       return;
     } else if (key.downArrow) {
-      if (suggestions.length > 0) {
-        setHighlight((prev) => (prev + 1) % suggestions.length);
+      if (suggestionCount > 0) {
+        setHighlight((prev) => (prev + 1) % suggestionCount);
         return;
       }
       if (historyIndexRef.current === null) return;
@@ -118,7 +180,7 @@ export function InputBox({
       setCursor((prev) => Math.max(0, prev - 1));
       return;
     } else if (key.rightArrow) {
-      if (suggestions.length > 0 && cursor === value.length) {
+      if (suggestionCount > 0 && cursor === value.length) {
         completeHighlighted();
       } else {
         setCursor((prev) => Math.min(value.length, prev + 1));
@@ -181,6 +243,20 @@ export function InputBox({
               <Text key={cmd.name}>
                 <Text color="cyan">{`/${cmd.name}`}</Text>
                 <Text dimColor>{` - ${cmd.description}`}</Text>
+              </Text>
+            ),
+          )}
+        </Box>
+      )}
+      {showPathSuggestions && (
+        <Box flexDirection="column" paddingLeft={2}>
+          {pathSuggestions.map((sugg, index) =>
+            index === activeIndex ? (
+              <Text key={sugg.path} bold inverse>{`@${sugg.path}`}</Text>
+            ) : (
+              <Text key={sugg.path}>
+                <Text color="cyan">{`@${sugg.path}`}</Text>
+                {sugg.isDir && <Text dimColor> - directory</Text>}
               </Text>
             ),
           )}

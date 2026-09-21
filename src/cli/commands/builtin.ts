@@ -255,6 +255,38 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
   });
 
   registry.register({
+    name: "copy",
+    description:
+      "Copy the last assistant reply to the clipboard (`all` for the whole conversation)",
+    usage: "/copy [all]",
+    async run(args, ctx) {
+      const arg = args.trim();
+      if (arg !== "" && arg !== "all") {
+        ctx.addSystemMessage(`/copy: unknown argument "${arg}". Usage: /copy [all]`);
+        return;
+      }
+      if (!ctx.conversationText || !ctx.copyToClipboard) {
+        ctx.addSystemMessage("/copy: this context cannot access the clipboard.");
+        return;
+      }
+      const scope = arg === "all" ? "all" : "last";
+      const text = ctx.conversationText(scope);
+      if (!text) {
+        ctx.addSystemMessage(
+          scope === "all" ? "Nothing to copy yet." : "No assistant reply yet — nothing to copy.",
+        );
+        return;
+      }
+      const ok = await ctx.copyToClipboard(text);
+      ctx.addSystemMessage(
+        ok
+          ? `Copied ${text.length} chars to clipboard.`
+          : "Copy failed — no clipboard command available on this platform.",
+      );
+    },
+  });
+
+  registry.register({
     name: "diff",
     description: "Show uncommitted changes (git status + colored diff)",
     usage: "/diff",

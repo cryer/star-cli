@@ -15,16 +15,25 @@ export function formatDollars(cost: number): string {
   return s;
 }
 
+// Numeric session cost in USD; null when the model has no pricing configured.
+export function computeCostUsd(usage: TokenUsage, model: ModelConfig | undefined): number | null {
+  if (model?.promptPrice === undefined || model.completionPrice === undefined) {
+    return null;
+  }
+  return (
+    (usage.promptTokens * model.promptPrice + usage.completionTokens * model.completionPrice) /
+    1_000_000
+  );
+}
+
 export function estimateCost(
   usage: TokenUsage,
   modelName: string,
   model: ModelConfig | undefined,
 ): string {
-  if (model?.promptPrice === undefined || model.completionPrice === undefined) {
+  const cost = computeCostUsd(usage, model);
+  if (cost === null || model === undefined) {
     return `Estimated cost: unknown (no price configured for ${modelName})`;
   }
-  const cost =
-    (usage.promptTokens * model.promptPrice + usage.completionTokens * model.completionPrice) /
-    1_000_000;
   return `Estimated cost: $${formatDollars(cost)} (${model.name} @ $${model.promptPrice}/M prompt, $${model.completionPrice}/M completion)`;
 }

@@ -1,10 +1,11 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentLoop } from "../src/agent/loop";
+import { PROJECT_MEMORY_MAX_CHARS } from "../src/agent/project-memory";
 import type { StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
 import { createDefaultRegistry } from "../src/tools";
@@ -390,6 +391,111 @@ describe("AgentLoop", () => {
       expect(toolResult.content).toContain("User rejected");
     }
     expect(existsSync(path.join(cwd, "rejected.txt"))).toBe(false);
+  });
+
+  it("injects AGENTS.md from the cwd into the system message", async () => {
+    writeFileSync(path.join(cwd, "AGENTS.md"), "Use pnpm, not npm.", "utf8");
+    let capturedPrompt: unknown;
+    const model = new MockLanguageModelV1({
+      doStream: async (options) => {
+        capturedPrompt = options.prompt;
+        return {
+          stream: convertArrayToReadableStream(textRound("ok")),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const loop = makeLoop(model);
+
+    await collect(loop.stream("hi", new AbortController().signal));
+
+    const system = (capturedPrompt as Array<{ role: string; content: string }>).find(
+      (m) => m.role === "system",
+    );
+    expect(system?.content).toContain("# Project instructions (AGENTS.md)");
+    expect(system?.content).toContain("Use pnpm, not npm.");
+  });
+
+  it("leaves the system message unchanged when no AGENTS.md exists", async () => {
+    let capturedPrompt: unknown;
+    const model = new MockLanguageModelV1({
+      doStream: async (options) => {
+        capturedPrompt = options.prompt;
+        return {
+          stream: convertArrayToReadableStream(textRound("ok")),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const loop = new AgentLoop({
+      model,
+      registry: createDefaultRegistry(),
+      config: makeConfig(),
+      cwd,
+      system: "BASE PROMPT",
+    });
+
+    await collect(loop.stream("hi", new AbortController().signal));
+
+    const system = (capturedPrompt as Array<{ role: string; content: string }>).find(
+      (m) => m.role === "system",
+    );
+    expect(system?.content).toBe("BASE PROMPT");
+  });
+
+  it("skips an empty AGENTS.md", async () => {
+    writeFileSync(path.join(cwd, "AGENTS.md"), "  \n", "utf8");
+    const loop = new AgentLoop({
+      model: mockModel([textRound("ok")]),
+      registry: createDefaultRegistry(),
+      config: makeConfig(),
+      cwd,
+      system: "BASE PROMPT",
+    });
+
+    await collect(loop.stream("hi", new AbortController().signal));
+
+    expect(loop.getMessages()[0]?.content).toBe("BASE PROMPT");
+  });
+
+  it("truncates an oversized AGENTS.md with a note", async () => {
+    writeFileSync(path.join(cwd, "AGENTS.md"), "x".repeat(PROJECT_MEMORY_MAX_CHARS * 2), "utf8");
+    const loop = new AgentLoop({
+      model: mockModel([textRound("ok")]),
+      registry: createDefaultRegistry(),
+      config: makeConfig(),
+      cwd,
+      system: "BASE PROMPT",
+    });
+
+    await collect(loop.stream("hi", new AbortController().signal));
+
+    const head = loop.getMessages()[0];
+    expect(typeof head?.content).toBe("string");
+    const content = head?.content as string;
+    expect(content).toContain("# Project instructions (AGENTS.md)");
+    expect(content).toContain("[AGENTS.md truncated");
+    expect(content.length).toBeLessThanOrEqual(
+      "BASE PROMPT".length + PROJECT_MEMORY_MAX_CHARS + 200,
+    );
+  });
+
+  it("re-reads AGENTS.md when its mtime changes mid-session", async () => {
+    const file = path.join(cwd, "AGENTS.md");
+    writeFileSync(file, "version one", "utf8");
+    const loop = makeLoop(mockModel([textRound("ok")]));
+
+    await collect(loop.stream("hi", new AbortController().signal));
+    expect(loop.getMessages()[0]?.content).toContain("version one");
+
+    writeFileSync(file, "version two", "utf8");
+    const bumped = new Date(Date.now() + 10_000);
+    utimesSync(file, bumped, bumped);
+
+    await collect(loop.stream("again", new AbortController().signal));
+    const content = loop.getMessages()[0]?.content;
+    expect(content).toContain("version two");
+    expect(content).not.toContain("version one");
   });
 
   it("stops with an error when maxSteps is reached", async () => {

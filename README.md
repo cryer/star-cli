@@ -54,6 +54,7 @@ contextCompaction = "summary"   # summary | truncate — how over-budget history
 # Seconds with no stream output before a stalled response is ended gracefully
 # (some relays never close the stream). The first token gets a fixed 120s allowance.
 streamIdleTimeoutSec = 20
+# sessionBudgetUsd = 5          # optional per-session cost cap in USD; unset = no cap
 notifyBell = true              # ring the terminal bell when a long turn finishes (REPL only)
 notifyBellThresholdSec = 10    # turns shorter than this stay silent
 
@@ -136,13 +137,16 @@ star --clear-sessions all     delete every stored session
 | `/doctor` | environment self-check (Node, shell, config, API key status, sessions dir writability) |
 | `/commit [instructions]` | analyze uncommitted changes and let the agent stage + commit them with a Conventional Commits message (git add/commit runs through the normal permission gate) |
 | `/diff` | show uncommitted changes client-side: `git status --short` plus a colored staged/unstaged diff (no model call; huge diffs are truncated at 2000 lines) |
+| `/copy [all]` | copy the last assistant reply to the clipboard (`all`: the whole conversation as plain text) |
 | `/clear` | clear the screen |
 | `/exit` | quit |
 | `/q` | quit (alias of `/exit`) |
 
-Keys: `ESC` / `Ctrl+C` interrupts the current stream; on a permission prompt: `y` allow, `n` deny, `a` always allow — the generated allow-rule (e.g. `bash(npm test)`) is saved to `permissions.allow` in the config file and survives restarts. Write/edit prompts include a colored diff preview of the pending change. `Shift+Tab` cycles the permission mode for the session (`ask` → `auto` → `readonly` → `plan`; not saved to config). Input editing: arrow keys move the cursor, `Ctrl+A`/`Ctrl+E` jump to start/end, `Ctrl+U`/`Ctrl+K` delete before/after the cursor, `Ctrl+W` deletes the previous word, up/down recall history. Typing `/` shows slash-command suggestions — `↑`/`↓` to highlight, `Tab` (or `→` at end of input) to complete, `ESC` to dismiss.
+Keys: `ESC` / `Ctrl+C` interrupts the current stream; on a permission prompt: `y` allow, `n` deny, `a` always allow — the generated allow-rule (e.g. `bash(npm test)`) is saved to `permissions.allow` in the config file and survives restarts. Write/edit prompts include a colored diff preview of the pending change. `Shift+Tab` cycles the permission mode for the session (`ask` → `auto` → `readonly` → `plan`; not saved to config). Input editing: arrow keys move the cursor, `Ctrl+A`/`Ctrl+E` jump to start/end, `Ctrl+U`/`Ctrl+K` delete before/after the cursor, `Ctrl+W` deletes the previous word, up/down recall history. Typing `/` shows slash-command suggestions — `↑`/`↓` to highlight, `Tab` (or `→` at end of input) to complete, `ESC` to dismiss. Typing `@` completes file paths relative to the working directory with the same keys; directories end in `/` so `Tab` descends, and `node_modules`, `.git` and `dist` are skipped. `Alt+V` pastes an image from the clipboard as an attachment (each one shows as `[image attached: clipboard.png]` above the input; uses PowerShell on Windows, pngpaste/osascript on macOS, xclip on Linux). `Ctrl+V` also works where the terminal passes it through — Windows Terminal binds Ctrl+V to its own paste, so use `Alt+V` there. While a turn is streaming you can keep typing: submitted prompts (and `!` bangs) queue up as dimmed entries and auto-send in order once the turn finishes; `ESC` during a turn aborts it and clears the queue. Pressing `ESC` twice within half a second while idle retracts your last prompt and restores its text into the input for editing.
 
 While the model is working, a spinner (`- \ | /`) shows `star is thinking…`; reasoning models also stream a dimmed tail of their thinking (last ~200 chars), which collapses to a one-line summary once the answer starts.
+
+The status bar shows the working directory (full path on wide terminals), the git branch, the model, the permission mode, context usage as a percentage of `contextMaxTokens`, the session cost when the model has pricing configured, and total tokens.
 
 ## !shell passthrough
 
@@ -161,6 +165,10 @@ The model can run long shell commands in the background via `bash` with `run_in_
 ## Terminal bell
 
 The REPL rings the terminal bell (BEL) so you can switch windows while the agent works: once when a turn finishes after taking longer than `notifyBellThresholdSec` (default 10s), and once whenever a background task completes — the moment you are least likely to be watching. It only rings on a TTY, never for interrupted (ESC / Ctrl+C) turns, and never in print mode (`-p`). Disable it with `notifyBell = false` in the config or `STAR_NO_NOTIFY=1` in the environment.
+
+## Session budget
+
+Setting `sessionBudgetUsd` in the config caps spend per REPL session (the active model needs `promptPrice`/`completionPrice` so the cost can be computed). When a finished turn pushes the session cost past 80% of the cap, a one-time warning appears; past 100%, further prompts are blocked with an error while slash commands keep working — raise the limit in the config or start fresh with `/new`.
 
 ## Plan mode
 

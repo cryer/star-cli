@@ -18,6 +18,7 @@ import { scheduleSessionTitle } from "../session/title";
 import { beginTurn, currentTurnSeq, setSnapshotHooks } from "../tools/fs/snapshots";
 import type { ToolRegistry } from "../tools/registry";
 import type { ToolResult } from "../tools/types";
+import { readProjectMemory } from "./project-memory";
 import { MAX_SUBAGENT_DEPTH, createSubagentTool } from "./subagent";
 
 export interface AgentLoopOptions {
@@ -350,12 +351,16 @@ export class AgentLoop {
   // /model switch) replaced the history with one that has none. Git context
   // (branch, dirty count, recent commits) is refreshed here too, so the model
   // always sees the current repo state; any git failure is silently skipped.
+  // Project memory (AGENTS.md in the cwd) is appended as a delimited block;
+  // readProjectMemory caches by mtime, so this stays cheap per turn.
   private syncSystemMessage(): void {
     const base = this.opts.system;
     const plan = this.opts.config.permissionMode === "plan";
     const parts: string[] = [];
     if (base) parts.push(base);
     if (plan) parts.push(PLAN_MODE_PROMPT.trim());
+    const memory = readProjectMemory(this.opts.cwd);
+    if (memory) parts.push(memory);
     const git = getGitSummary(this.opts.cwd);
     if (git) parts.push(formatGitSummary(git));
     if (parts.length === 0) return;

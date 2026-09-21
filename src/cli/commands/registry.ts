@@ -32,6 +32,11 @@ export interface CommandContext {
   cwd?: string;
   // Renders structured diff lines with per-line colors in the message area.
   showDiff?(text: string, lines: DiffLine[], note?: string): void;
+  // Copies text to the system clipboard; resolves false when unavailable.
+  copyToClipboard?(text: string): Promise<boolean>;
+  // Plain-text conversation for /copy: "last" is the latest assistant reply,
+  // "all" the whole conversation. null when there is nothing to copy.
+  conversationText?(scope: "last" | "all"): string | null;
 }
 
 export interface SlashCommand {

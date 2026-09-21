@@ -3,7 +3,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentLoop } from "../agent/loop";
 import { addAllowRule, savePermissionMode } from "../config/save";
 import type { StarConfig } from "../config/schema";
-import type { CoreMessage } from "../core/messages";
+import { estimateTokens } from "../context/tokens";
+import { getGitSummary } from "../core/git";
+import type { CoreMessage, ImageInput } from "../core/messages";
 import { createModel } from "../llm/provider";
 import { listModels } from "../llm/registry";
 import { buildAllowRule, isAllowedByRules } from "../permissions/allow";
@@ -27,6 +29,8 @@ import {
 import { formatTodos } from "../tools/todo";
 import { VERSION } from "../version";
 import type { ChatBackend } from "./backend";
+import { budgetState } from "./budget";
+import { copyText, readClipboardImage } from "./clipboard";
 import { compactSession, exportSession } from "./commands/actions";
 import { registerBuiltinCommands } from "./commands/builtin";
 import { registerCustomCommands } from "./commands/custom";
@@ -47,16 +51,19 @@ import {
   truncateTail,
 } from "./components/ThinkingIndicator";
 import { type ToolCardData, formatToolCard } from "./components/ToolCallCard";
-import { estimateCost } from "./cost";
+import { computeCostUsd, estimateCost, formatDollars } from "./cost";
 import { type DiffPreview, generateDiffPreview } from "./diff-preview";
+import { isDoubleEscape } from "./double-esc";
 import {
   buildDisplayMessages,
+  coreMessageText,
   formatStreamError,
   splitCommittableLines,
   summarizeArgs,
 } from "./format";
 import { resolveMentions } from "./mentions";
 import { notifyBell } from "./notify";
+import { PromptQueue, type QueuedPrompt } from "./queue";
 import { executeShellBang } from "./shell-bang";
 import { type FlushState, nextFlush, startTicker } from "./ticker";
 import { checkForUpdate } from "./update-check";
@@ -172,6 +179,28 @@ export function Repl({
   // (e.g. computing the /undo cut point before redrawing).
   const messagesRef = useRef<DisplayMessage[]>(initialDisplay);
 
+  const [queueItems, setQueueItems] = useState<QueuedPrompt[]>([]);
+  const queueRef = useRef(new PromptQueue());
+  // Clipboard images staged via Alt+V (or Ctrl+V where the terminal passes it
+  // through), merged into the next submitted prompt.
+  const [pendingImages, setPendingImages] = useState<{ id: number; image: ImageInput }[]>([]);
+  const pendingImagesRef = useRef<{ id: number; image: ImageInput }[]>([]);
+  const imageSeqRef = useRef(1);
+  const [inputRefill, setInputRefill] = useState<{ text: string; seq: number } | undefined>();
+  const refillSeqRef = useRef(0);
+  // Timestamp of the last idle Esc; a second one within the window restores
+  // the last user message for editing.
+  const lastEscRef = useRef<number | null>(null);
+  const [gitBranch, setGitBranch] = useState<string | null>(null);
+  const [contextPercent, setContextPercent] = useState<number | null>(null);
+  const budgetWarnedRef = useRef(false);
+  const budgetExceededRef = useRef(false);
+  // Latest runStream, so a finishing turn can drain the queue by re-entering
+  // it without a circular useCallback dependency.
+  const runStreamRef = useRef<((text: string, images?: ImageInput[]) => Promise<void>) | null>(
+    null,
+  );
+
   const pushMessage = useCallback(
     (role: DisplayMessage["role"], text: string, note?: string, tight?: boolean) => {
       setMessages((prev) => {
@@ -227,6 +256,36 @@ export function Repl({
     pendingRewindRef.current = p;
     setPendingRewindState(p);
   }, []);
+
+  const stageClipboardImage = useCallback((img: ImageInput) => {
+    pendingImagesRef.current = [
+      ...pendingImagesRef.current,
+      { id: imageSeqRef.current++, image: img },
+    ];
+    setPendingImages(pendingImagesRef.current);
+  }, []);
+
+  const clearPendingImages = useCallback(() => {
+    pendingImagesRef.current = [];
+    setPendingImages([]);
+  }, []);
+
+  // Numeric session cost (USD) from the accumulated usage; null when the
+  // active model has no pricing configured.
+  const sessionCostUsd = useCallback(
+    () =>
+      computeCostUsd(
+        usageRef.current,
+        config.models.find((m) => m.name === modelNameRef.current),
+      ),
+    [config],
+  );
+
+  const handlePasteImage = useCallback(() => {
+    void readClipboardImage().then((img) => {
+      if (img) stageClipboardImage(img);
+    });
+  }, [stageClipboardImage]);
 
   const handleRewindDecision = useCallback(
     (decision: RewindDecision) => {
@@ -317,7 +376,37 @@ export function Repl({
       setPendingPermission(null);
       p.resolve(false);
     }
-  }, [setPendingPermission]);
+    const cleared = queueRef.current.clear();
+    if (cleared.length > 0) {
+      setQueueItems([]);
+      pushMessage("system", `cleared ${cleared.length} queued message(s)`);
+    }
+  }, [setPendingPermission, pushMessage]);
+
+  // Double-Esc while idle: retract the last user turn and put the originally
+  // typed text back into the input for editing.
+  const editLastMessage = useCallback(async () => {
+    const current = backendRef.current;
+    if (typeof current.retractLastTurn !== "function") return;
+    const visible = messagesRef.current;
+    let cut = -1;
+    let text = "";
+    for (let i = visible.length - 1; i >= 0; i--) {
+      const msg = visible[i];
+      if (msg?.role === "user") {
+        cut = i;
+        text = msg.text;
+        break;
+      }
+    }
+    if (cut < 0) return;
+    const { removed } = await current.retractLastTurn();
+    if (removed === 0) return;
+    redrawMessages(visible.slice(0, cut));
+    refillSeqRef.current += 1;
+    setInputRefill({ text, seq: refillSeqRef.current });
+    pushMessage("system", "last message restored for editing");
+  }, [pushMessage, redrawMessages]);
 
   const handleExit = useCallback(() => {
     const killed = defaultTaskManager.cleanup();
@@ -331,7 +420,27 @@ export function Repl({
   }, [exit, pushMessage]);
 
   useInput((_input, key) => {
-    if (key.escape) interrupt();
+    if (key.escape) {
+      const busy =
+        abortRef.current !== null ||
+        pendingRef.current !== null ||
+        planApprovalRef.current ||
+        pendingRewindRef.current !== null;
+      if (busy) {
+        lastEscRef.current = null;
+        interrupt();
+        return;
+      }
+      const now = Date.now();
+      if (isDoubleEscape(lastEscRef.current, now)) {
+        lastEscRef.current = null;
+        void editLastMessage();
+      } else {
+        lastEscRef.current = now;
+      }
+      return;
+    }
+    lastEscRef.current = null;
     if (key.shift && key.tab) {
       // Don't yank the mode out from under a running turn or an open prompt.
       if (
@@ -431,12 +540,15 @@ export function Repl({
   );
 
   const runStream = useCallback(
-    async (input: string) => {
+    async (input: string, extraImages: ImageInput[] = []) => {
       const resolved = await resolveMentions(input, cwd);
+      const images = [...resolved.images, ...extraImages];
       pushMessage(
         "user",
         input,
-        resolved.attached.length > 0 ? `attached: ${resolved.attached.join(", ")}` : undefined,
+        resolved.attached.length + extraImages.length > 0
+          ? `attached: ${[...resolved.attached, ...extraImages.map((img) => img.path)].join(", ")}`
+          : undefined,
       );
       for (const skip of resolved.skipped) {
         pushMessage("system", `Skipped @${skip.path}: ${skip.reason}`);
@@ -485,11 +597,14 @@ export function Repl({
       });
       try {
         for await (const event of backendRef.current.stream(
-          resolved.images.length > 0
-            ? { text: resolved.input, images: resolved.images }
-            : resolved.input,
+          images.length > 0 ? { text: resolved.input, images } : resolved.input,
           controller.signal,
-          { persistAs: input },
+          {
+            persistAs:
+              extraImages.length > 0
+                ? `${input}${" [clipboard image]".repeat(extraImages.length)}`
+                : input,
+          },
         )) {
           if (event.type === "text-delta") {
             if (thinkingRef.current) {
@@ -604,10 +719,58 @@ export function Repl({
         if (!interrupted && config.permissionMode === "plan") {
           setPlanApproval(true);
         }
+        // Session budget (sessionBudgetUsd): warn once at 80%, error + block
+        // further prompts at 100%. Unevaluable without per-model pricing.
+        const cost = sessionCostUsd();
+        const budget = config.sessionBudgetUsd;
+        const status = budgetState(cost, budget);
+        if (status === "warn" && !budgetWarnedRef.current) {
+          budgetWarnedRef.current = true;
+          pushMessage(
+            "system",
+            `Session cost $${formatDollars(cost ?? 0)} has passed 80% of the $${formatDollars(budget ?? 0)} session budget (sessionBudgetUsd).`,
+          );
+        }
+        if (status === "exceeded" && !budgetExceededRef.current) {
+          budgetExceededRef.current = true;
+          pushMessage(
+            "system",
+            `Session budget exceeded: $${formatDollars(cost ?? 0)} of $${formatDollars(budget ?? 0)} (sessionBudgetUsd). New prompts are blocked — raise sessionBudgetUsd in the config or start a /new session.`,
+          );
+        }
+        // Typeahead queue: send the next queued prompt FIFO once this turn is
+        // fully done (permission prompts included). A crossed budget drops the
+        // queue instead.
+        const nextPrompt = queueRef.current.dequeue();
+        if (nextPrompt) {
+          if (status === "exceeded") {
+            const dropped = queueRef.current.clear().length + 1;
+            setQueueItems([]);
+            pushMessage(
+              "system",
+              `Dropped ${dropped} queued message(s) — session budget exceeded.`,
+            );
+          } else {
+            setQueueItems(queueRef.current.list());
+            void runStreamRef.current?.(nextPrompt.text, nextPrompt.images);
+          }
+        }
       }
     },
-    [pushMessage, pushAssistantChunk, setPendingPermission, setPlanApproval, cwd, config],
+    [
+      pushMessage,
+      pushAssistantChunk,
+      setPendingPermission,
+      setPlanApproval,
+      cwd,
+      config,
+      sessionCostUsd,
+    ],
   );
+
+  useEffect(() => {
+    runStreamRef.current = runStream;
+  }, [runStream]);
 
   const handlePlanDecision = useCallback(
     (decision: ExitPlanDecision) => {
@@ -638,6 +801,27 @@ export function Repl({
       clearMessages: () => {
         redrawMessages([]);
       },
+      conversationText: (scope) => {
+        const current = backendRef.current;
+        if (!(current instanceof AgentLoop)) return null;
+        const messages = current.getMessages();
+        if (scope === "all") {
+          const parts = messages
+            .filter((m) => m.role === "user" || m.role === "assistant")
+            .map((m) => coreMessageText(m))
+            .filter((text) => text.length > 0);
+          return parts.length > 0 ? parts.join("\n\n") : null;
+        }
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const message = messages[i];
+          if (message?.role === "assistant") {
+            const text = coreMessageText(message);
+            if (text) return text;
+          }
+        }
+        return null;
+      },
+      copyToClipboard: (text) => copyText(text),
       exit: () => handleExit(),
       listModels: () => {
         const models = listModels(config);
@@ -671,6 +855,8 @@ export function Repl({
         clearSnapshots();
         redrawMessages([]);
         usageRef.current = emptyUsage();
+        budgetWarnedRef.current = false;
+        budgetExceededRef.current = false;
         setUsageVersion((v) => v + 1);
         return `Started a new session (${store.id}) with a clean context.`;
       },
@@ -916,6 +1102,13 @@ export function Repl({
   const handleSubmit = useCallback(
     (text: string) => {
       if (text.startsWith("!")) {
+        // A bang would clobber the streaming turn's abort controller, so it
+        // waits in the queue like a regular prompt.
+        if (abortRef.current) {
+          queueRef.current.enqueue({ text, images: [] });
+          setQueueItems(queueRef.current.list());
+          return;
+        }
         void runShellBang(text.slice(1));
         return;
       }
@@ -930,15 +1123,47 @@ export function Repl({
         void command.run(parsed.args, registry.ctx);
         return;
       }
-      void runStream(text);
+      const budget = config.sessionBudgetUsd;
+      if (budgetState(sessionCostUsd(), budget) === "exceeded") {
+        pushMessage(
+          "system",
+          `Session budget of $${formatDollars(budget ?? 0)} (sessionBudgetUsd) is exceeded — prompts are blocked. Slash commands still work; raise sessionBudgetUsd in the config or start a /new session.`,
+        );
+        return;
+      }
+      const images = pendingImagesRef.current.map((staged) => staged.image);
+      if (images.length > 0) clearPendingImages();
+      if (abortRef.current) {
+        queueRef.current.enqueue({ text, images });
+        setQueueItems(queueRef.current.list());
+        return;
+      }
+      void runStream(text, images);
     },
-    [registry, pushMessage, runStream, runShellBang],
+    [registry, pushMessage, runStream, runShellBang, config, clearPendingImages, sessionCostUsd],
   );
 
   const commandHints = useMemo(
     () => registry.list().map((cmd) => ({ name: cmd.name, description: cmd.description })),
     [registry],
   );
+
+  // Expensive status-bar bits (sync git call, token estimate over the full
+  // history) refresh on turn boundaries and history rewrites, not per tick.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: isStreaming and epoch are deliberate refresh triggers, not values read inside
+  useEffect(() => {
+    setGitBranch(getGitSummary(cwd)?.branch ?? null);
+    const current = backendRef.current;
+    if (current instanceof AgentLoop) {
+      setContextPercent(
+        Math.round((estimateTokens([...current.getMessages()]) / config.contextMaxTokens) * 100),
+      );
+    } else {
+      setContextPercent(null);
+    }
+  }, [cwd, config, isStreaming, epoch]);
+
+  const sessionCost = sessionCostUsd();
 
   return (
     <Box flexDirection="column">
@@ -967,18 +1192,35 @@ export function Repl({
       {pendingRewind && (
         <RewindConfirmPrompt summary={pendingRewind.summary} onDecision={handleRewindDecision} />
       )}
+      {queueItems.map((item) => (
+        <Text key={item.id} dimColor>
+          queued: {item.text.length > 80 ? `${item.text.slice(0, 80)}…` : item.text}
+        </Text>
+      ))}
+      {pendingImages.map((staged) => (
+        <Text key={staged.id} dimColor>
+          [image attached: {staged.image.path}]
+        </Text>
+      ))}
       <InputBox
         isStreaming={isStreaming}
         disabled={pending !== null || planApproval || pendingRewind !== null}
         commands={commandHints}
+        cwd={cwd}
+        refill={inputRefill}
         onSubmit={handleSubmit}
         onInterrupt={interrupt}
         onExit={handleExit}
+        onPasteImage={handlePasteImage}
       />
       <StatusBar
+        cwd={cwd}
         model={modelName}
         permissionMode={permissionModeState}
         tokens={usageRef.current.totalTokens}
+        gitBranch={gitBranch}
+        contextPercent={contextPercent}
+        sessionCostUsd={sessionCost}
         backgroundTasks={bgLabels}
       />
     </Box>

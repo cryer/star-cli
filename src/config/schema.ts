@@ -56,6 +56,9 @@ export const ConfigSchema = z.object({
   // streaming has started; the first part gets a longer, fixed allowance.
   streamIdleTimeoutSec: z.number().positive().default(20),
   contextCompaction: z.enum(["summary", "truncate"]).default("summary"),
+  // Optional per-session dollar budget; when set, the REPL stops the session
+  // once the estimated cost for the session reaches this amount.
+  sessionBudgetUsd: z.number().positive().optional(),
   // Terminal bell (REPL only): ring when a turn takes longer than
   // notifyBellThresholdSec, and when a background task finishes.
   // STAR_NO_NOTIFY=1 disables without touching the config.

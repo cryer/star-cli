@@ -120,4 +120,38 @@ describe("InputBox", () => {
     expect(stripAnsi(app.lastFrame() ?? "")).not.toContain("draft");
     app.unmount();
   });
+
+  it("accepts typed input while streaming (the parent queues it)", async () => {
+    const onSubmit = vi.fn();
+    const onInterrupt = vi.fn();
+    const app = renderApp(
+      createElement(InputBox, {
+        isStreaming: true,
+        onSubmit,
+        onInterrupt,
+        onExit: () => {},
+      }),
+    );
+    await type(app.stdin, "next prompt", ENTER);
+    await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith("next prompt"));
+    app.unmount();
+  });
+
+  it("alt+v and ctrl+v trigger clipboard image paste", async () => {
+    for (const keySeq of ["\x1bv", "\x16"]) {
+      const onPasteImage = vi.fn();
+      const app = renderApp(
+        createElement(InputBox, {
+          isStreaming: false,
+          onSubmit: () => {},
+          onInterrupt: () => {},
+          onExit: () => {},
+          onPasteImage,
+        }),
+      );
+      await type(app.stdin, keySeq);
+      await vi.waitFor(() => expect(onPasteImage).toHaveBeenCalled());
+      app.unmount();
+    }
+  });
 });

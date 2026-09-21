@@ -120,6 +120,24 @@ maxSteps = 10
     expect(config.contextCompaction).toBe("truncate");
   });
 
+  it("parses sessionBudgetUsd from TOML", async () => {
+    writeFile(globalConfigPath(), "sessionBudgetUsd = 2.5");
+    const config = await loadConfig(cwd);
+    expect(config.sessionBudgetUsd).toBe(2.5);
+  });
+
+  it("rejects a zero or negative sessionBudgetUsd", async () => {
+    writeFile(globalConfigPath(), "sessionBudgetUsd = 0");
+    await expect(loadConfig(cwd)).rejects.toThrow(globalConfigPath());
+    writeFile(globalConfigPath(), "sessionBudgetUsd = -3");
+    await expect(loadConfig(cwd)).rejects.toThrow(globalConfigPath());
+  });
+
+  it("leaves sessionBudgetUsd undefined when absent", async () => {
+    const config = await loadConfig(cwd);
+    expect(config.sessionBudgetUsd).toBeUndefined();
+  });
+
   it("loadConfigSync matches loadConfig", async () => {
     writeFile(globalConfigPath(), "maxSteps = 7");
     const asyncConfig = await loadConfig(cwd, { model: "m" });

@@ -11,6 +11,8 @@ export interface ChatBackend {
   stream(input: ChatInput, signal: AbortSignal, opts?: StreamOptions): AsyncGenerator<StreamEvent>;
   confirmHandler?: (req: PermissionRequest) => Promise<boolean>;
   onHookWarning?: (message: string) => void;
+  // Drops the last user turn from history + persistence (double-Esc editing).
+  retractLastTurn?(): Promise<{ removed: number; turn?: number }>;
 }
 
 export class EchoBackend implements ChatBackend {
