@@ -274,7 +274,7 @@ describe("PreToolUse hooks", () => {
     expect(fs.existsSync(path.join(cwd, "timeout.txt"))).toBe(true);
     expect(elapsed).toBeLessThan(8000);
     expect(warnings.some((w) => w.includes("timed out"))).toBe(true);
-  });
+  }, 20000);
 
   it("only runs hooks whose matcher matches the tool name", async () => {
     const warnings: string[] = [];

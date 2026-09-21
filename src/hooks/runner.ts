@@ -32,9 +32,12 @@ function truncate(text: string): string {
 }
 
 // On timeout the whole process tree must die: killing only the shell (what
-// child_process timeout does) orphans the real command on Windows, where
-// cmd.exe does not exec its child — the survivor would keep running and lock
-// the working directory.
+// child_process timeout does) orphans the real command. On Windows cmd.exe
+// does not exec its child — the survivor would keep running and lock the
+// working directory. On POSIX the orphaned grandchild keeps the stdio pipes
+// open, so the "close" event never fires and the hook hangs — hence the
+// process-group kill (the child is spawned detached, making it a group
+// leader).
 function killTree(pid: number | undefined): void {
   if (pid === undefined) return;
   if (process.platform === "win32") {
@@ -44,9 +47,13 @@ function killTree(pid: number | undefined): void {
     );
   } else {
     try {
-      process.kill(pid, "SIGKILL");
+      process.kill(-pid, "SIGKILL");
     } catch {
-      // Already gone.
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
     }
   }
 }
@@ -72,6 +79,7 @@ function runCommand(
         cwd: ctx.cwd,
         env,
         windowsHide: true,
+        detached: process.platform !== "win32",
       });
     } catch (error) {
       resolve({
@@ -89,12 +97,20 @@ function runCommand(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(fallback);
       resolve(outcome);
     };
     const timer = setTimeout(() => {
       timedOut = true;
       killTree(child.pid);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      fallback = setTimeout(() => {
+        finish({ code: 1, stderr, timedOut: true });
+      }, 2000);
+      fallback.unref?.();
     }, hook.timeoutSec * 1000);
+    let fallback: NodeJS.Timeout;
     child.stderr?.on("data", (chunk: Buffer) => {
       if (stderr.length < STDERR_CAPTURE_LIMIT) stderr += chunk.toString("utf8");
     });
