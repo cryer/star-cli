@@ -57,6 +57,7 @@ describe("loadConfig", () => {
       streamIdleTimeoutSec: 20,
       contextCompaction: "summary",
       permissions: { allow: [] },
+      hooks: [],
     });
   });
 

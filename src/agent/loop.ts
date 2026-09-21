@@ -5,6 +5,7 @@ import { type CompactionResult, compactMessages, summarizeMessages } from "../co
 import type { StreamEvent } from "../core/events";
 import { formatGitSummary, getGitSummary } from "../core/git";
 import { type CoreMessage, reconcileToolCalls, retractLastTurn } from "../core/messages";
+import { type HookEvent, type HookRunResult, runHooks } from "../hooks/runner";
 import { checkPermission } from "../permissions/gate";
 import type { PermissionRequest } from "../permissions/types";
 import type { SessionStore } from "../session/store";
@@ -46,6 +47,10 @@ export class AgentLoop {
   private turnMarkers: { seq: number; userIndex: number }[] = [];
   private titleScheduled = false;
   confirmHandler?: (req: PermissionRequest) => Promise<boolean>;
+  // Hook failures never block the turn (except an explicit PreToolUse block);
+  // their stderr surfaces through this callback (REPL system message / stderr
+  // in print mode).
+  onHookWarning?: (message: string) => void;
 
   constructor(opts: AgentLoopOptions) {
     this.opts = opts;
@@ -239,7 +244,10 @@ export class AgentLoop {
       await this.persist(assistantMessage);
       this.maybeScheduleTitle(input);
 
-      if (toolCalls.length === 0) return;
+      if (toolCalls.length === 0) {
+        await this.runEventHooks("Stop");
+        return;
+      }
 
       const answered = new Set<string>();
       try {
@@ -377,6 +385,28 @@ export class AgentLoop {
     return tools;
   }
 
+  private async runEventHooks(
+    event: HookEvent,
+    toolName?: string,
+    toolInput?: unknown,
+  ): Promise<HookRunResult> {
+    const empty: HookRunResult = { blocked: false, warnings: [] };
+    if (this.opts.config.hooks.length === 0) return empty;
+    try {
+      const result = await runHooks(event, this.opts.config.hooks, {
+        cwd: this.opts.cwd,
+        sessionId: this.opts.sessionStore?.id,
+        toolName,
+        toolInput,
+      });
+      for (const warning of result.warnings) this.onHookWarning?.(warning);
+      return result;
+    } catch {
+      // Hooks are best-effort by design: a broken hook must never crash a turn.
+      return empty;
+    }
+  }
+
   private async executeTool(call: PendingToolCall, signal: AbortSignal): Promise<ToolResult> {
     const { registry, config, cwd } = this.opts;
     const tool = registry.get(call.name);
@@ -417,8 +447,17 @@ export class AgentLoop {
       return { content: `Invalid arguments: ${parsed.error.message}`, isError: true };
     }
 
+    const pre = await this.runEventHooks("PreToolUse", call.name, call.args);
+    if (pre.blocked) {
+      return {
+        content: `Tool "${call.name}" blocked by a PreToolUse hook: ${pre.reason}`,
+        isError: true,
+      };
+    }
+
+    let result: ToolResult;
     try {
-      return await tool.execute(parsed.data, { cwd, abortSignal: signal });
+      result = await tool.execute(parsed.data, { cwd, abortSignal: signal });
     } catch (error) {
       if (signal.aborted) {
         return { content: "Tool execution aborted.", isError: true };
@@ -428,5 +467,10 @@ export class AgentLoop {
         isError: true,
       };
     }
+
+    if (!result.isError) {
+      await this.runEventHooks("PostToolUse", call.name, call.args);
+    }
+    return result;
   }
 }

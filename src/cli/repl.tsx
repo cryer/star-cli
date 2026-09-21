@@ -259,8 +259,9 @@ export function Repl({
           setPendingPermission({ request: req, preview, resolve });
         });
       };
+      target.onHookWarning = (message) => pushMessage("system", message);
     },
-    [setPendingPermission, cwd],
+    [setPendingPermission, cwd, pushMessage],
   );
 
   useEffect(() => {
@@ -800,6 +801,7 @@ export function Repl({
           `contextMaxTokens: ${config.contextMaxTokens}`,
           `streamIdleTimeoutSec: ${config.streamIdleTimeoutSec}`,
           `permissions.allow (${config.permissions.allow.length}): ${config.permissions.allow.join(", ") || "(none)"}`,
+          `hooks (${config.hooks.length}): ${config.hooks.map((h) => h.event).join(", ") || "(none)"}`,
         ].join("\n"),
     };
     const reg = new CommandRegistry();

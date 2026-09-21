@@ -4,7 +4,7 @@
 
 An AI agent command-line interface written in TypeScript — multi-model LLM access, streaming terminal UI, tool calling, permission control, and session persistence.
 
-Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers · built-in fs / bash / web tools with a permission gate · git integration (`/commit` drafts Conventional Commits messages, `/diff` shows a colored working-tree diff, repo status injected into the system prompt) · plan mode with read-only research and plan approval · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume with auto-generated titles (`/resume`, `star -r`) · subagent delegation for focused subtasks · file-write snapshots with `/undo` and checkpoint rollback with `/rewind` · persistent permission allow-rules · TODO task tracking · background shell tasks with status-bar visibility (`/tasks`) · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
+Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers · built-in fs / bash / web tools with a permission gate · git integration (`/commit` drafts Conventional Commits messages, `/diff` shows a colored working-tree diff, repo status injected into the system prompt) · plan mode with read-only research and plan approval · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume with auto-generated titles (`/resume`, `star -r`) · subagent delegation for focused subtasks · lifecycle hooks (`PreToolUse`/`PostToolUse`/`Stop` shell commands from config) · file-write snapshots with `/undo` and checkpoint rollback with `/rewind` · persistent permission allow-rules · TODO task tracking · background shell tasks with status-bar visibility (`/tasks`) · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
 
 ## Requirements
 
@@ -73,6 +73,12 @@ apiKeyEnv = "ANTHROPIC_API_KEY"
 name = "sonnet"
 provider = "claude"
 model = "claude-sonnet-4-20250514"
+
+[[hooks]]
+event = "PostToolUse"                  # PreToolUse | PostToolUse | Stop
+matcher = "edit_file|write_file"       # optional regex on the tool name; matches all tools when omitted
+command = "biome check --write ."
+# timeoutSec = 30                      # optional per-hook timeout
 ```
 
 API keys resolve from the environment variable first (`apiKeyEnv`), then the `apiKey` field in the config file.
@@ -136,6 +142,29 @@ The model can run long shell commands in the background via `bash` with `run_in_
 ## Plan mode
 
 Plan mode (`/plan`, `Shift+Tab` cycling, or `--permission-mode plan`) makes the agent research read-only before touching anything: the model only sees read-level tools (`read_file` / `glob` / `grep` / `web_*` / `todo` …), write/exec tools are hidden entirely, and the system prompt instructs it to end with a concrete step-by-step plan. When the plan is ready, an approval prompt appears — `y` restores the previous permission mode and tells the agent to execute the plan, `n` / `ESC` stays in plan mode so you can keep refining. Plan mode is session-scoped and never written to the config file; `/plan` again toggles back.
+
+## Hooks
+
+`[[hooks]]` entries in the config run your own shell commands at agent lifecycle points (a simplified take on Claude Code hooks):
+
+```toml
+[[hooks]]
+event = "PreToolUse"              # before a tool runs
+matcher = "edit_file|write_file"  # optional regex on the tool name; omit to match every tool
+command = "node scripts/check.js"
+
+[[hooks]]
+event = "Stop"                    # once per finished turn
+command = "notify-send 'turn done'"
+```
+
+- **PreToolUse** runs before the tool executes. Exit code `0` lets it run; exit code `2` blocks it and the hook's stderr is returned to the model as the tool result; any other non-zero exit lets the tool run and shows stderr as a warning (a system message in the REPL, `[hook] …` on stderr in print mode).
+- **PostToolUse** runs after a tool succeeds (never after an error result). A non-zero exit only produces a warning — nothing is blocked. Typical use: formatters and lint autofix (`biome check --write .`).
+- **Stop** runs once when a turn finishes (after the final assistant reply). `matcher` is ignored here since there is no tool; failures only warn.
+
+Hook processes run in the working directory with a timeout (30s default, `timeoutSec` per hook) and receive `STAR_HOOK_EVENT`, `STAR_CWD`, `STAR_SESSION_ID`, plus `STAR_TOOL_NAME` and `STAR_TOOL_INPUT` (JSON of the tool arguments) for tool events. A timed-out hook is treated as failed — for PreToolUse that means allow-with-warning, so a stuck hook can never lock the agent.
+
+Security: hooks are commands **you** configured, so they run in every permission mode and do **not** go through the permission gate — treat the config file as trusted code. Hooks only fire for events that actually happen: in `readonly`/`plan` mode write/exec tools never run, so their PreToolUse/PostToolUse hooks never fire either. A failing hook can never crash the agent.
 
 ## Git integration
 

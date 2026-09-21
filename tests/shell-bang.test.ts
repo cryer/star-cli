@@ -25,6 +25,7 @@ function makeConfig(): StarConfig {
     contextCompaction: "summary",
     streamIdleTimeoutSec: 20,
     permissions: { allow: [] },
+    hooks: [],
   };
 }
 

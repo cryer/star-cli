@@ -24,6 +24,26 @@ export const PermissionsConfigSchema = z.object({
   allow: z.array(z.string()).default([]),
 });
 
+export const HookConfigSchema = z.object({
+  event: z.enum(["PreToolUse", "PostToolUse", "Stop"]),
+  matcher: z
+    .string()
+    .refine(
+      (pattern) => {
+        try {
+          new RegExp(pattern);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      { message: "invalid regular expression" },
+    )
+    .optional(),
+  command: z.string().min(1),
+  timeoutSec: z.number().positive().default(30),
+});
+
 export const ConfigSchema = z.object({
   defaultModel: z.string().default(""),
   permissionMode: z.enum(["auto", "ask", "readonly", "yolo", "plan"]).default("ask"),
@@ -37,11 +57,13 @@ export const ConfigSchema = z.object({
   streamIdleTimeoutSec: z.number().positive().default(20),
   contextCompaction: z.enum(["summary", "truncate"]).default("summary"),
   permissions: PermissionsConfigSchema.default({ allow: [] }),
+  hooks: z.array(HookConfigSchema).default([]),
 });
 
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
 export type PermissionsConfig = z.infer<typeof PermissionsConfigSchema>;
+export type HookConfig = z.infer<typeof HookConfigSchema>;
 export type StarConfig = z.infer<typeof ConfigSchema>;
 
 export interface CliOverrides {

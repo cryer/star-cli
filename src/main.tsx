@@ -53,6 +53,9 @@ async function printMode(
 ): Promise<number> {
   const controller = new AbortController();
   process.on("SIGINT", () => controller.abort());
+  loop.onHookWarning = (message) => {
+    process.stderr.write(`[hook] ${message}\n`);
+  };
   const resolved = await resolveMentions(prompt, cwd);
   if (resolved.attached.length > 0) {
     process.stderr.write(`[attached] ${resolved.attached.join(", ")}\n`);

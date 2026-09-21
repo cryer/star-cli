@@ -9,6 +9,7 @@ export interface StreamOptions {
 export interface ChatBackend {
   stream(input: string, signal: AbortSignal, opts?: StreamOptions): AsyncGenerator<StreamEvent>;
   confirmHandler?: (req: PermissionRequest) => Promise<boolean>;
+  onHookWarning?: (message: string) => void;
 }
 
 export class EchoBackend implements ChatBackend {
