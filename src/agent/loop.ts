@@ -8,7 +8,7 @@ import { type CoreMessage, reconcileToolCalls, retractLastTurn } from "../core/m
 import { checkPermission } from "../permissions/gate";
 import type { PermissionRequest } from "../permissions/types";
 import type { SessionStore } from "../session/store";
-import { beginTurn } from "../tools/fs/snapshots";
+import { beginTurn, currentTurnSeq, setSnapshotHooks } from "../tools/fs/snapshots";
 import type { ToolRegistry } from "../tools/registry";
 import type { ToolResult } from "../tools/types";
 import { MAX_SUBAGENT_DEPTH, createSubagentTool } from "./subagent";
@@ -49,6 +49,25 @@ export class AgentLoop {
     this.opts = opts;
     if (opts.system) {
       this.messages.push({ role: "system", content: opts.system });
+    }
+    if (opts.sessionStore) {
+      const store = opts.sessionStore;
+      setSnapshotHooks({
+        onPush: (snapshot) =>
+          store.appendCheckpoint(
+            {
+              id: snapshot.id,
+              timestamp: snapshot.timestamp,
+              path: snapshot.path,
+              existed: snapshot.existed,
+              toolName: snapshot.toolName,
+              turn: snapshot.turn,
+              messageIndex: snapshot.messageIndex,
+            },
+            snapshot.content,
+          ),
+        onRemove: (ids) => store.removeCheckpoints(ids),
+      });
     }
     const depth = opts.subagentDepth ?? 0;
     if (opts.registry && depth < MAX_SUBAGENT_DEPTH) {
@@ -94,6 +113,35 @@ export class AgentLoop {
     return { removed: result.removed, turn };
   }
 
+  // Cut point for a rewind: messages[index] should be the user message that
+  // started the rewound turn, but compaction may have shifted indices, so
+  // walk back to the nearest user message. Never touches a leading system
+  // message.
+  private retractionCut(index: number): number {
+    const clamped = Math.max(0, Math.min(index, this.messages.length - 1));
+    for (let i = clamped; i >= 0; i--) {
+      if (this.messages[i]?.role === "user") return i;
+    }
+    return this.messages[0]?.role === "system" ? 1 : 0;
+  }
+
+  countRetraction(index: number): number {
+    return this.messages.length - this.retractionCut(index);
+  }
+
+  // Truncates the history back to the given message index (the user message
+  // at that index and everything after it is dropped) and persists the
+  // trimmed history, so /rewind stays consistent across resume.
+  async retractFromIndex(index: number): Promise<number> {
+    const cut = this.retractionCut(index);
+    const removed = this.messages.length - cut;
+    if (removed === 0) return 0;
+    this.messages = this.messages.slice(0, cut);
+    await this.opts.sessionStore?.replaceMessages([...this.messages]);
+    this.turnMarkers = this.turnMarkers.filter((m) => m.userIndex < cut);
+    return removed;
+  }
+
   async appendContextMessage(text: string, role: "user" | "system" = "user"): Promise<void> {
     const message: CoreMessage = { role, content: text };
     this.messages.push(message);
@@ -113,7 +161,12 @@ export class AgentLoop {
 
     const userMessage: CoreMessage = { role: "user", content: input };
     this.messages.push(userMessage);
-    this.turnMarkers.push({ seq: beginTurn(), userIndex: this.messages.length - 1 });
+    // Only the root loop opens a new snapshot turn: a subagent runs inside the
+    // parent's turn, and its file changes must keep the parent's turn seq and
+    // message index so /undo and /rewind attribute them correctly.
+    const seq =
+      (this.opts.subagentDepth ?? 0) === 0 ? beginTurn(this.messages.length - 1) : currentTurnSeq();
+    this.turnMarkers.push({ seq, userIndex: this.messages.length - 1 });
     await this.persist(
       opts?.persistAs !== undefined ? { role: "user", content: opts.persistAs } : userMessage,
     );

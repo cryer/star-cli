@@ -8,10 +8,12 @@ import { loadConfigSync } from "./config/loader";
 import type { StarConfig } from "./config/schema";
 import type { CoreMessage } from "./core/messages";
 import { createModel } from "./llm/provider";
+import { loadSessionSnapshots } from "./session/checkpoints";
 import { resumeSession } from "./session/resume";
 import { type SessionMeta, SessionStore } from "./session/store";
 import { defaultTaskManager } from "./tasks/manager";
 import { createDefaultRegistry } from "./tools";
+import { hydrateSnapshots } from "./tools/fs/snapshots";
 import { VERSION } from "./version";
 
 const SYSTEM_PROMPT = `You are Star CLI, an AI coding agent running in the user's terminal.
@@ -174,6 +176,9 @@ program
     }
     if (resumed) {
       await loop.loadMessages(resumed.messages);
+      if (sessionStore) {
+        hydrateSnapshots(await loadSessionSnapshots(sessionStore.dir));
+      }
     }
 
     if (opts.print) {

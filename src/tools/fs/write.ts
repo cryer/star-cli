@@ -24,7 +24,7 @@ export const writeFileTool: Tool<typeof schema> = {
     } catch (err) {
       return { content: `Failed to write ${args.path}: ${(err as Error).message}`, isError: true };
     }
-    pushSnapshot(snapshot);
+    await pushSnapshot(snapshot);
     return { content: `Wrote ${Buffer.byteLength(args.content, "utf8")} bytes to ${args.path}` };
   },
 };

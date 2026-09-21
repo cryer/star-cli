@@ -24,6 +24,7 @@ function makeCtx(overrides: Partial<CommandContext> = {}) {
     compactContext: async () => "compact result",
     exportSession: async (p) => `exported ${p}`,
     undo: async () => "undo result",
+    rewind: async (args) => (args ? `rewound to ${args}` : "checkpoint list"),
     permissionMode: async (args) => (args ? `mode set ${args}` : "mode list"),
     planMode: async () => "plan toggled",
     initProject: async (args) => `init ${args}`,
@@ -74,7 +75,7 @@ describe("CommandRegistry", () => {
   it("complete matches prefix with or without leading slash", () => {
     const registry = makeRegistry();
     expect(registry.complete("/ex").map((c) => c.name)).toEqual(["exit", "export"]);
-    expect(registry.complete("re").map((c) => c.name)).toEqual(["resume"]);
+    expect(registry.complete("re").map((c) => c.name)).toEqual(["resume", "rewind"]);
     expect(registry.complete("").length).toBe(registry.list().length);
     expect(registry.complete("/zzz")).toEqual([]);
   });

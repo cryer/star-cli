@@ -4,7 +4,7 @@
 
 An AI agent command-line interface written in TypeScript — multi-model LLM access, streaming terminal UI, tool calling, permission control, and session persistence.
 
-Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers · built-in fs / bash / web tools with a permission gate · git integration (`/commit` drafts Conventional Commits messages, `/diff` shows a colored working-tree diff, repo status injected into the system prompt) · plan mode with read-only research and plan approval · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume (`/resume`, `star -r`) · subagent delegation for focused subtasks · file-write snapshots with `/undo` · persistent permission allow-rules · TODO task tracking · background shell tasks with status-bar visibility (`/tasks`) · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
+Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers · built-in fs / bash / web tools with a permission gate · git integration (`/commit` drafts Conventional Commits messages, `/diff` shows a colored working-tree diff, repo status injected into the system prompt) · plan mode with read-only research and plan approval · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume (`/resume`, `star -r`) · subagent delegation for focused subtasks · file-write snapshots with `/undo` and checkpoint rollback with `/rewind` · persistent permission allow-rules · TODO task tracking · background shell tasks with status-bar visibility (`/tasks`) · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
 
 ## Requirements
 
@@ -104,6 +104,7 @@ star -r <sessionId>           resume a previous session
 | `/compact` | compact conversation history to free up context |
 | `/export [path]` | export the current session to a Markdown file |
 | `/undo` | undo the last conversation turn: revert its file changes (write_file/edit_file) and retract its messages — earlier turns are never touched |
+| `/rewind [n]` | list file-change checkpoints, or rewind to just before checkpoint `n`: restore every file changed since then and retract the matching conversation messages (asks for confirmation first) |
 | `/init [force]` | scan the project and generate an AGENTS.md (LLM-polished when a model is available) |
 | `/doctor` | environment self-check (Node, shell, config, API key status, sessions dir writability) |
 | `/commit [instructions]` | analyze uncommitted changes and let the agent stage + commit them with a Conventional Commits message (git add/commit runs through the normal permission gate) |
@@ -173,6 +174,12 @@ The `subagent` tool (`exec` level, so it is hidden in plan mode and denied in re
 Permission modes: `ask` (reads allowed, writes/exec ask) · `auto` (everything allowed except the hard-denied rules above) · `readonly` (read-only) · `yolo` (allow everything, never ask — **all safety checks disabled**, use at your own risk) · `plan` (read-only research with a plan-approval flow, see above — session-only). Switch at runtime with `/permission` (persisted to the config file), per session with `/plan` or `Shift+Tab`, or at startup with `--permission-mode`.
 
 Every successful `write_file` / `edit_file` first snapshots the file's previous content (in-memory, last 50 writes per session); `/undo` restores the most recent snapshot, deleting the file if it didn't exist before.
+
+## Checkpoints and /rewind
+
+Each snapshot is also a numbered **checkpoint**: `/rewind` lists every file change of the session (id, time, tool, file), and `/rewind <n>` rolls the session back to just before checkpoint `n` — every file changed since then is restored in reverse order (files created in the meantime are deleted), the conversation is retracted to the turn that made the change, and the undo stack drops the rewound entries. Because this is destructive, the command first shows how many file changes and messages will be affected and asks for `y`/`n` confirmation.
+
+Checkpoints are persisted under `~/.star-cli/sessions/<id>/checkpoints/` (an `index.json` plus one content file per checkpoint, created lazily on the first file write), so rewinding still works after resuming a session with `/resume` or `star -r`. `/undo` stays the fine-grained counterpart: it only ever touches the last turn.
 
 ## Sessions
 

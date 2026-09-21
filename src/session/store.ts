@@ -2,6 +2,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { sessionsDir } from "../config/paths";
 import type { CoreMessage } from "../core/messages";
+import {
+  type CheckpointRecord,
+  appendCheckpointRecord,
+  listCheckpointRecords,
+  removeCheckpointRecords,
+} from "./checkpoints";
 
 export interface SessionUsage {
   requests: number;
@@ -193,6 +199,19 @@ export class SessionStore {
     meta.title = title;
     meta.updatedAt = Date.now();
     await fs.writeFile(this.metaPath(), JSON.stringify(meta, null, 2));
+  }
+
+  async appendCheckpoint(record: CheckpointRecord, content: string | null): Promise<void> {
+    await this.ensureInitialized();
+    await appendCheckpointRecord(this.dir, record, content);
+  }
+
+  async listCheckpoints(): Promise<CheckpointRecord[]> {
+    return listCheckpointRecords(this.dir);
+  }
+
+  async removeCheckpoints(ids: number[]): Promise<void> {
+    await removeCheckpointRecords(this.dir, ids);
   }
 
   async addUsage(delta: {

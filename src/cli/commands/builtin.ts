@@ -158,6 +158,16 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
   });
 
   registry.register({
+    name: "rewind",
+    description:
+      "List file-change checkpoints, or rewind to just before one: restore files and retract the conversation",
+    usage: "/rewind [n]",
+    async run(args, ctx) {
+      ctx.addSystemMessage(await ctx.rewind(args.trim()));
+    },
+  });
+
+  registry.register({
     name: "init",
     description: "Generate an AGENTS.md for the current project",
     usage: "/init [force]",

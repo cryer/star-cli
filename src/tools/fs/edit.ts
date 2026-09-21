@@ -2,7 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { Tool } from "../types";
-import { currentTurnSeq, pushSnapshot } from "./snapshots";
+import { currentTurnMessageIndex, currentTurnSeq, nextSnapshotId, pushSnapshot } from "./snapshots";
 
 const schema = z.object({
   path: z.string().describe("File path, absolute or relative to the working directory"),
@@ -51,13 +51,15 @@ export const editFileTool: Tool<typeof schema> = {
     } catch (err) {
       return { content: `Failed to write ${args.path}: ${(err as Error).message}`, isError: true };
     }
-    pushSnapshot({
+    await pushSnapshot({
+      id: nextSnapshotId(),
       path: filePath,
       existed: true,
       content,
       toolName: "edit_file",
       timestamp: Date.now(),
       turn: currentTurnSeq(),
+      messageIndex: currentTurnMessageIndex(),
     });
     return { content: `Edited ${args.path}: ${count} replacement${count > 1 ? "s" : ""}` };
   },

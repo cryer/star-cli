@@ -15,6 +15,7 @@ export interface CommandContext {
   compactContext(): Promise<string>;
   exportSession(path: string): Promise<string>;
   undo(): Promise<string>;
+  rewind(args: string): Promise<string>;
   permissionMode(args: string): Promise<string>;
   planMode(): Promise<string>;
   initProject(args: string): Promise<string>;

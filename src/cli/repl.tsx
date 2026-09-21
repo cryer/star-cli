@@ -8,12 +8,18 @@ import { createModel } from "../llm/provider";
 import { listModels } from "../llm/registry";
 import { buildAllowRule, isAllowedByRules } from "../permissions/allow";
 import type { PermissionRequest } from "../permissions/types";
+import { loadSessionSnapshots } from "../session/checkpoints";
 import { formatSessionList, resumeSession } from "../session/resume";
 import { SessionStore } from "../session/store";
 import { formatTaskFinished, formatTaskList, formatTaskStarted } from "../tasks/format";
 import { type TaskSnapshot, defaultTaskManager } from "../tasks/manager";
 import { TodoStore, createDefaultRegistry } from "../tools";
-import { undoTurnSnapshots } from "../tools/fs/snapshots";
+import {
+  hydrateSnapshots,
+  listSnapshots,
+  rewindToSnapshot,
+  undoTurnSnapshots,
+} from "../tools/fs/snapshots";
 import { formatTodos } from "../tools/todo";
 import { VERSION } from "../version";
 import type { ChatBackend } from "./backend";
@@ -23,10 +29,12 @@ import { registerCustomCommands } from "./commands/custom";
 import { formatDoctorReport, runDoctor } from "./commands/doctor";
 import { initProject } from "./commands/init-project";
 import { type CommandContext, CommandRegistry, parseSlashCommand } from "./commands/registry";
+import { formatCheckpointList, planRewind } from "./commands/rewind";
 import { type ExitPlanDecision, ExitPlanPrompt } from "./components/ExitPlanPrompt";
 import { InputBox } from "./components/InputBox";
 import { type DisplayMessage, MessageList } from "./components/MessageList";
 import { type PermissionDecision, PermissionPrompt } from "./components/PermissionPrompt";
+import { RewindConfirmPrompt, type RewindDecision } from "./components/RewindConfirmPrompt";
 import { StatusBar } from "./components/StatusBar";
 import { StreamingMessage } from "./components/StreamingMessage";
 import {
@@ -84,6 +92,11 @@ interface PendingPermission {
   resolve: (approved: boolean) => void;
 }
 
+interface PendingRewind {
+  summary: string;
+  resolve: (confirmed: boolean) => void;
+}
+
 interface ReplProps {
   backend: ChatBackend;
   model: string;
@@ -124,6 +137,7 @@ export function Repl({
   const [bgLabels, setBgLabels] = useState<string[]>(() => runningTaskLabels());
   const [permissionModeState, setPermissionModeState] = useState(permissionMode);
   const [planApproval, setPlanApprovalState] = useState(false);
+  const [pendingRewind, setPendingRewindState] = useState<PendingRewind | null>(null);
 
   const backendRef = useRef<ChatBackend>(backend);
   const nextIdRef = useRef(initialDisplay.length);
@@ -140,6 +154,7 @@ export function Repl({
   // approval or /plan toggle. null when plan mode is not active.
   const prevModeRef = useRef<StarConfig["permissionMode"] | null>(null);
   const planApprovalRef = useRef(false);
+  const pendingRewindRef = useRef<PendingRewind | null>(null);
   const modelNameRef = useRef(model);
   const usageRef = useRef<UsageStats>(initialUsage ? { ...initialUsage } : emptyUsage());
   // Number of assistant chunks already committed to static history this turn;
@@ -199,6 +214,21 @@ export function Repl({
     planApprovalRef.current = v;
     setPlanApprovalState(v);
   }, []);
+
+  const setPendingRewind = useCallback((p: PendingRewind | null) => {
+    pendingRewindRef.current = p;
+    setPendingRewindState(p);
+  }, []);
+
+  const handleRewindDecision = useCallback(
+    (decision: RewindDecision) => {
+      const p = pendingRewindRef.current;
+      if (!p) return;
+      setPendingRewind(null);
+      p.resolve(decision === "yes");
+    },
+    [setPendingRewind],
+  );
 
   // Session-scoped mode switch: mutates the shared config object the AgentLoop
   // reads on every tool call. Entering plan mode remembers the previous mode
@@ -287,7 +317,13 @@ export function Repl({
     if (key.escape) interrupt();
     if (key.shift && key.tab) {
       // Don't yank the mode out from under a running turn or an open prompt.
-      if (abortRef.current || pendingRef.current || planApprovalRef.current) return;
+      if (
+        abortRef.current ||
+        pendingRef.current ||
+        planApprovalRef.current ||
+        pendingRewindRef.current
+      )
+        return;
       const current = config.permissionMode as (typeof SESSION_MODE_CYCLE)[number];
       const index = SESSION_MODE_CYCLE.indexOf(current);
       const next = SESSION_MODE_CYCLE[(index + 1) % SESSION_MODE_CYCLE.length] ?? "ask";
@@ -359,6 +395,10 @@ export function Repl({
         return `Session not found: ${id}`;
       }
       await current.loadMessages(resumed.messages);
+      const store = await SessionStore.open(id);
+      if (store) {
+        hydrateSnapshots(await loadSessionSnapshots(store.dir));
+      }
       const display = buildDisplayMessages(resumed.messages);
       nextIdRef.current = display.length;
       applyMessages(display);
@@ -652,6 +692,51 @@ export function Repl({
           "\n",
         );
       },
+      rewind: async (args) => {
+        if (!args) {
+          return formatCheckpointList(listSnapshots(), cwd);
+        }
+        const id = Number.parseInt(args, 10);
+        if (!Number.isFinite(id) || String(id) !== args) {
+          return `Usage: /rewind <n> — "${args}" is not a checkpoint number.`;
+        }
+        const plan = planRewind(listSnapshots(), id);
+        if (!plan) {
+          return `Checkpoint #${id} not found (it may already have been rewound). /rewind lists the current checkpoints.`;
+        }
+        const current = backendRef.current;
+        const messageCount =
+          plan.messageIndex !== null && current instanceof AgentLoop
+            ? current.countRetraction(plan.messageIndex)
+            : 0;
+        // Rewinds are destructive: confirm before touching files or history.
+        const confirmed = await new Promise<boolean>((resolve) => {
+          setPendingRewind({
+            summary: `Rewind to just before checkpoint #${id} (${plan.target.toolName} ${plan.target.path}):\n${plan.affected.length} file change(s) will be reverted, ${messageCount} message(s) retracted.`,
+            resolve,
+          });
+        });
+        if (!confirmed) {
+          return "Rewind cancelled.";
+        }
+        const result = await rewindToSnapshot(id);
+        if (!result) {
+          return `Checkpoint #${id} is no longer available.`;
+        }
+        let retracted = 0;
+        if (result.messageIndex !== null && current instanceof AgentLoop) {
+          retracted = await current.retractFromIndex(result.messageIndex);
+          if (retracted > 0) {
+            const display = buildDisplayMessages([...current.getMessages()]);
+            nextIdRef.current = display.length;
+            redrawMessages(display);
+          }
+        }
+        return [
+          ...result.reverted,
+          `Rewound to before checkpoint #${id}: ${result.reverted.length} file change(s) reverted, ${retracted} message(s) retracted.`,
+        ].join("\n");
+      },
       permissionMode: async (args) => {
         const current = config.permissionMode;
         if (!args) {
@@ -727,6 +812,7 @@ export function Repl({
     applyMessages,
     redrawMessages,
     applySessionMode,
+    setPendingRewind,
   ]);
 
   const runShellBang = useCallback(
@@ -819,9 +905,12 @@ export function Repl({
         />
       )}
       {planApproval && <ExitPlanPrompt onDecision={handlePlanDecision} />}
+      {pendingRewind && (
+        <RewindConfirmPrompt summary={pendingRewind.summary} onDecision={handleRewindDecision} />
+      )}
       <InputBox
         isStreaming={isStreaming}
-        disabled={pending !== null || planApproval}
+        disabled={pending !== null || planApproval || pendingRewind !== null}
         commands={commandHints}
         onSubmit={handleSubmit}
         onInterrupt={interrupt}
