@@ -1,3 +1,5 @@
+import type { DiffLine } from "../diff-preview";
+
 export interface CommandContext {
   addSystemMessage(text: string): void;
   clearMessages(): void;
@@ -18,6 +20,11 @@ export interface CommandContext {
   initProject(args: string): Promise<string>;
   runDoctor(): Promise<string>;
   submitPrompt?(text: string): void | Promise<void>;
+  // Working directory of the session; commands that shell out (e.g. /commit,
+  // /diff) fall back to process.cwd() when the host does not provide it.
+  cwd?: string;
+  // Renders structured diff lines with per-line colors in the message area.
+  showDiff?(text: string, lines: DiffLine[], note?: string): void;
 }
 
 export interface SlashCommand {

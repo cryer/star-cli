@@ -1,3 +1,11 @@
+import {
+  WORKING_DIFF_MAX_LINES,
+  buildCommitPrompt,
+  collectCommitContext,
+  collectWorkingDiff,
+  isGitRepo,
+} from "../../core/git";
+import { parseGitDiffLines } from "../diff-preview";
 import type { CommandRegistry } from "./registry";
 
 export function registerBuiltinCommands(registry: CommandRegistry): void {
@@ -164,6 +172,62 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
     usage: "/doctor",
     async run(_args, ctx) {
       ctx.addSystemMessage(await ctx.runDoctor());
+    },
+  });
+
+  registry.register({
+    name: "commit",
+    description: "Analyze uncommitted changes and create a git commit (Conventional Commits)",
+    usage: "/commit [instructions]",
+    async run(args, ctx) {
+      const cwd = ctx.cwd ?? process.cwd();
+      if (!isGitRepo(cwd)) {
+        ctx.addSystemMessage("/commit: not a git repository — nothing to do.");
+        return;
+      }
+      const context = collectCommitContext(cwd);
+      if (!context) {
+        ctx.addSystemMessage("/commit: working tree clean — nothing to commit.");
+        return;
+      }
+      const prompt = buildCommitPrompt(context, args);
+      if (ctx.submitPrompt) {
+        return ctx.submitPrompt(prompt);
+      }
+      ctx.addSystemMessage("/commit: this context cannot submit prompts to the model.");
+    },
+  });
+
+  registry.register({
+    name: "diff",
+    description: "Show uncommitted changes (git status + colored diff)",
+    usage: "/diff",
+    run(_args, ctx) {
+      const cwd = ctx.cwd ?? process.cwd();
+      if (!isGitRepo(cwd)) {
+        ctx.addSystemMessage("/diff: not a git repository — nothing to show.");
+        return;
+      }
+      const result = collectWorkingDiff(cwd);
+      if (!result || result.status === "") {
+        ctx.addSystemMessage("Working tree clean — no uncommitted changes.");
+        return;
+      }
+      const header = `git status --short:\n${result.status}`;
+      if (result.diff === "") {
+        ctx.addSystemMessage(
+          `${header}\n\nOnly untracked files — no tracked modifications to diff.`,
+        );
+        return;
+      }
+      const note = result.truncated
+        ? `diff truncated at ${WORKING_DIFF_MAX_LINES} lines`
+        : undefined;
+      if (ctx.showDiff) {
+        ctx.showDiff(header, parseGitDiffLines(result.diff), note);
+        return;
+      }
+      ctx.addSystemMessage(`${header}\n\n${result.diff}${note ? `\n... (${note})` : ""}`);
     },
   });
 }

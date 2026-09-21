@@ -558,7 +558,18 @@ export function Repl({
 
   const registry = useMemo(() => {
     const ctx: CommandContext = {
+      cwd,
       addSystemMessage: (text) => pushMessage("system", text),
+      showDiff: (text, lines, note) => {
+        setMessages((prev) => {
+          const next = [
+            ...prev,
+            { id: nextIdRef.current++, role: "system" as const, text, note, diff: lines },
+          ];
+          messagesRef.current = next;
+          return next;
+        });
+      },
       clearMessages: () => {
         redrawMessages([]);
       },

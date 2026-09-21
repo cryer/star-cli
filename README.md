@@ -4,7 +4,7 @@
 
 An AI agent command-line interface written in TypeScript — multi-model LLM access, streaming terminal UI, tool calling, permission control, and session persistence.
 
-Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers · built-in fs / bash / web tools with a permission gate · plan mode with read-only research and plan approval · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume (`/resume`, `star -r`) · subagent delegation for focused subtasks · file-write snapshots with `/undo` · persistent permission allow-rules · TODO task tracking · background shell tasks with status-bar visibility (`/tasks`) · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
+Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers · built-in fs / bash / web tools with a permission gate · git integration (`/commit` drafts Conventional Commits messages, `/diff` shows a colored working-tree diff, repo status injected into the system prompt) · plan mode with read-only research and plan approval · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume (`/resume`, `star -r`) · subagent delegation for focused subtasks · file-write snapshots with `/undo` · persistent permission allow-rules · TODO task tracking · background shell tasks with status-bar visibility (`/tasks`) · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
 
 ## Requirements
 
@@ -106,6 +106,8 @@ star -r <sessionId>           resume a previous session
 | `/undo` | undo the last conversation turn: revert its file changes (write_file/edit_file) and retract its messages — earlier turns are never touched |
 | `/init [force]` | scan the project and generate an AGENTS.md (LLM-polished when a model is available) |
 | `/doctor` | environment self-check (Node, shell, config, API key status, sessions dir writability) |
+| `/commit [instructions]` | analyze uncommitted changes and let the agent stage + commit them with a Conventional Commits message (git add/commit runs through the normal permission gate) |
+| `/diff` | show uncommitted changes client-side: `git status --short` plus a colored staged/unstaged diff (no model call; huge diffs are truncated at 2000 lines) |
 | `/clear` | clear the screen |
 | `/exit` | quit |
 | `/q` | quit (alias of `/exit`) |
@@ -131,6 +133,15 @@ The model can run long shell commands in the background via `bash` with `run_in_
 ## Plan mode
 
 Plan mode (`/plan`, `Shift+Tab` cycling, or `--permission-mode plan`) makes the agent research read-only before touching anything: the model only sees read-level tools (`read_file` / `glob` / `grep` / `web_*` / `todo` …), write/exec tools are hidden entirely, and the system prompt instructs it to end with a concrete step-by-step plan. When the plan is ready, an approval prompt appears — `y` restores the previous permission mode and tells the agent to execute the plan, `n` / `ESC` stays in plan mode so you can keep refining. Plan mode is session-scoped and never written to the config file; `/plan` again toggles back.
+
+## Git integration
+
+Inside a git repository, the agent's system prompt automatically carries a short git context block — current branch, number of uncommitted files, and the last 3 commits — refreshed at the start of every turn (REPL and print mode alike; any git failure is silently ignored).
+
+Two slash commands build on top of it:
+
+- `/commit [instructions]` collects `git status`, the staged + unstaged diff (truncated to 2000 lines), and the last 5 commits, then asks the agent to draft a Conventional Commits message matching the repo's history and run `git add` / `git commit` via the bash tool — so the usual permission prompt still applies. Outside a repo or with a clean tree it just says so without calling the model.
+- `/diff` is purely client-side: it renders `git status --short` and the staged/unstaged diff with the same colors as the write/edit approval preview, truncated at 2000 lines when larger.
 
 ## Custom slash commands
 

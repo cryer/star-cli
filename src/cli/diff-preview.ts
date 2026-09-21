@@ -141,6 +141,32 @@ export function buildDiffLines(oldText: string, newText: string): DiffLine[] {
   return lines;
 }
 
+// Maps raw `git diff` output onto the same line kinds used by the write/edit
+// preview so both render with the same colors. The leading +/- sigil is
+// stripped because the renderer re-adds it; a leading space on context lines
+// is stripped for the same reason.
+export function parseGitDiffLines(diffText: string): DiffLine[] {
+  return diffText.split("\n").map((raw) => {
+    if (raw.startsWith("+") && !raw.startsWith("+++")) {
+      return { kind: "add", text: raw.slice(1) };
+    }
+    if (raw.startsWith("-") && !raw.startsWith("---")) {
+      return { kind: "del", text: raw.slice(1) };
+    }
+    if (
+      raw.startsWith("@@") ||
+      raw.startsWith("diff ") ||
+      raw.startsWith("index ") ||
+      raw.startsWith("#") ||
+      raw.startsWith("+++") ||
+      raw.startsWith("---")
+    ) {
+      return { kind: "marker", text: raw };
+    }
+    return { kind: "context", text: raw.startsWith(" ") ? raw.slice(1) : raw };
+  });
+}
+
 function getStringArg(args: unknown, key: string): string | undefined {
   if (typeof args === "object" && args !== null) {
     const value = (args as Record<string, unknown>)[key];

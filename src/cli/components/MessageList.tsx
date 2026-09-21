@@ -1,11 +1,16 @@
 import { Box, Static, Text } from "ink";
 import { memo } from "react";
+import type { DiffLine } from "../diff-preview";
+import { DiffLines } from "./DiffLines";
 
 export interface DisplayMessage {
   id: number;
   role: "user" | "assistant" | "assistant-cont" | "system" | "tool";
   text: string;
   note?: string;
+  // Structured diff lines (e.g. from /diff) rendered with per-line colors
+  // below the message text instead of as one flat block.
+  diff?: DiffLine[];
   // tight = no bottom margin; used for mid-turn continuation chunks so a
   // long streamed answer committed in pieces still reads as one block.
   tight?: boolean;
@@ -40,6 +45,7 @@ export const MessageList = memo(function MessageList({ messages }: { messages: D
               {style.label}
             </Text>
             <Text color={style.color}>{message.text}</Text>
+            {message.diff && <DiffLines lines={message.diff} />}
             {message.note && <Text dimColor>{message.note}</Text>}
           </Box>
         );

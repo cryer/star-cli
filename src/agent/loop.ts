@@ -3,6 +3,7 @@ import { tool as aiTool } from "ai";
 import type { StarConfig } from "../config/schema";
 import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
 import type { StreamEvent } from "../core/events";
+import { formatGitSummary, getGitSummary } from "../core/git";
 import { type CoreMessage, reconcileToolCalls, retractLastTurn } from "../core/messages";
 import { checkPermission } from "../permissions/gate";
 import type { PermissionRequest } from "../permissions/types";
@@ -239,16 +240,19 @@ export class AgentLoop {
   // The permission mode can change at runtime, so the system message is
   // recomputed at the start of every turn instead of being frozen by the
   // constructor. Also restores a system message after loadMessages() (resume,
-  // /model switch) replaced the history with one that has none.
+  // /model switch) replaced the history with one that has none. Git context
+  // (branch, dirty count, recent commits) is refreshed here too, so the model
+  // always sees the current repo state; any git failure is silently skipped.
   private syncSystemMessage(): void {
     const base = this.opts.system;
     const plan = this.opts.config.permissionMode === "plan";
-    const content = plan
-      ? base
-        ? base + PLAN_MODE_PROMPT
-        : PLAN_MODE_PROMPT.trim()
-      : (base ?? null);
-    if (content === null) return;
+    const parts: string[] = [];
+    if (base) parts.push(base);
+    if (plan) parts.push(PLAN_MODE_PROMPT.trim());
+    const git = getGitSummary(this.opts.cwd);
+    if (git) parts.push(formatGitSummary(git));
+    if (parts.length === 0) return;
+    const content = parts.join("\n\n");
     const head = this.messages[0];
     if (head?.role === "system" && typeof head.content === "string") {
       if (head.content !== content) head.content = content;

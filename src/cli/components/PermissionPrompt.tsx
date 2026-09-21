@@ -1,7 +1,8 @@
 import { Box, Text, useInput } from "ink";
 import type { PermissionRequest } from "../../permissions/types";
-import type { DiffLine, DiffPreview } from "../diff-preview";
+import type { DiffPreview } from "../diff-preview";
 import { summarizeArgs } from "../format";
+import { DiffLines } from "./DiffLines";
 
 export type PermissionDecision = "yes" | "no" | "always";
 
@@ -9,13 +10,6 @@ interface PermissionPromptProps {
   request: PermissionRequest;
   preview?: DiffPreview | null;
   onDecision(decision: PermissionDecision): void;
-}
-
-function DiffLineView({ line }: { line: DiffLine }) {
-  if (line.kind === "add") return <Text color="green">+ {line.text}</Text>;
-  if (line.kind === "del") return <Text color="red">- {line.text}</Text>;
-  if (line.kind === "marker") return <Text dimColor>{line.text}</Text>;
-  return <Text dimColor> {line.text}</Text>;
 }
 
 export function PermissionPrompt({ request, preview, onDecision }: PermissionPromptProps) {
@@ -37,10 +31,7 @@ export function PermissionPrompt({ request, preview, onDecision }: PermissionPro
             {preview.type === "new-file" ? "New file: " : ""}
             {preview.label}
           </Text>
-          {preview.lines.map((line, index) => (
-            // biome-ignore lint/suspicious/noArrayIndexKey: diff lines have no stable identity
-            <DiffLineView key={index} line={line} />
-          ))}
+          <DiffLines lines={preview.lines} />
         </Box>
       ) : (
         <Text>{summarizeArgs(request.args)}</Text>
