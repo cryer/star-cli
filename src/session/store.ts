@@ -39,18 +39,6 @@ function debugWarn(message: string): void {
   if (process.env.STAR_DEBUG === "1") process.stderr.write(`[star-cli] ${message}\n`);
 }
 
-function messageText(message: CoreMessage): string {
-  const content = message.content;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .filter((part) => part.type === "text")
-      .map((part) => ("text" in part ? part.text : ""))
-      .join(" ");
-  }
-  return "";
-}
-
 export class SessionStore {
   readonly id: string;
   readonly dir: string;
@@ -142,9 +130,6 @@ export class SessionStore {
     await fs.appendFile(this.messagesPath(), `${JSON.stringify(message)}\n`);
     const meta = await this.meta();
     meta.updatedAt = Date.now();
-    if (!meta.title && message.role === "user") {
-      meta.title = messageText(message).slice(0, 60);
-    }
     await fs.writeFile(this.metaPath(), JSON.stringify(meta, null, 2));
   }
 

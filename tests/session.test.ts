@@ -51,10 +51,10 @@ describe("SessionStore", () => {
     expect(await store.messages()).toEqual(messages);
   });
 
-  it("initializes the meta title from the first user message on append", async () => {
+  it("leaves the meta title empty on append", async () => {
     const store = await SessionStore.create("/tmp/work", "test-model");
     await store.append({ role: "user", content: "第一条消息" });
-    expect(readMeta(store.dir).title).toBe("第一条消息");
+    expect(readMeta(store.dir).title).toBe("");
   });
 
   it("writes one JSON object per line in messages.jsonl", async () => {
@@ -172,19 +172,6 @@ describe("SessionStore", () => {
     expect(await SessionStore.open(store.id)).toBeNull();
   });
 
-  it("sets the title from the first user message (max 60 chars)", async () => {
-    const store = await SessionStore.create("/a", "m");
-    await store.append({ role: "assistant", content: "先说话的不是用户" });
-    expect((await store.meta()).title).toBe("");
-
-    const long = "长".repeat(80);
-    await store.append({ role: "user", content: long });
-    expect((await store.meta()).title).toBe("长".repeat(60));
-
-    await store.append({ role: "user", content: "第二条用户消息不覆盖标题" });
-    expect((await store.meta()).title).toBe("长".repeat(60));
-  });
-
   it("setTitle overrides the title", async () => {
     const store = await SessionStore.create("/a", "m");
     await store.append({ role: "user", content: "原始标题" });
@@ -231,6 +218,7 @@ describe("resumeSession", () => {
   it("returns meta and messages for an existing session", async () => {
     const store = await SessionStore.create("/a", "m");
     await store.append({ role: "user", content: "恢复我" });
+    await store.setTitle("恢复我");
 
     const resumed = await resumeSession(store.id);
     expect(resumed?.meta.id).toBe(store.id);

@@ -8,6 +8,7 @@ import { type CoreMessage, reconcileToolCalls, retractLastTurn } from "../core/m
 import { checkPermission } from "../permissions/gate";
 import type { PermissionRequest } from "../permissions/types";
 import type { SessionStore } from "../session/store";
+import { scheduleSessionTitle } from "../session/title";
 import { beginTurn, currentTurnSeq, setSnapshotHooks } from "../tools/fs/snapshots";
 import type { ToolRegistry } from "../tools/registry";
 import type { ToolResult } from "../tools/types";
@@ -43,6 +44,7 @@ export class AgentLoop {
   // history is replaced wholesale (resume/compact), because indices no longer
   // line up — in that case /undo only retracts messages, never wrong files.
   private turnMarkers: { seq: number; userIndex: number }[] = [];
+  private titleScheduled = false;
   confirmHandler?: (req: PermissionRequest) => Promise<boolean>;
 
   constructor(opts: AgentLoopOptions) {
@@ -152,6 +154,17 @@ export class AgentLoop {
     await this.opts.sessionStore?.append(message);
   }
 
+  // After the first assistant reply, kick off background title generation
+  // for the session. Runs once per loop; the store-level title check makes
+  // resumed sessions that already have a title a no-op.
+  private maybeScheduleTitle(input: string): void {
+    if (this.titleScheduled) return;
+    const store = this.opts.sessionStore;
+    if (!store) return;
+    this.titleScheduled = true;
+    scheduleSessionTitle(store, input, this.opts.model);
+  }
+
   async *stream(
     input: string,
     signal: AbortSignal,
@@ -224,6 +237,7 @@ export class AgentLoop {
       };
       this.messages.push(assistantMessage);
       await this.persist(assistantMessage);
+      this.maybeScheduleTitle(input);
 
       if (toolCalls.length === 0) return;
 
