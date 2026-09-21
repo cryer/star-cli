@@ -484,9 +484,13 @@ export function Repl({
         }
       });
       try {
-        for await (const event of backendRef.current.stream(resolved.input, controller.signal, {
-          persistAs: input,
-        })) {
+        for await (const event of backendRef.current.stream(
+          resolved.images.length > 0
+            ? { text: resolved.input, images: resolved.images }
+            : resolved.input,
+          controller.signal,
+          { persistAs: input },
+        )) {
           if (event.type === "text-delta") {
             if (thinkingRef.current) {
               thinkingRef.current = false;

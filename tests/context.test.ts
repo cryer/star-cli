@@ -33,6 +33,18 @@ describe("estimateTokens", () => {
     const withResult = estimateMessageTokens(toolResult("c1", pad(200)));
     expect(withResult).toBeGreaterThan(plain);
   });
+
+  it("charges a flat estimate per image part", () => {
+    const plain = estimateMessageTokens(user("hi"));
+    const withImage = estimateMessageTokens({
+      role: "user",
+      content: [
+        { type: "image", image: "aGVsbG8=", mimeType: "image/png" },
+        { type: "text", text: "hi" },
+      ],
+    });
+    expect(withImage).toBe(plain + 1024);
+  });
 });
 
 describe("compactMessages", () => {

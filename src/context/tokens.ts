@@ -2,6 +2,7 @@ import type { CoreMessage } from "../core/messages";
 
 const CHARS_PER_TOKEN = 4;
 const MESSAGE_OVERHEAD = 4;
+const IMAGE_PART_TOKENS = 1024;
 
 function contentCharLength(message: CoreMessage): number {
   if (message.role === "tool") {
@@ -25,8 +26,17 @@ function contentCharLength(message: CoreMessage): number {
   return chars;
 }
 
+function imagePartCount(message: CoreMessage): number {
+  if (typeof message.content === "string" || message.role === "tool") return 0;
+  return message.content.filter((part) => part.type === "image" || part.type === "file").length;
+}
+
 export function estimateMessageTokens(message: CoreMessage): number {
-  return Math.ceil(contentCharLength(message) / CHARS_PER_TOKEN) + MESSAGE_OVERHEAD;
+  return (
+    Math.ceil(contentCharLength(message) / CHARS_PER_TOKEN) +
+    MESSAGE_OVERHEAD +
+    imagePartCount(message) * IMAGE_PART_TOKENS
+  );
 }
 
 export function estimateTokens(messages: CoreMessage[]): number {

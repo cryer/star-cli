@@ -2,6 +2,20 @@ import type { CoreMessage, ToolCallPart } from "ai";
 
 export type { CoreMessage };
 
+export interface ImageInput {
+  path: string;
+  mimeType: string;
+  /** Base64-encoded image bytes. */
+  data: string;
+}
+
+export interface MultimodalInput {
+  text: string;
+  images: ImageInput[];
+}
+
+export type ChatInput = string | MultimodalInput;
+
 export interface ConversationState {
   messages: CoreMessage[];
 }

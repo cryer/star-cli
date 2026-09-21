@@ -1,4 +1,5 @@
 import type { StreamEvent } from "../core/events";
+import type { ChatInput } from "../core/messages";
 import type { PermissionRequest } from "../permissions/types";
 
 export interface StreamOptions {
@@ -7,7 +8,7 @@ export interface StreamOptions {
 }
 
 export interface ChatBackend {
-  stream(input: string, signal: AbortSignal, opts?: StreamOptions): AsyncGenerator<StreamEvent>;
+  stream(input: ChatInput, signal: AbortSignal, opts?: StreamOptions): AsyncGenerator<StreamEvent>;
   confirmHandler?: (req: PermissionRequest) => Promise<boolean>;
   onHookWarning?: (message: string) => void;
 }
@@ -17,8 +18,9 @@ export class EchoBackend implements ChatBackend {
 
   constructor(private readonly delayMs = 20) {}
 
-  async *stream(input: string, signal: AbortSignal): AsyncGenerator<StreamEvent> {
-    const chunks = input.split(/(\s+)/).filter((s) => s.length > 0);
+  async *stream(input: ChatInput, signal: AbortSignal): AsyncGenerator<StreamEvent> {
+    const text = typeof input === "string" ? input : input.text;
+    const chunks = text.split(/(\s+)/).filter((s) => s.length > 0);
     for (const chunk of chunks) {
       if (signal.aborted) return;
       await new Promise<void>((resolve, reject) => {

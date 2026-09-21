@@ -2,7 +2,12 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { MAX_MENTION_BYTES, parseMentions, resolveMentions } from "../src/cli/mentions";
+import {
+  MAX_IMAGE_BYTES,
+  MAX_MENTION_BYTES,
+  parseMentions,
+  resolveMentions,
+} from "../src/cli/mentions";
 
 function tempDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), "star-mentions-"));
@@ -64,7 +69,7 @@ describe("resolveMentions", () => {
   it("returns input unchanged when there are no mentions", async () => {
     const dir = tempDir();
     const resolved = await resolveMentions("hello world", dir);
-    expect(resolved).toEqual({ input: "hello world", attached: [], skipped: [] });
+    expect(resolved).toEqual({ input: "hello world", attached: [], skipped: [], images: [] });
   });
 
   it("injects text file content", async () => {
@@ -135,5 +140,41 @@ describe("resolveMentions", () => {
     expect(resolved.input).toBe(
       "--- @a.ts ---\naaa\n--- end ---\n\n--- @b.ts ---\nbbb\n--- end ---",
     );
+  });
+
+  it("attaches an image as base64 without inlining it into the text", async () => {
+    const dir = tempDir();
+    const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    writeFileSync(path.join(dir, "pic.png"), pngBytes);
+    const resolved = await resolveMentions("describe @pic.png", dir);
+    expect(resolved.attached).toEqual(["pic.png"]);
+    expect(resolved.skipped).toEqual([]);
+    expect(resolved.images).toEqual([
+      { path: "pic.png", mimeType: "image/png", data: pngBytes.toString("base64") },
+    ]);
+    expect(resolved.input).toBe("describe");
+  });
+
+  it("maps image extensions to mime types case-insensitively", async () => {
+    const dir = tempDir();
+    writeFileSync(path.join(dir, "photo.JPEG"), Buffer.from([0xff, 0xd8]));
+    const resolved = await resolveMentions("see @photo.JPEG", dir);
+    expect(resolved.images).toHaveLength(1);
+    expect(resolved.images[0]?.mimeType).toBe("image/jpeg");
+  });
+
+  it("skips images over the image size limit", async () => {
+    const dir = tempDir();
+    writeFileSync(path.join(dir, "huge.png"), Buffer.alloc(MAX_IMAGE_BYTES + 1));
+    const resolved = await resolveMentions("look @huge.png", dir);
+    expect(resolved.attached).toEqual([]);
+    expect(resolved.images).toEqual([]);
+    expect(resolved.skipped).toEqual([{ path: "huge.png", reason: "image too large" }]);
+  });
+
+  it("skips a missing image with a reason", async () => {
+    const dir = tempDir();
+    const resolved = await resolveMentions("look @gone.png", dir);
+    expect(resolved.skipped).toEqual([{ path: "gone.png", reason: "file not found" }]);
   });
 });

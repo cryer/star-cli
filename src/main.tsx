@@ -1,12 +1,12 @@
 import { Command } from "commander";
 import { AgentLoop } from "./agent/loop";
 import { formatStreamError } from "./cli/format";
-import { resolveMentions } from "./cli/mentions";
+import { MAX_IMAGE_BYTES, imageMimeType, readImageInput, resolveMentions } from "./cli/mentions";
 import { UsageTracker, eventToJsonLine } from "./cli/print-json";
 import { renderRepl } from "./cli/repl";
 import { loadConfigSync } from "./config/loader";
 import type { StarConfig } from "./config/schema";
-import type { CoreMessage } from "./core/messages";
+import type { CoreMessage, ImageInput } from "./core/messages";
 import { createModel } from "./llm/provider";
 import { loadSessionSnapshots } from "./session/checkpoints";
 import { clearSessions } from "./session/clear";
@@ -51,7 +51,25 @@ async function printMode(
   prompt: string,
   cwd: string,
   json: boolean,
+  imagePaths: string[],
 ): Promise<number> {
+  const flagImages: ImageInput[] = [];
+  for (const imagePath of imagePaths) {
+    if (!imageMimeType(imagePath)) {
+      process.stderr.write(
+        `[error] unsupported image type: ${imagePath} (supported: png, jpg, jpeg, gif, webp)\n`,
+      );
+      return 1;
+    }
+    const image = await readImageInput(imagePath, cwd);
+    if (!image) {
+      process.stderr.write(
+        `[error] cannot read image: ${imagePath} (missing, unreadable, or larger than ${MAX_IMAGE_BYTES / (1024 * 1024)}MB)\n`,
+      );
+      return 1;
+    }
+    flagImages.push(image);
+  }
   const controller = new AbortController();
   process.on("SIGINT", () => controller.abort());
   loop.onHookWarning = (message) => {
@@ -64,10 +82,13 @@ async function printMode(
   for (const skip of resolved.skipped) {
     process.stderr.write(`[skipped] @${skip.path}: ${skip.reason}\n`);
   }
+  const images = [...flagImages, ...resolved.images];
+  const input: string | { text: string; images: ImageInput[] } =
+    images.length > 0 ? { text: resolved.input, images } : resolved.input;
   const usage = new UsageTracker();
   let exitCode = 0;
   try {
-    for await (const event of loop.stream(resolved.input, controller.signal, {
+    for await (const event of loop.stream(input, controller.signal, {
       persistAs: prompt,
     })) {
       if (json) {
@@ -136,6 +157,12 @@ program
   .option("--permission-mode <mode>", "permission mode: ask | auto | readonly | yolo | plan")
   .option("-p, --print <prompt>", "non-interactive print mode")
   .option("--json", "output NDJSON events on stdout (print mode only)")
+  .option(
+    "--image <path>",
+    "attach an image file (png/jpg/jpeg/gif/webp, max 5MB); repeatable",
+    (value: string, previous: string[]) => [...previous, value],
+    [] as string[],
+  )
   .option("-r, --resume [sessionId]", "resume a previous session (lists sessions when no id given)")
   .option("-c, --continue", "continue the most recent session for the current directory")
   .option(
@@ -246,7 +273,13 @@ program
     if (opts.print) {
       // Let the loop drain instead of process.exit(): force-exiting on Windows
       // can hit a libuv assertion while undici keep-alive handles are closing.
-      process.exitCode = await printMode(loop, opts.print, cwd, Boolean(opts.json));
+      process.exitCode = await printMode(
+        loop,
+        opts.print,
+        cwd,
+        Boolean(opts.json),
+        opts.image ?? [],
+      );
       return;
     }
 

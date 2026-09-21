@@ -101,6 +101,7 @@ API keys resolve from the environment variable first (`apiKeyEnv`), then the `ap
 ```
 star                          start the interactive REPL
 star -p "prompt"              non-interactive print mode (pipe-friendly)
+star -p "prompt" --image x.png  attach an image (png/jpg/jpeg/gif/webp, max 5MB; repeatable)
 star -p "prompt" --json       NDJSON event stream on stdout (text/tool/usage/error lines)
 star -m gpt                   pick a model
 star --permission-mode auto   ask | auto | readonly | yolo | plan
@@ -216,7 +217,15 @@ Prefix a path with `@` in any prompt to attach its content (REPL and print mode 
 star -p "summarize @README.md and @src/main.tsx"
 ```
 
-Missing, binary, oversized (>100KB), or sensitive files (`.env`, private keys) are skipped with a note. The chat history keeps your original `@path` text, so resumed sessions don't carry the injected bulk.
+Image files (`@screenshot.png` — png, jpg, jpeg, gif, webp, up to 5MB) are sent to the model as image input instead of inlined text, in both the REPL and print mode. In print mode you can also attach images with the repeatable `--image <path>` flag:
+
+```
+star -p "what's wrong in this UI?" --image screenshot.png --image mockup.jpg
+```
+
+Invalid `--image` paths (unsupported type, missing, unreadable, or oversized) abort print mode with a non-zero exit.
+
+Missing, binary, oversized (>100KB for text, >5MB for images), or sensitive files (`.env`, private keys) are skipped with a note. The chat history keeps your original `@path` text, so resumed sessions don't carry the injected bulk.
 
 ## Built-in tools
 

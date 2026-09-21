@@ -116,6 +116,60 @@ describe("AgentLoop", () => {
     });
   }
 
+  it("sends multimodal input to the model as image + text parts", async () => {
+    let capturedPrompt: unknown;
+    const model = new MockLanguageModelV1({
+      doStream: async (options) => {
+        capturedPrompt = options.prompt;
+        return {
+          stream: convertArrayToReadableStream(textRound("It's a picture")),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const loop = makeLoop(model);
+    const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const base64 = pngBytes.toString("base64");
+
+    await collect(
+      loop.stream(
+        {
+          text: "what is this?",
+          images: [{ path: "pic.png", mimeType: "image/png", data: base64 }],
+        },
+        new AbortController().signal,
+      ),
+    );
+
+    const messages = loop.getMessages();
+    const userMessage = messages.find((m) => m.role === "user");
+    expect(userMessage?.content).toEqual([
+      { type: "image", image: base64, mimeType: "image/png" },
+      { type: "text", text: "what is this?" },
+    ]);
+
+    const prompt = capturedPrompt as Array<{
+      role: string;
+      content: Array<{ type: string; mimeType?: string; image?: unknown; text?: string }>;
+    }>;
+    const promptUser = prompt.find((m) => m.role === "user");
+    const parts = promptUser?.content ?? [];
+    const imagePart = parts.find((p) => p.type === "image");
+    const textPart = parts.find((p) => p.type === "text");
+    expect(imagePart?.mimeType).toBe("image/png");
+    expect(Buffer.from(imagePart?.image as Uint8Array).toString("base64")).toBe(base64);
+    expect(textPart?.text).toBe("what is this?");
+  });
+
+  it("keeps multimodal input without images as a plain string message", async () => {
+    const loop = makeLoop(mockModel([textRound("ok")]));
+
+    await collect(loop.stream({ text: "hello", images: [] }, new AbortController().signal));
+
+    const userMessage = loop.getMessages().find((m) => m.role === "user");
+    expect(userMessage?.content).toBe("hello");
+  });
+
   it("handles a plain text round trip", async () => {
     const loop = makeLoop(mockModel([textRound("Hello world")]));
 

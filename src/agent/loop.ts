@@ -4,7 +4,12 @@ import type { StarConfig } from "../config/schema";
 import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
 import type { StreamEvent } from "../core/events";
 import { formatGitSummary, getGitSummary } from "../core/git";
-import { type CoreMessage, reconcileToolCalls, retractLastTurn } from "../core/messages";
+import {
+  type ChatInput,
+  type CoreMessage,
+  reconcileToolCalls,
+  retractLastTurn,
+} from "../core/messages";
 import { type HookEvent, type HookRunResult, runHooks } from "../hooks/runner";
 import { checkPermission } from "../permissions/gate";
 import type { PermissionRequest } from "../permissions/types";
@@ -183,13 +188,28 @@ export class AgentLoop {
   }
 
   async *stream(
-    input: string,
+    input: ChatInput,
     signal: AbortSignal,
     opts?: { persistAs?: string },
   ): AsyncGenerator<StreamEvent> {
     this.syncSystemMessage();
 
-    const userMessage: CoreMessage = { role: "user", content: input };
+    const text = typeof input === "string" ? input : input.text;
+    const images = typeof input === "string" ? [] : input.images;
+    const userMessage: CoreMessage =
+      images.length > 0
+        ? {
+            role: "user",
+            content: [
+              ...images.map((img) => ({
+                type: "image" as const,
+                image: img.data,
+                mimeType: img.mimeType,
+              })),
+              { type: "text" as const, text },
+            ],
+          }
+        : { role: "user", content: text };
     this.messages.push(userMessage);
     // Only the root loop opens a new snapshot turn: a subagent runs inside the
     // parent's turn, and its file changes must keep the parent's turn seq and
@@ -254,7 +274,7 @@ export class AgentLoop {
       };
       this.messages.push(assistantMessage);
       await this.persist(assistantMessage);
-      this.maybeScheduleTitle(input);
+      this.maybeScheduleTitle(text);
 
       if (toolCalls.length === 0) {
         await this.runEventHooks("Stop");
