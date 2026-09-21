@@ -9,6 +9,12 @@ import type { StarConfig } from "./config/schema";
 import type { CoreMessage } from "./core/messages";
 import { createModel } from "./llm/provider";
 import { loadSessionSnapshots } from "./session/checkpoints";
+import {
+  findLatestSession,
+  formatSessionEntries,
+  listSessionEntries,
+  resolveSessionId,
+} from "./session/list";
 import { resumeSession } from "./session/resume";
 import { type SessionMeta, SessionStore } from "./session/store";
 import { defaultTaskManager } from "./tasks/manager";
@@ -126,7 +132,8 @@ program
   .option("--permission-mode <mode>", "permission mode: ask | auto | readonly | yolo | plan")
   .option("-p, --print <prompt>", "non-interactive print mode")
   .option("--json", "output NDJSON events on stdout (print mode only)")
-  .option("-r, --resume <sessionId>", "resume a previous session")
+  .option("-r, --resume [sessionId]", "resume a previous session (lists sessions when no id given)")
+  .option("-c, --continue", "continue the most recent session for the current directory")
   .action(async (opts) => {
     const cwd = process.cwd();
 
@@ -135,6 +142,21 @@ program
         '--json requires print mode: use star -p "..." --json (the interactive REPL does not support JSON output).',
       );
       process.exit(1);
+    }
+
+    if (opts.resume !== undefined && opts.continue) {
+      console.error("Options --resume and --continue are mutually exclusive: pick one.");
+      process.exit(1);
+    }
+
+    if (opts.resume === true) {
+      const entries = await listSessionEntries(cwd);
+      if (entries.length === 0) {
+        console.error("No sessions found for this directory.");
+      } else {
+        console.log(formatSessionEntries(entries));
+      }
+      process.exit(0);
     }
 
     let config: StarConfig;
@@ -156,13 +178,29 @@ program
 
     let sessionStore: SessionStore | null = null;
     let resumed: { meta: SessionMeta; messages: CoreMessage[] } | null = null;
-    if (opts.resume) {
-      resumed = await resumeSession(opts.resume);
-      if (!resumed) {
+    let resumeId: string | null = null;
+    if (typeof opts.resume === "string") {
+      resumeId = await resolveSessionId(opts.resume);
+      if (!resumeId) {
         console.error(`Session not found: ${opts.resume}`);
         process.exit(1);
       }
-      sessionStore = await SessionStore.open(opts.resume);
+    } else if (opts.continue) {
+      const latest = await findLatestSession(cwd);
+      if (latest) {
+        resumeId = latest.id;
+      } else {
+        process.stderr.write("No previous session for this directory — starting a new session.\n");
+      }
+    }
+
+    if (resumeId) {
+      resumed = await resumeSession(resumeId);
+      if (!resumed) {
+        console.error(`Session not found: ${resumeId}`);
+        process.exit(1);
+      }
+      sessionStore = await SessionStore.open(resumeId);
     } else if (!opts.print) {
       sessionStore = await SessionStore.create(cwd, modelName);
     }

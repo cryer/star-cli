@@ -85,7 +85,9 @@ star -p "prompt"              non-interactive print mode (pipe-friendly)
 star -p "prompt" --json       NDJSON event stream on stdout (text/tool/usage/error lines)
 star -m gpt                   pick a model
 star --permission-mode auto   ask | auto | readonly | yolo | plan
-star -r <sessionId>           resume a previous session
+star -r <sessionId>           resume a previous session (full or short id)
+star -r                       list sessions for the current directory
+star -c                       continue the most recent session for the current directory
 ```
 
 ## Slash commands (REPL)
@@ -94,7 +96,7 @@ star -r <sessionId>           resume a previous session
 |---|---|
 | `/help` | list commands |
 | `/model [name]` | list / switch models |
-| `/resume [id]` | list / resume sessions |
+| `/resume [id\|--all]` | list sessions for this directory (`--all`: every directory, with cwd shown) or resume a session by id |
 | `/todo` | show TODO list |
 | `/tasks` | list background tasks (id, status, runtime, exit code) |
 | `/cost` | show API token usage and estimated $ cost (needs per-model pricing in config) |
@@ -183,7 +185,7 @@ Checkpoints are persisted under `~/.star-cli/sessions/<id>/checkpoints/` (an `in
 
 ## Sessions
 
-Sessions persist under `~/.star-cli/sessions/<id>/` (messages as JSONL + `meta.json`). List with `/resume` (only sessions started in the current directory are listed), resume with `/resume <id>` or `star -r <id>`. Sessions are created lazily — opening the REPL and exiting without chatting leaves nothing on disk, and print mode (`-p`) doesn't create a session unless resuming with `-r`. Token usage is accumulated in `meta.json`, so `/cost` reflects resumed history too.
+Sessions persist under `~/.star-cli/sessions/<id>/` (messages as JSONL + `meta.json`). List with `/resume` (only sessions started in the current directory, most recently active first, with message counts and relative times) or `/resume --all` (every directory, with each session's cwd shown), resume with `/resume <id>` or `star -r <id>` — both accept the short id shown in the list. `star -c` (`--continue`) jumps straight back into the most recently active session for the current directory, in the REPL and in print mode alike; when the directory has no sessions it says so and starts a fresh one. `-r` and `-c` are mutually exclusive, and a bare `star -r` prints the session list instead of erroring. Sessions are created lazily — opening the REPL and exiting without chatting leaves nothing on disk, and print mode (`-p`) doesn't create a session unless resuming with `-r` or `-c`. Token usage is accumulated in `meta.json`, so `/cost` reflects resumed history too.
 
 ## Development
 

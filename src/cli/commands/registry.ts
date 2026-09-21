@@ -6,7 +6,7 @@ export interface CommandContext {
   exit(): void;
   listModels(): string;
   switchModel(name: string): Promise<string>;
-  listSessions(): Promise<string>;
+  listSessions(all?: boolean): Promise<string>;
   resumeSession(id: string): Promise<string>;
   showTodos(): Promise<string>;
   listTasks(): string;

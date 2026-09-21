@@ -65,12 +65,15 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
   registry.register({
     name: "resume",
     description: "List sessions or resume a session by id",
-    usage: "/resume [sessionId]",
+    usage: "/resume [sessionId | --all]",
     async run(args, ctx) {
-      if (!args) {
+      const arg = args.trim();
+      if (arg === "--all") {
+        ctx.addSystemMessage(await ctx.listSessions(true));
+      } else if (!arg) {
         ctx.addSystemMessage(await ctx.listSessions());
       } else {
-        ctx.addSystemMessage(await ctx.resumeSession(args));
+        ctx.addSystemMessage(await ctx.resumeSession(arg));
       }
     },
   });

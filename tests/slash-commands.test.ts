@@ -14,7 +14,7 @@ function makeCtx(overrides: Partial<CommandContext> = {}) {
     exit: () => calls.push({ type: "exit" }),
     listModels: () => "models list",
     switchModel: async (name) => `switched to ${name}`,
-    listSessions: async () => "sessions list",
+    listSessions: async (all) => (all ? "all sessions list" : "sessions list"),
     resumeSession: async (id) => `resumed ${id}`,
     showTodos: async () => "todos",
     listTasks: () => "tasks list",
@@ -204,6 +204,26 @@ describe("CommandRegistry", () => {
     expect(calls).toEqual([
       { type: "system", text: "sessions list" },
       { type: "system", text: "resumed abc123" },
+    ]);
+  });
+
+  it("/resume --all lists sessions across all directories", async () => {
+    const registry = makeRegistry();
+    const listed: (boolean | undefined)[] = [];
+    const { ctx, calls } = makeCtx({
+      listSessions: async (all) => {
+        listed.push(all);
+        return all ? "all sessions list" : "sessions list";
+      },
+    });
+
+    await registry.get("resume")?.run("--all", ctx);
+    await registry.get("resume")?.run("  --all  ", ctx);
+
+    expect(listed).toEqual([true, true]);
+    expect(calls).toEqual([
+      { type: "system", text: "all sessions list" },
+      { type: "system", text: "all sessions list" },
     ]);
   });
 });

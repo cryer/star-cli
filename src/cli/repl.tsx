@@ -9,7 +9,8 @@ import { listModels } from "../llm/registry";
 import { buildAllowRule, isAllowedByRules } from "../permissions/allow";
 import type { PermissionRequest } from "../permissions/types";
 import { loadSessionSnapshots } from "../session/checkpoints";
-import { formatSessionList, resumeSession } from "../session/resume";
+import { formatSessionEntries, listSessionEntries, resolveSessionId } from "../session/list";
+import { resumeSession } from "../session/resume";
 import { SessionStore } from "../session/store";
 import { formatTaskFinished, formatTaskList, formatTaskStarted } from "../tasks/format";
 import { type TaskSnapshot, defaultTaskManager } from "../tasks/manager";
@@ -390,12 +391,16 @@ export function Repl({
       if (!(current instanceof AgentLoop)) {
         return "Current backend does not support resuming sessions.";
       }
-      const resumed = await resumeSession(id);
+      const resolvedId = await resolveSessionId(id);
+      if (!resolvedId) {
+        return `Session not found: ${id}`;
+      }
+      const resumed = await resumeSession(resolvedId);
       if (!resumed) {
         return `Session not found: ${id}`;
       }
       await current.loadMessages(resumed.messages);
-      const store = await SessionStore.open(id);
+      const store = await SessionStore.open(resolvedId);
       if (store) {
         hydrateSnapshots(await loadSessionSnapshots(store.dir));
       }
@@ -404,7 +409,7 @@ export function Repl({
       applyMessages(display);
       usageRef.current = resumed.meta.usage ? { ...resumed.meta.usage } : emptyUsage();
       setUsageVersion((v) => v + 1);
-      return `Resumed session ${id} (${resumed.messages.length} messages).`;
+      return `Resumed session ${resolvedId} (${resumed.messages.length} messages).`;
     },
     [applyMessages],
   );
@@ -624,11 +629,12 @@ export function Repl({
         return `Models (* = current):\n${lines.join("\n")}`;
       },
       switchModel,
-      listSessions: async () => {
-        const metas = await SessionStore.list(cwd);
-        return metas.length === 0
-          ? "No sessions found for this directory."
-          : formatSessionList(metas);
+      listSessions: async (all) => {
+        const entries = await listSessionEntries(all ? undefined : cwd);
+        if (entries.length === 0) {
+          return all ? "No sessions found." : "No sessions found for this directory.";
+        }
+        return formatSessionEntries(entries, { showCwd: all });
       },
       resumeSession: resume,
       showTodos: async () => {

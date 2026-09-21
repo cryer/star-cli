@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sessionsDir } from "../src/config/paths";
 import type { CoreMessage } from "../src/core/messages";
-import { formatSessionList, resumeSession } from "../src/session/resume";
+import { resumeSession } from "../src/session/resume";
 import { type SessionMeta, SessionStore } from "../src/session/store";
 
 let home: string;
@@ -240,36 +240,5 @@ describe("resumeSession", () => {
 
   it("returns null for a missing session", async () => {
     expect(await resumeSession("20250101120000-nope00")).toBeNull();
-  });
-});
-
-describe("formatSessionList", () => {
-  it("renders one line per session with relative time", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2025-06-01T12:00:00"));
-    const metas: SessionMeta[] = [
-      {
-        id: "20250601110000-ab12cd",
-        title: "调试会话",
-        model: "m",
-        cwd: "/a",
-        createdAt: Date.now() - 3_600_000,
-        updatedAt: Date.now() - 3_600_000,
-      },
-      {
-        id: "20250601000000-ef34gh",
-        title: "",
-        model: "m",
-        cwd: "/b",
-        createdAt: Date.now() - 86_400_000,
-        updatedAt: Date.now() - 2 * 86_400_000,
-      },
-    ];
-    const output = formatSessionList(metas);
-    expect(output).toBe(
-      "20250601110000-ab12cd  调试会话  (更新于 1 小时前)\n" +
-        "20250601000000-ef34gh  (无标题)  (更新于 2 天前)",
-    );
-    vi.useRealTimers();
   });
 });
