@@ -4,7 +4,7 @@
 
 An AI agent command-line interface written in TypeScript — multi-model LLM access, streaming terminal UI, tool calling, permission control, and session persistence.
 
-Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers · built-in fs / bash / web tools with a permission gate · git integration (`/commit` drafts Conventional Commits messages, `/diff` shows a colored working-tree diff, repo status injected into the system prompt) · plan mode with read-only research and plan approval · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume with auto-generated titles (`/resume`, `star -r`) · subagent delegation for focused subtasks · lifecycle hooks (`PreToolUse`/`PostToolUse`/`Stop` shell commands from config) · file-write snapshots with `/undo` and checkpoint rollback with `/rewind` · persistent permission allow-rules · TODO task tracking · background shell tasks with status-bar visibility (`/tasks`) · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
+Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers · built-in fs / bash / web tools with a permission gate · git integration (`/commit` drafts Conventional Commits messages, `/diff` shows a colored working-tree diff, repo status injected into the system prompt) · plan mode with read-only research and plan approval · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume with auto-generated titles (`/resume`, `star -r`) · subagent delegation for focused subtasks · lifecycle hooks (`PreToolUse`/`PostToolUse`/`Stop` shell commands from config) · file-write snapshots with `/undo` and checkpoint rollback with `/rewind` · persistent permission allow-rules · TODO task tracking · background shell tasks with status-bar visibility (`/tasks`) · terminal bell on long turns and background-task completion · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
 
 ## Requirements
 
@@ -43,6 +43,8 @@ contextCompaction = "summary"   # summary | truncate — how over-budget history
 # Seconds with no stream output before a stalled response is ended gracefully
 # (some relays never close the stream). The first token gets a fixed 120s allowance.
 streamIdleTimeoutSec = 20
+notifyBell = true              # ring the terminal bell when a long turn finishes (REPL only)
+notifyBellThresholdSec = 10    # turns shorter than this stay silent
 
 [permissions]
 # persistent allow-rules, written automatically when you pick "a" (always) on a permission prompt
@@ -139,6 +141,10 @@ Output renders as a tool card and is injected into the conversation so the model
 ## Background tasks
 
 The model can run long shell commands in the background via `bash` with `run_in_background: true` (same permission gate as foreground commands). While anything runs in the background, the status bar shows `bg: N`; when a task finishes, fails, times out, or is stopped, a system message reports the outcome. `/tasks` lists every task with status, runtime, and exit code, and the model can inspect or stop tasks with the `task_list` / `task_output` / `task_kill` tools. Remaining tasks are killed when the REPL exits.
+
+## Terminal bell
+
+The REPL rings the terminal bell (BEL) so you can switch windows while the agent works: once when a turn finishes after taking longer than `notifyBellThresholdSec` (default 10s), and once whenever a background task completes — the moment you are least likely to be watching. It only rings on a TTY, never for interrupted (ESC / Ctrl+C) turns, and never in print mode (`-p`). Disable it with `notifyBell = false` in the config or `STAR_NO_NOTIFY=1` in the environment.
 
 ## Plan mode
 

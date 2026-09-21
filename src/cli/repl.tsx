@@ -54,6 +54,7 @@ import {
   summarizeArgs,
 } from "./format";
 import { resolveMentions } from "./mentions";
+import { notifyBell } from "./notify";
 import { executeShellBang } from "./shell-bang";
 import { type FlushState, nextFlush, startTicker } from "./ticker";
 import { checkForUpdate } from "./update-check";
@@ -288,13 +289,21 @@ export function Repl({
         "system",
         task.status === "running" ? formatTaskStarted(task) : formatTaskFinished(task),
       );
+      // Background tasks are exactly the case where the user has looked away.
+      if (task.status !== "running") {
+        notifyBell({
+          enabled: config.notifyBell,
+          thresholdSec: config.notifyBellThresholdSec,
+          noNotifyEnv: process.env.STAR_NO_NOTIFY === "1",
+        });
+      }
     };
     defaultTaskManager.on("update", onUpdate);
     return () => {
       defaultTaskManager.off("update", onUpdate);
       defaultTaskManager.cleanup();
     };
-  }, [pushMessage]);
+  }, [pushMessage, config]);
 
   const interrupt = useCallback(() => {
     abortRef.current?.abort();
@@ -429,6 +438,7 @@ export function Repl({
       }
       const controller = new AbortController();
       abortRef.current = controller;
+      const turnStartedAt = Date.now();
       streamedRef.current = "";
       thinkingRef.current = true;
       reasoningRef.current = "";
@@ -556,6 +566,13 @@ export function Repl({
         streamedRef.current = "";
         setStreamingText(null);
         const interrupted = controller.signal.aborted;
+        notifyBell({
+          enabled: config.notifyBell,
+          thresholdSec: config.notifyBellThresholdSec,
+          noNotifyEnv: process.env.STAR_NO_NOTIFY === "1",
+          interrupted,
+          elapsedMs: Date.now() - turnStartedAt,
+        });
         if (finalText.length > 0) {
           pushAssistantChunk(`${finalText}${interrupted ? " [interrupted]" : ""}`, false);
         } else if (interrupted && turnChunksRef.current > 0) {

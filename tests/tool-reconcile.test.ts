@@ -80,6 +80,8 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     contextMaxTokens: 100_000,
     contextCompaction: "summary",
     streamIdleTimeoutSec: 20,
+    notifyBell: true,
+    notifyBellThresholdSec: 10,
     permissions: { allow: [] },
     hooks: [],
     ...overrides,

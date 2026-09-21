@@ -56,6 +56,8 @@ describe("loadConfig", () => {
       contextMaxTokens: 100_000,
       streamIdleTimeoutSec: 20,
       contextCompaction: "summary",
+      notifyBell: true,
+      notifyBellThresholdSec: 10,
       permissions: { allow: [] },
       hooks: [],
     });
@@ -74,6 +76,18 @@ permissionMode = "auto"
     expect(config.maxSteps).toBe(10);
     expect(config.permissionMode).toBe("auto");
     expect(config.contextMaxTokens).toBe(100_000);
+  });
+
+  it("loads notify bell settings", async () => {
+    writeFile(
+      globalConfigPath(),
+      `notifyBell = false
+notifyBellThresholdSec = 30
+`,
+    );
+    const config = await loadConfig(cwd);
+    expect(config.notifyBell).toBe(false);
+    expect(config.notifyBellThresholdSec).toBe(30);
   });
 
   it("project config overrides global config", async () => {
