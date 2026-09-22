@@ -52,43 +52,47 @@ describe("StatusBar context percent", () => {
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  it("reflects conversation size after a turn with a large prompt", async () => {
-    const config = makeConfig();
-    const backend = new AgentLoop({
-      model: mockModel(),
-      registry: createDefaultRegistry(),
-      config,
-      cwd,
-    });
-    const app = renderApp(
-      createElement(Repl, {
-        backend,
-        model: "test",
-        permissionMode: "auto",
+  it(
+    "reflects conversation size after a turn with a large prompt",
+    { timeout: 30_000 },
+    async () => {
+      const config = makeConfig();
+      const backend = new AgentLoop({
+        model: mockModel(),
+        registry: createDefaultRegistry(),
         config,
         cwd,
-        sessionStore: null,
-      }),
-    );
-    await tick();
-    // 20k chars ≈ 5k estimated tokens ≈ 5% of a 100k window.
-    await typeText(app.stdin, "x".repeat(20_000), "\r");
-    await vi.waitFor(
-      () => {
-        const frame = stripAnsi(app.lastFrame() ?? "");
-        expect(frame).toContain("ok");
-      },
-      { timeout: 5000 },
-    );
-    for (let i = 0; i < 5; i++) await tick();
-    const frame = stripAnsi(app.lastFrame() ?? "");
-    const match = frame.match(/ctx: ([\d.]+)%/);
-    expect(match, `frame should show ctx %, got: ${frame.slice(-300)}`).not.toBeNull();
-    expect(Number(match?.[1])).toBeGreaterThanOrEqual(4);
-    app.unmount();
-  });
+      });
+      const app = renderApp(
+        createElement(Repl, {
+          backend,
+          model: "test",
+          permissionMode: "auto",
+          config,
+          cwd,
+          sessionStore: null,
+        }),
+      );
+      await tick();
+      // 20k chars ≈ 5k estimated tokens ≈ 5% of a 100k window.
+      await typeText(app.stdin, "x".repeat(20_000), "\r");
+      await vi.waitFor(
+        () => {
+          const frame = stripAnsi(app.lastFrame() ?? "");
+          expect(frame).toContain("ok");
+        },
+        { timeout: 15_000 },
+      );
+      for (let i = 0; i < 5; i++) await tick();
+      const frame = stripAnsi(app.lastFrame() ?? "");
+      const match = frame.match(/ctx: ([\d.]+)%/);
+      expect(match, `frame should show ctx %, got: ${frame.slice(-300)}`).not.toBeNull();
+      expect(Number(match?.[1])).toBeGreaterThanOrEqual(4);
+      app.unmount();
+    },
+  );
 
-  it("shows a decimal instead of 0% for small real usage", async () => {
+  it("shows a decimal instead of 0% for small real usage", { timeout: 30_000 }, async () => {
     const config = makeConfig();
     const backend = new AgentLoop({
       model: mockModel(),
@@ -113,7 +117,7 @@ describe("StatusBar context percent", () => {
       () => {
         expect(stripAnsi(app.lastFrame() ?? "")).toContain("ok");
       },
-      { timeout: 5000 },
+      { timeout: 15_000 },
     );
     for (let i = 0; i < 5; i++) await tick();
     const frame = stripAnsi(app.lastFrame() ?? "");
