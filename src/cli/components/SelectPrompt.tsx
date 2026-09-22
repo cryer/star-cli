@@ -1,5 +1,5 @@
 import { Box, Text, useInput } from "ink";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 export interface SelectOption {
   value: string;
@@ -19,6 +19,11 @@ export const SELECT_PROMPT_MAX_VISIBLE = 9;
 
 export function SelectPrompt({ title, options, onSelect, onCancel }: SelectPromptProps) {
   const [index, setIndex] = useState(0);
+  const indexRef = useRef(0);
+  const move = (delta: number) => {
+    indexRef.current = Math.max(0, Math.min(indexRef.current + delta, options.length - 1));
+    setIndex(indexRef.current);
+  };
 
   useInput((input, key) => {
     if (key.escape) {
@@ -26,14 +31,14 @@ export function SelectPrompt({ title, options, onSelect, onCancel }: SelectPromp
       return;
     }
     if (key.return) {
-      const option = options[index];
+      const option = options[indexRef.current];
       if (option) onSelect(option.value);
       return;
     }
     if (key.downArrow || input === "j") {
-      setIndex((i) => Math.min(i + 1, options.length - 1));
+      move(1);
     } else if (key.upArrow || input === "k") {
-      setIndex((i) => Math.max(i - 1, 0));
+      move(-1);
     }
   });
 
