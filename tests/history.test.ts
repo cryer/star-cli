@@ -9,7 +9,7 @@ let home: string;
 let historyFile: string;
 
 beforeEach(() => {
-  home = fs.mkdtempSync(os.tmpdir());
+  home = fs.mkdtempSync(path.join(os.tmpdir(), "star-history-"));
   vi.stubEnv("STAR_HOME", home);
   historyFile = path.join(home, "history");
 });
