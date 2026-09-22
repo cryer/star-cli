@@ -18,10 +18,12 @@ function run(name: string, args: Record<string, unknown>): Promise<ToolResult> {
   return tool.execute(args, ctx);
 }
 
+let ignoreTick = 0;
+
 function writeIgnore(body: string) {
   const file = path.join(dir, ".starignore");
   fs.writeFileSync(file, body);
-  const t = new Date(Date.now() + 5000);
+  const t = new Date(Date.now() + 5000 + ignoreTick++ * 1000);
   fs.utimesSync(file, t, t);
 }
 
