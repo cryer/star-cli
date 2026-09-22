@@ -45,6 +45,13 @@ describe("estimateTokens", () => {
     });
     expect(withImage).toBe(plain + 1024);
   });
+
+  it("weights CJK characters near one token each", () => {
+    const latin = estimateMessageTokens(user(pad(400)));
+    const cjk = estimateMessageTokens(user("中".repeat(400)));
+    // 400 CJK chars ≈ 400 tokens; the same length of Latin ≈ 100 tokens.
+    expect(cjk).toBeGreaterThan(latin * 3);
+  });
 });
 
 describe("compactMessages", () => {

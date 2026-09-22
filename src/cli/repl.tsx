@@ -1157,7 +1157,9 @@ export function Repl({
     const current = backendRef.current;
     if (current instanceof AgentLoop) {
       const window_ = contextWindowTokens(config, modelNameRef.current);
-      setContextPercent(Math.round((estimateTokens([...current.getMessages()]) / window_) * 100));
+      const pct = (estimateTokens([...current.getMessages()]) / window_) * 100;
+      // One decimal below 10% so small-but-real usage doesn't display as 0%.
+      setContextPercent(pct < 10 ? Math.round(pct * 10) / 10 : Math.round(pct));
     } else {
       setContextPercent(null);
     }
