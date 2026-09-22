@@ -142,6 +142,7 @@ star --clear-sessions all     delete every stored session
 | `/rewind [n]` | list file-change checkpoints, or rewind to just before checkpoint `n`: restore every file changed since then and retract the matching conversation messages (asks for confirmation first) |
 | `/init [force]` | scan the project and generate an AGENTS.md (LLM-polished when a model is available) |
 | `/doctor` | environment self-check (Node, shell, config, API key status, sessions dir writability) |
+| `/skills` | list available skills (project scope overrides user scope) |
 | `/commit [instructions]` | analyze uncommitted changes and let the agent stage + commit them with a Conventional Commits message (git add/commit runs through the normal permission gate) |
 | `/diff` | show uncommitted changes client-side: `git status --short` plus a colored staged/unstaged diff (no model call; huge diffs are truncated at 2000 lines) |
 | `/copy [all]` | copy the last assistant reply to the clipboard (`all`: the whole conversation as plain text) |
@@ -224,6 +225,19 @@ Review the following code and list concrete issues: $ARGUMENTS
 
 The REPL also checks npm for a newer release on startup (async, non-blocking; disable with `STAR_NO_UPDATE_CHECK=1`).
 
+## Skills
+
+Skills are reusable instruction packs the agent loads on demand. Drop a `SKILL.md` into `.star/skills/<name>/` (project) or `~/.star-cli/skills/<name>/` (user); project skills override user skills of the same name. Each `SKILL.md` starts with frontmatter (`name` optional, defaults to the directory name; `description` required), followed by the instructions body:
+
+```markdown
+---
+description: Review code for common issues
+---
+Check error handling, naming, and test coverage. Report concrete findings with file:line references.
+```
+
+Available skills are listed in the system prompt (name + description only, so they cost almost no tokens until used). When a request matches one, the agent calls the read-level `skill` tool to load the full body — supporting files next to the `SKILL.md` (scripts, templates, examples) are resolved relative to the skill's directory. Skills added mid-session are picked up on the next turn; `/skills` lists what's currently visible. Bodies are capped at 32KB.
+
 ## @file mentions
 
 Prefix a path with `@` in any prompt to attach its content (REPL and print mode alike):
@@ -244,7 +258,7 @@ Missing, binary, oversized (>100KB for text, >5MB for images), or sensitive file
 
 ## Built-in tools
 
-`read_file`, `write_file`, `edit_file`, `glob`, `grep`, `bash`, `web_fetch`, `web_search` (DuckDuckGo, no API key needed), `todo_read`, `todo_write`, `task_list`, `task_output`, `task_kill`, `subagent` — each declares a permission level (`read` / `write` / `exec`) enforced by the permission gate. Hard safety rules (dangerous shell commands, paths outside the working directory, secret files like `.env` / private keys) are denied in `ask` / `auto` / `readonly` and cannot be overridden by allow-rules.
+`read_file`, `write_file`, `edit_file`, `glob`, `grep`, `bash`, `web_fetch`, `web_search` (DuckDuckGo, no API key needed), `todo_read`, `todo_write`, `task_list`, `task_output`, `task_kill`, `subagent`, `skill` — each declares a permission level (`read` / `write` / `exec`) enforced by the permission gate. Hard safety rules (dangerous shell commands, paths outside the working directory, secret files like `.env` / private keys) are denied in `ask` / `auto` / `readonly` and cannot be overridden by allow-rules.
 
 The `subagent` tool (`exec` level, so it is hidden in plan mode and denied in readonly) spawns a child agent loop with the same built-in tools to handle a focused, self-contained subtask — research, exploration, or an isolated change — and returns the child's final report as the tool result. Subagents run one level deep (a subagent cannot spawn further subagents), share the parent's permission mode and confirmation prompt, and their conversation is not persisted to the session.
 

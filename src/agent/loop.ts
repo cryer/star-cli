@@ -19,6 +19,7 @@ import { beginTurn, currentTurnSeq, setSnapshotHooks } from "../tools/fs/snapsho
 import type { ToolRegistry } from "../tools/registry";
 import type { ToolResult } from "../tools/types";
 import { readProjectMemory } from "./project-memory";
+import { createSkillTool, discoverSkills, formatSkillsBlock } from "./skills";
 import { MAX_SUBAGENT_DEPTH, createSubagentTool } from "./subagent";
 
 export interface AgentLoopOptions {
@@ -69,6 +70,10 @@ export class AgentLoop {
     if (opts.sessionStore) {
       this.bindSnapshotHooks(opts.sessionStore);
     }
+    // Read-level, so it is available at every subagent depth and in plan
+    // mode. Skills are discovered lazily at execute time, so ones added
+    // mid-session work without re-registering.
+    opts.registry?.register(createSkillTool({ cwd: opts.cwd }));
     const depth = opts.subagentDepth ?? 0;
     if (opts.registry && depth < MAX_SUBAGENT_DEPTH) {
       opts.registry.register(
@@ -356,7 +361,9 @@ export class AgentLoop {
   // (branch, dirty count, recent commits) is refreshed here too, so the model
   // always sees the current repo state; any git failure is silently skipped.
   // Project memory (AGENTS.md in the cwd) is appended as a delimited block;
-  // readProjectMemory caches by mtime, so this stays cheap per turn.
+  // readProjectMemory caches by mtime, so this stays cheap per turn. The
+  // skills listing is refreshed here as well, so skills added mid-session
+  // show up in the next turn's system prompt.
   private syncSystemMessage(): void {
     const base = this.opts.system;
     const plan = this.opts.config.permissionMode === "plan";
@@ -365,6 +372,8 @@ export class AgentLoop {
     if (plan) parts.push(PLAN_MODE_PROMPT.trim());
     const memory = readProjectMemory(this.opts.cwd);
     if (memory) parts.push(memory);
+    const skills = discoverSkills(this.opts.cwd);
+    if (skills.length > 0) parts.push(formatSkillsBlock(skills));
     const git = getGitSummary(this.opts.cwd);
     if (git) parts.push(formatGitSummary(git));
     if (parts.length === 0) return;

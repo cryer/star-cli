@@ -1,3 +1,4 @@
+import { discoverSkills } from "../../agent/skills";
 import {
   WORKING_DIFF_MAX_LINES,
   buildCommitPrompt,
@@ -228,6 +229,23 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
     usage: "/doctor",
     async run(_args, ctx) {
       ctx.addSystemMessage(await ctx.runDoctor());
+    },
+  });
+
+  registry.register({
+    name: "skills",
+    description: "List available skills (project scope overrides user scope)",
+    usage: "/skills",
+    run(_args, ctx) {
+      const skills = discoverSkills(ctx.cwd ?? process.cwd());
+      if (skills.length === 0) {
+        ctx.addSystemMessage(
+          "No skills found. Add a SKILL.md under .star/skills/<name>/ (project) or ~/.star-cli/skills/<name>/ (user).",
+        );
+        return;
+      }
+      const lines = skills.map((s) => `${s.name} [${s.scope}] — ${s.description}`);
+      ctx.addSystemMessage(`Available skills:\n${lines.join("\n")}`);
     },
   });
 
