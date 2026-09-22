@@ -5,7 +5,7 @@ import { MAX_IMAGE_BYTES, imageMimeType, readImageInput, resolveMentions } from 
 import { UsageTracker, eventToJsonLine } from "./cli/print-json";
 import { renderRepl } from "./cli/repl";
 import { loadConfigSync } from "./config/loader";
-import type { StarConfig } from "./config/schema";
+import { type StarConfig, contextWindowTokens } from "./config/schema";
 import type { CoreMessage, ImageInput } from "./core/messages";
 import { createModel } from "./llm/provider";
 import { loadSessionSnapshots } from "./session/checkpoints";
@@ -43,6 +43,7 @@ async function createLoop(
     cwd,
     system: SYSTEM_PROMPT,
     sessionStore,
+    contextMaxTokens: contextWindowTokens(config, modelName),
   });
 }
 

@@ -65,4 +65,27 @@ describe("estimateCost", () => {
     const text = estimateCost({ promptTokens: 100, completionTokens: 50 }, "ghost", undefined);
     expect(text).toBe("Estimated cost: unknown (no price configured for ghost)");
   });
+
+  it("names the missing price when only one is set", () => {
+    const partial = ModelConfigSchema.parse({
+      name: "gpt6",
+      provider: "p",
+      model: "m",
+      promptPrice: 5,
+    });
+    const text = estimateCost({ promptTokens: 100, completionTokens: 50 }, "gpt6", partial);
+    expect(text).toBe(
+      "Estimated cost: unknown (gpt6 is missing completionPrice — both prices are needed)",
+    );
+  });
+
+  it("accepts a per-model contextMaxTokens override", () => {
+    const model = ModelConfigSchema.parse({
+      name: "gpt6",
+      provider: "p",
+      model: "m",
+      contextMaxTokens: 272_000,
+    });
+    expect(model.contextMaxTokens).toBe(272_000);
+  });
 });

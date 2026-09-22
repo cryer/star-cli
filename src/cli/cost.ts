@@ -32,8 +32,17 @@ export function estimateCost(
   model: ModelConfig | undefined,
 ): string {
   const cost = computeCostUsd(usage, model);
-  if (cost === null || model === undefined) {
+  if (cost === null) {
+    if (model !== undefined) {
+      const missing = [
+        model.promptPrice === undefined ? "promptPrice" : null,
+        model.completionPrice === undefined ? "completionPrice" : null,
+      ].filter((f) => f !== null);
+      if (missing.length === 1) {
+        return `Estimated cost: unknown (${model.name} is missing ${missing[0]} — both prices are needed)`;
+      }
+    }
     return `Estimated cost: unknown (no price configured for ${modelName})`;
   }
-  return `Estimated cost: $${formatDollars(cost)} (${model.name} @ $${model.promptPrice}/M prompt, $${model.completionPrice}/M completion)`;
+  return `Estimated cost: $${formatDollars(cost)} (${model?.name} @ $${model?.promptPrice}/M prompt, $${model?.completionPrice}/M completion)`;
 }

@@ -2,7 +2,7 @@ import { Box, Text, render, useApp, useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentLoop } from "../agent/loop";
 import { addAllowRule, savePermissionMode } from "../config/save";
-import type { StarConfig } from "../config/schema";
+import { type StarConfig, contextWindowTokens } from "../config/schema";
 import { estimateTokens } from "../context/tokens";
 import { getGitSummary } from "../core/git";
 import type { CoreMessage, ImageInput } from "../core/messages";
@@ -493,6 +493,7 @@ export function Repl({
           config,
           cwd,
           sessionStore: sessionStoreRef.current,
+          contextMaxTokens: contextWindowTokens(config, name),
         });
         const prev = backendRef.current;
         if (prev instanceof AgentLoop) {
@@ -1155,9 +1156,8 @@ export function Repl({
     setGitBranch(getGitSummary(cwd)?.branch ?? null);
     const current = backendRef.current;
     if (current instanceof AgentLoop) {
-      setContextPercent(
-        Math.round((estimateTokens([...current.getMessages()]) / config.contextMaxTokens) * 100),
-      );
+      const window_ = contextWindowTokens(config, modelNameRef.current);
+      setContextPercent(Math.round((estimateTokens([...current.getMessages()]) / window_) * 100));
     } else {
       setContextPercent(null);
     }

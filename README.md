@@ -73,7 +73,14 @@ apiKeyEnv = "OPENAI_API_KEY"
 name = "gpt"
 provider = "openai"
 model = "gpt-4o"
-# optional per-model pricing (USD per 1M tokens) — enables the $ estimate in /cost and /usage
+# optional per-model context window — overrides the top-level contextMaxTokens
+# for compaction and the ctx % in the status bar
+# contextMaxTokens = 272000
+# optional per-model pricing in USD per 1M tokens — enables the $ estimate in
+# /cost and /usage. promptPrice prices input tokens (system prompt, history,
+# @file contents, tool results — resent every turn, so the bulk of usage);
+# completionPrice prices output tokens (the model's replies and tool calls —
+# less volume, usually the pricier rate). BOTH fields are required together.
 promptPrice = 2.5
 completionPrice = 10
 
@@ -146,7 +153,7 @@ Keys: `ESC` / `Ctrl+C` interrupts the current stream; on a permission prompt: `y
 
 While the model is working, a spinner (`- \ | /`) shows `star is thinking…`; reasoning models also stream a dimmed tail of their thinking (last ~200 chars), which collapses to a one-line summary once the answer starts.
 
-The status bar shows the working directory (full path on wide terminals), the git branch, the model, the permission mode, context usage as a percentage of `contextMaxTokens`, the session cost when the model has pricing configured, and total tokens.
+The status bar shows the working directory (full path on wide terminals), the git branch, the model, the permission mode, context usage as a percentage of the model's context window (its own `contextMaxTokens` when set, else the top-level one), the session cost when the model has pricing configured, and total tokens.
 
 ## !shell passthrough
 

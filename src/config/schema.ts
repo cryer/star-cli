@@ -16,6 +16,11 @@ export const ModelConfigSchema = z.object({
   provider: z.string(),
   model: z.string(),
   maxTokens: z.number().int().positive().optional(),
+  // Per-model context window; overrides the top-level contextMaxTokens for
+  // compaction and the status bar when set.
+  contextMaxTokens: z.number().int().positive().optional(),
+  // Cost estimation needs BOTH prices (USD per 1M tokens); with only one set
+  // the model is treated as unpriced.
   promptPrice: z.number().nonnegative().optional(),
   completionPrice: z.number().nonnegative().optional(),
 });
@@ -73,6 +78,14 @@ export type ModelConfig = z.infer<typeof ModelConfigSchema>;
 export type PermissionsConfig = z.infer<typeof PermissionsConfigSchema>;
 export type HookConfig = z.infer<typeof HookConfigSchema>;
 export type StarConfig = z.infer<typeof ConfigSchema>;
+
+// Effective context window for a model: its own contextMaxTokens when set,
+// otherwise the top-level config.contextMaxTokens.
+export function contextWindowTokens(config: StarConfig, modelName: string): number {
+  return (
+    config.models.find((m) => m.name === modelName)?.contextMaxTokens ?? config.contextMaxTokens
+  );
+}
 
 export interface CliOverrides {
   model?: string;

@@ -6,6 +6,7 @@ import { resolveApiKey } from "../src/config/keys";
 import { loadConfig, loadConfigSync } from "../src/config/loader";
 import { globalConfigPath, projectConfigPath, sessionsDir, starHome } from "../src/config/paths";
 import type { ProviderConfig } from "../src/config/schema";
+import { contextWindowTokens } from "../src/config/schema";
 
 let home: string;
 let cwd: string;
@@ -88,6 +89,27 @@ notifyBellThresholdSec = 30
     const config = await loadConfig(cwd);
     expect(config.notifyBell).toBe(false);
     expect(config.notifyBellThresholdSec).toBe(30);
+  });
+
+  it("per-model contextMaxTokens overrides the top-level window", async () => {
+    writeFile(
+      globalConfigPath(),
+      `[[models]]
+name = "big"
+provider = "p"
+model = "m"
+contextMaxTokens = 272000
+
+[[models]]
+name = "plain"
+provider = "p"
+model = "m"
+`,
+    );
+    const config = await loadConfig(cwd);
+    expect(contextWindowTokens(config, "big")).toBe(272_000);
+    expect(contextWindowTokens(config, "plain")).toBe(config.contextMaxTokens);
+    expect(contextWindowTokens(config, "missing")).toBe(config.contextMaxTokens);
   });
 
   it("project config overrides global config", async () => {

@@ -28,6 +28,9 @@ export interface AgentLoopOptions {
   cwd: string;
   system?: string;
   sessionStore?: SessionStore | null;
+  // Effective context window for compaction (per-model override resolved by
+  // the caller); falls back to config.contextMaxTokens when omitted.
+  contextMaxTokens?: number;
   // Depth of this loop in the subagent chain (0 = main agent). At
   // MAX_SUBAGENT_DEPTH the subagent tool is not registered, so subagents
   // cannot spawn further subagents.
@@ -226,7 +229,8 @@ export class AgentLoop {
     const aiTools = this.buildAiTools();
 
     for (let step = 0; step < config.maxSteps; step++) {
-      const compacted = compactMessages([...this.messages], config.contextMaxTokens);
+      const maxTokens = this.opts.contextMaxTokens ?? config.contextMaxTokens;
+      const compacted = compactMessages([...this.messages], maxTokens);
       if (compacted.compacted) {
         this.messages = await this.applyCompactionSummary(compacted);
       }
