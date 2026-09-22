@@ -2,7 +2,7 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { Tool } from "../types";
-import { type WalkedFile, matchesGlob, walkFiles } from "./util";
+import { type WalkedFile, createIgnorePredicate, matchesGlob, walkFiles } from "./util";
 
 const MAX_MATCHES = 250;
 
@@ -39,7 +39,7 @@ export const grepTool: Tool<typeof schema> = {
       if (st.isFile()) {
         files = [{ abs: root, rel: path.basename(root), mtimeMs: st.mtimeMs }];
       } else {
-        files = await walkFiles(root);
+        files = await walkFiles(root, undefined, { ignore: createIgnorePredicate(ctx.cwd) });
       }
     } catch {
       return { content: `Path not found: ${args.path ?? "."}`, isError: true };

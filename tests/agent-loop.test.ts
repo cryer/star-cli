@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentLoop } from "../src/agent/loop";
 import { PROJECT_MEMORY_MAX_CHARS } from "../src/agent/project-memory";
 import type { StarConfig } from "../src/config/schema";
@@ -80,7 +80,7 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     streamIdleTimeoutSec: 20,
     notifyBell: true,
     notifyBellThresholdSec: 10,
-    permissions: { allow: [] },
+    permissions: { allow: [], deny: [] },
     hooks: [],
     ...overrides,
   };
@@ -96,13 +96,18 @@ async function collect(gen: AsyncGenerator<StreamEvent>): Promise<StreamEvent[]>
 
 describe("AgentLoop", () => {
   let cwd: string;
+  let home: string;
 
   beforeEach(() => {
     cwd = mkdtempSync(path.join(tmpdir(), "star-agent-test-"));
+    home = mkdtempSync(path.join(tmpdir(), "star-agent-home-"));
+    vi.stubEnv("STAR_HOME", home);
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   });
 
   function makeLoop(
@@ -414,6 +419,29 @@ describe("AgentLoop", () => {
     );
     expect(system?.content).toContain("# Project instructions (AGENTS.md)");
     expect(system?.content).toContain("Use pnpm, not npm.");
+  });
+
+  it("injects MEMORY.md from STAR_HOME into the system message", async () => {
+    writeFileSync(path.join(home, "MEMORY.md"), "- prefers dark mode", "utf8");
+    let capturedPrompt: unknown;
+    const model = new MockLanguageModelV1({
+      doStream: async (options) => {
+        capturedPrompt = options.prompt;
+        return {
+          stream: convertArrayToReadableStream(textRound("ok")),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const loop = makeLoop(model);
+
+    await collect(loop.stream("hi", new AbortController().signal));
+
+    const system = (capturedPrompt as Array<{ role: string; content: string }>).find(
+      (m) => m.role === "system",
+    );
+    expect(system?.content).toContain("# User memory (MEMORY.md)");
+    expect(system?.content).toContain("- prefers dark mode");
   });
 
   it("leaves the system message unchanged when no AGENTS.md exists", async () => {

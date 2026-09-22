@@ -1,5 +1,5 @@
 import path from "node:path";
-import { isAllowedByRules } from "./allow";
+import { isAllowedByRules, isDeniedByRules } from "./allow";
 import type {
   PermissionContext,
   PermissionDecision,
@@ -59,6 +59,7 @@ export function checkPermission(
   req: PermissionRequest,
   ctx: PermissionContext,
   allowRules: readonly string[] = [],
+  denyRules: readonly string[] = [],
 ): PermissionDecision {
   // yolo bypasses every check, including the hard safety rules below.
   if (mode === "yolo") {
@@ -87,6 +88,10 @@ export function checkPermission(
     }
   }
 
+  if (isDeniedByRules(denyRules, req)) {
+    return "deny";
+  }
+
   if (mode === "auto") {
     return "allow";
   }
@@ -107,7 +112,7 @@ export function describeDecision(decision: PermissionDecision): string {
     case "allow":
       return "允许执行该操作";
     case "deny":
-      return "拒绝执行：违反权限模式或硬性安全规则";
+      return "拒绝执行：违反权限模式、硬性安全规则或配置的拒绝规则";
     case "ask":
       return "需要用户确认后才能执行";
   }

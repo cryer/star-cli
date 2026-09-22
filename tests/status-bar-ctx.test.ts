@@ -24,7 +24,7 @@ function makeConfig(): StarConfig {
     streamIdleTimeoutSec: 20,
     notifyBell: false,
     notifyBellThresholdSec: 10,
-    permissions: { allow: [] },
+    permissions: { allow: [], deny: [] },
     hooks: [],
   };
 }

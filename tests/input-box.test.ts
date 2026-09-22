@@ -101,6 +101,26 @@ describe("InputBox", () => {
     app.unmount();
   });
 
+  it("recalls initialHistory entries with the up arrow", async () => {
+    const onSubmit = vi.fn();
+    const app = renderApp(
+      createElement(InputBox, {
+        isStreaming: false,
+        initialHistory: ["older command", "newer command"],
+        onSubmit,
+        onInterrupt: () => {},
+        onExit: () => {},
+      }),
+    );
+    await type(app.stdin, UP);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("newer command");
+    await type(app.stdin, UP);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("older command");
+    await type(app.stdin, ENTER);
+    await submitted(onSubmit, "older command");
+    app.unmount();
+  });
+
   it("renders an inverse cursor at end of line", async () => {
     const { app } = setup();
     await type(app.stdin, "hi");

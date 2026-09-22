@@ -1,7 +1,7 @@
 import path from "node:path";
 import { z } from "zod";
 import type { Tool } from "../types";
-import { matchesGlob, walkFiles } from "./util";
+import { createIgnorePredicate, matchesGlob, walkFiles } from "./util";
 
 const MAX_RESULTS = 100;
 
@@ -22,7 +22,7 @@ export const globTool: Tool<typeof schema> = {
   parameters: schema,
   async execute(args, ctx) {
     const root = path.resolve(ctx.cwd, args.path ?? ".");
-    const files = await walkFiles(root);
+    const files = await walkFiles(root, undefined, { ignore: createIgnorePredicate(ctx.cwd) });
     const matched = files
       .filter((f) => matchesGlob(args.pattern, f.rel))
       .sort((a, b) => b.mtimeMs - a.mtimeMs)

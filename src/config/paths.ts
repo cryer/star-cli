@@ -13,6 +13,10 @@ export function sessionsDir(): string {
   return path.join(starHome(), "sessions");
 }
 
+export function userMemoryPath(): string {
+  return path.join(starHome(), "MEMORY.md");
+}
+
 export function projectConfigPath(cwd: string): string {
   return path.join(cwd, ".star", "config.toml");
 }

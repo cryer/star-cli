@@ -15,6 +15,8 @@ interface InputBoxProps {
   cwd?: string;
   // Refill request (double-Esc edit): when seq changes, the input is replaced.
   refill?: InputRefill;
+  // History entries loaded from disk; used only as the initial history state.
+  initialHistory?: string[];
   onSubmit(text: string): void;
   onInterrupt(): void;
   onExit(): void;
@@ -28,6 +30,7 @@ export function InputBox({
   commands,
   cwd,
   refill,
+  initialHistory,
   onSubmit,
   onInterrupt,
   onExit,
@@ -35,7 +38,7 @@ export function InputBox({
 }: InputBoxProps) {
   const [value, setValue] = useState("");
   const [cursor, setCursor] = useState(0);
-  const [history, setHistory] = useState<string[]>([]);
+  const [history, setHistory] = useState<string[]>(() => initialHistory ?? []);
   const [highlight, setHighlight] = useState(0);
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false);
   const [pathSuggestions, setPathSuggestions] = useState<PathSuggestion[]>([]);
@@ -236,16 +239,17 @@ export function InputBox({
       </Box>
       {suggestions.length > 0 && (
         <Box flexDirection="column" paddingLeft={2}>
-          {suggestions.map((cmd, index) =>
-            index === activeIndex ? (
-              <Text key={cmd.name} bold inverse>{`/${cmd.name} - ${cmd.description}`}</Text>
+          {suggestions.map((cmd, index) => {
+            const label = cmd.usage ?? `/${cmd.name}`;
+            return index === activeIndex ? (
+              <Text key={cmd.name} bold inverse>{`${label} - ${cmd.description}`}</Text>
             ) : (
               <Text key={cmd.name}>
-                <Text color="cyan">{`/${cmd.name}`}</Text>
+                <Text color="cyan">{label}</Text>
                 <Text dimColor>{` - ${cmd.description}`}</Text>
               </Text>
-            ),
-          )}
+            );
+          })}
         </Box>
       )}
       {showPathSuggestions && (

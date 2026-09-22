@@ -4,8 +4,13 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config/loader";
 import { globalConfigPath } from "../src/config/paths";
-import { addAllowRule, savePermissionMode } from "../src/config/save";
-import { buildAllowRule, isAllowedByRules, parseAllowRule } from "../src/permissions/allow";
+import { addAllowRule, addDenyRule, savePermissionMode } from "../src/config/save";
+import {
+  buildAllowRule,
+  isAllowedByRules,
+  isDeniedByRules,
+  parseAllowRule,
+} from "../src/permissions/allow";
 import { checkPermission } from "../src/permissions/gate";
 import type { PermissionContext, PermissionRequest } from "../src/permissions/types";
 import type { PermissionLevel } from "../src/tools/types";
@@ -91,6 +96,24 @@ describe("isAllowedByRules", () => {
 
   it("does not match a patterned rule when the arg is missing", () => {
     expect(isAllowedByRules(["bash(npm test)"], req("bash", {}, "exec"))).toBe(false);
+  });
+});
+
+describe("isDeniedByRules", () => {
+  it("uses the same matching semantics as allow rules", () => {
+    expect(
+      isDeniedByRules(["bash(git push *)"], req("bash", { command: "git push origin" }, "exec")),
+    ).toBe(true);
+    expect(
+      isDeniedByRules(["bash(git push *)"], req("bash", { command: "git status" }, "exec")),
+    ).toBe(false);
+    expect(
+      isDeniedByRules(["write_file(dist/*)"], req("write_file", { path: "dist/x.js" }, "write")),
+    ).toBe(true);
+    expect(isDeniedByRules(["read_file"], req("write_file", { path: "a.ts" }, "write"))).toBe(
+      false,
+    );
+    expect(isDeniedByRules(["bash(rm *)"], req("bash", {}, "exec"))).toBe(false);
   });
 });
 
@@ -196,6 +219,66 @@ describe("addAllowRule persistence", () => {
     expect(checkPermission(config.permissionMode, request, ctx, config.permissions.allow)).toBe(
       "allow",
     );
+  });
+});
+
+describe("addDenyRule persistence", () => {
+  let home: string;
+  let cwd: string;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "star-home-"));
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), "star-cwd-"));
+    vi.stubEnv("STAR_HOME", home);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("loads [permissions] deny rules from config.toml", async () => {
+    fs.writeFileSync(
+      globalConfigPath(),
+      '[permissions]\nallow = ["bash(npm test)"]\ndeny = ["bash(git push *)"]\n',
+    );
+    const config = await loadConfig(cwd);
+    expect(config.permissions.allow).toEqual(["bash(npm test)"]);
+    expect(config.permissions.deny).toEqual(["bash(git push *)"]);
+  });
+
+  it("writes the rule to config.toml and reloads it", async () => {
+    expect(await addDenyRule("bash(git push *)")).toBe(true);
+    const config = await loadConfig(cwd);
+    expect(config.permissions.deny).toEqual(["bash(git push *)"]);
+  });
+
+  it("dedupes rules and preserves allow rules and other keys", async () => {
+    fs.writeFileSync(globalConfigPath(), 'defaultModel = "fast"\n');
+    expect(await addAllowRule("bash(npm test)")).toBe(true);
+    expect(await addDenyRule("bash(git push *)")).toBe(true);
+    expect(await addDenyRule("bash(git push *)")).toBe(false);
+    expect(await addDenyRule("write_file(dist/*)")).toBe(true);
+    const config = await loadConfig(cwd);
+    expect(config.defaultModel).toBe("fast");
+    expect(config.permissions.allow).toEqual(["bash(npm test)"]);
+    expect(config.permissions.deny).toEqual(["bash(git push *)", "write_file(dist/*)"]);
+  });
+
+  it("a persisted deny rule takes effect in checkPermission after reload", async () => {
+    await addDenyRule("bash(git push *)");
+    const config = await loadConfig(cwd);
+    const request = req("bash", { command: "git push origin main" }, "exec");
+    expect(
+      checkPermission(
+        config.permissionMode,
+        request,
+        ctx,
+        config.permissions.allow,
+        config.permissions.deny,
+      ),
+    ).toBe("deny");
   });
 });
 

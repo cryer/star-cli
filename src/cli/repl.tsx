@@ -12,7 +12,13 @@ import { buildAllowRule, isAllowedByRules } from "../permissions/allow";
 import type { PermissionRequest } from "../permissions/types";
 import { loadSessionSnapshots } from "../session/checkpoints";
 import { clearSessions } from "../session/clear";
-import { formatSessionEntries, listSessionEntries, resolveSessionId } from "../session/list";
+import {
+  formatSessionEntries,
+  listSessionEntries,
+  relativeTime,
+  resolveSessionId,
+  shortSessionId,
+} from "../session/list";
 import { resumeSession } from "../session/resume";
 import { SessionStore } from "../session/store";
 import { collectUsageStats, formatUsageDashboard } from "../session/usage";
@@ -38,11 +44,13 @@ import { formatDoctorReport, runDoctor } from "./commands/doctor";
 import { initProject } from "./commands/init-project";
 import { type CommandContext, CommandRegistry, parseSlashCommand } from "./commands/registry";
 import { formatCheckpointList, planRewind } from "./commands/rewind";
+import { didYouMeanSuffix } from "./commands/suggest";
 import { type ExitPlanDecision, ExitPlanPrompt } from "./components/ExitPlanPrompt";
 import { InputBox } from "./components/InputBox";
 import { type DisplayMessage, MessageList } from "./components/MessageList";
 import { type PermissionDecision, PermissionPrompt } from "./components/PermissionPrompt";
 import { RewindConfirmPrompt, type RewindDecision } from "./components/RewindConfirmPrompt";
+import { type SelectOption, SelectPrompt } from "./components/SelectPrompt";
 import { StatusBar } from "./components/StatusBar";
 import { StreamingMessage } from "./components/StreamingMessage";
 import {
@@ -61,6 +69,7 @@ import {
   splitCommittableLines,
   summarizeArgs,
 } from "./format";
+import { appendHistory, loadHistory } from "./history";
 import { resolveMentions } from "./mentions";
 import { notifyBell } from "./notify";
 import { PromptQueue, type QueuedPrompt } from "./queue";
@@ -109,6 +118,26 @@ interface PendingRewind {
   resolve: (confirmed: boolean) => void;
 }
 
+interface PendingPicker {
+  title: string;
+  options: SelectOption[];
+  resolve: (value: string | null) => void;
+}
+
+const SESSION_PICKER_CAP = 20;
+
+// First user message of a stored session, collapsed to a single ~60-char
+// line for the resume picker. null when there is nothing usable.
+async function sessionPreview(id: string): Promise<string | null> {
+  const store = await SessionStore.open(id);
+  if (!store) return null;
+  const first = (await store.messages()).find((m) => m.role === "user");
+  if (!first) return null;
+  const text = coreMessageText(first).replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  return text.length > 60 ? `${text.slice(0, 60)}…` : text;
+}
+
 interface ReplProps {
   backend: ChatBackend;
   model: string;
@@ -150,6 +179,7 @@ export function Repl({
   const [permissionModeState, setPermissionModeState] = useState(permissionMode);
   const [planApproval, setPlanApprovalState] = useState(false);
   const [pendingRewind, setPendingRewindState] = useState<PendingRewind | null>(null);
+  const [picker, setPickerState] = useState<PendingPicker | null>(null);
 
   const backendRef = useRef<ChatBackend>(backend);
   const nextIdRef = useRef(initialDisplay.length);
@@ -167,6 +197,7 @@ export function Repl({
   const prevModeRef = useRef<StarConfig["permissionMode"] | null>(null);
   const planApprovalRef = useRef(false);
   const pendingRewindRef = useRef<PendingRewind | null>(null);
+  const pickerRef = useRef<PendingPicker | null>(null);
   const modelNameRef = useRef(model);
   // Live session store: /new swaps it mid-session, so callbacks must go
   // through the ref rather than the prop captured at mount.
@@ -193,6 +224,8 @@ export function Repl({
   const lastEscRef = useRef<number | null>(null);
   const [gitBranch, setGitBranch] = useState<string | null>(null);
   const [contextPercent, setContextPercent] = useState<number | null>(null);
+  // Persistent input history, loaded once per process (STAR_HOME is fixed).
+  const [initialHistory] = useState(() => loadHistory());
   const budgetWarnedRef = useRef(false);
   const budgetExceededRef = useRef(false);
   // Latest runStream, so a finishing turn can drain the queue by re-entering
@@ -256,6 +289,40 @@ export function Repl({
     pendingRewindRef.current = p;
     setPendingRewindState(p);
   }, []);
+
+  const setPicker = useCallback((p: PendingPicker | null) => {
+    pickerRef.current = p;
+    setPickerState(p);
+  }, []);
+
+  // One picker at a time; a second request while one is open resolves null
+  // immediately so callers never hang.
+  const showPicker = useCallback(
+    (title: string, options: SelectOption[]): Promise<string | null> => {
+      if (pickerRef.current) return Promise.resolve(null);
+      return new Promise<string | null>((resolve) => {
+        setPicker({ title, options, resolve });
+      });
+    },
+    [setPicker],
+  );
+
+  const handlePickerSelect = useCallback(
+    (value: string) => {
+      const p = pickerRef.current;
+      if (!p) return;
+      setPicker(null);
+      p.resolve(value);
+    },
+    [setPicker],
+  );
+
+  const handlePickerCancel = useCallback(() => {
+    const p = pickerRef.current;
+    if (!p) return;
+    setPicker(null);
+    p.resolve(null);
+  }, [setPicker]);
 
   const stageClipboardImage = useCallback((img: ImageInput) => {
     pendingImagesRef.current = [
@@ -425,7 +492,8 @@ export function Repl({
         abortRef.current !== null ||
         pendingRef.current !== null ||
         planApprovalRef.current ||
-        pendingRewindRef.current !== null;
+        pendingRewindRef.current !== null ||
+        pickerRef.current !== null;
       if (busy) {
         lastEscRef.current = null;
         interrupt();
@@ -447,7 +515,8 @@ export function Repl({
         abortRef.current ||
         pendingRef.current ||
         planApprovalRef.current ||
-        pendingRewindRef.current
+        pendingRewindRef.current ||
+        pickerRef.current
       )
         return;
       const current = config.permissionMode as (typeof SESSION_MODE_CYCLE)[number];
@@ -842,6 +911,97 @@ export function Repl({
         return formatSessionEntries(entries, { showCwd: all });
       },
       resumeSession: resume,
+      pickModel: async () => {
+        const models = listModels(config);
+        if (models.length === 0) return "No models configured.";
+        const options: SelectOption[] = models.map((m) => {
+          const parts = [`${m.provider}/${m.model}`, `${contextWindowTokens(config, m.name)} ctx`];
+          if (m.promptPrice !== undefined && m.completionPrice !== undefined) {
+            parts.push(`$${m.promptPrice}/$${m.completionPrice} per 1M tokens`);
+          }
+          return {
+            value: m.name,
+            label: m.name,
+            description: parts.join(" · "),
+            hint: m.name === modelNameRef.current ? "current" : undefined,
+          };
+        });
+        const picked = await showPicker("Select a model", options);
+        if (!picked || picked === modelNameRef.current) {
+          return `Model unchanged — still "${modelNameRef.current}".`;
+        }
+        return switchModel(picked);
+      },
+      pickPermissionMode: async () => {
+        const current = config.permissionMode;
+        const descriptions: Record<string, string> = {
+          ask: "reads allowed; writes/exec ask for confirmation",
+          auto: "everything allowed except hard-denied dangerous commands/paths",
+          readonly: "read-only; all writes/exec denied",
+          yolo: "allow everything, never ask (disables ALL safety checks)",
+          plan: "read-only research, then approve a plan before executing (this session only)",
+        };
+        const options: SelectOption[] = ["ask", "auto", "readonly", "yolo", "plan"].map((m) => ({
+          value: m,
+          label: m,
+          description: descriptions[m],
+          hint: m === current ? "current" : undefined,
+        }));
+        const picked = await showPicker("Select a permission mode", options);
+        if (!picked || picked === current) {
+          return `Permission mode unchanged — still ${current}.`;
+        }
+        if (picked === "plan") return ctx.planMode();
+        return ctx.permissionMode(picked);
+      },
+      pickSession: async (all) => {
+        const entries = (await listSessionEntries(all ? undefined : cwd)).slice(
+          0,
+          SESSION_PICKER_CAP,
+        );
+        if (entries.length === 0) {
+          return all ? "No sessions found." : "No sessions found for this directory.";
+        }
+        const options: SelectOption[] = await Promise.all(
+          entries.map(async ({ meta, messageCount }) => {
+            const parts = [`${messageCount} messages · ${relativeTime(meta.updatedAt)}`];
+            const preview = await sessionPreview(meta.id);
+            if (preview) parts.push(preview);
+            if (all) parts.push(`[${meta.cwd}]`);
+            return {
+              value: meta.id,
+              label: meta.title || shortSessionId(meta.id),
+              description: parts.join(" · "),
+              hint: meta.id === sessionStoreRef.current?.id ? "current" : undefined,
+            };
+          }),
+        );
+        const picked = await showPicker(
+          all ? "Resume a session (all directories)" : "Resume a session",
+          options,
+        );
+        if (!picked) return "Session unchanged — picker cancelled.";
+        return resume(picked);
+      },
+      forkSession: async () => {
+        const current = backendRef.current;
+        const store = sessionStoreRef.current;
+        if (!(current instanceof AgentLoop) || !store) {
+          return "Nothing to fork — no active session.";
+        }
+        const messages = await store.messages();
+        if (messages.length === 0) {
+          return "Nothing to fork — the current session has no messages yet.";
+        }
+        const fork = await SessionStore.create(cwd, modelNameRef.current);
+        await fork.replaceMessages(messages);
+        const oldMeta = await store.meta();
+        const title = `Fork of ${oldMeta.title || shortSessionId(oldMeta.id)}`;
+        await fork.setTitle(title);
+        current.setSessionStore(fork);
+        sessionStoreRef.current = fork;
+        return `Forked into new session ${fork.id} ("${title}") and switched to it. Checkpoints and rewind history do not carry over.`;
+      },
       newSession: async () => {
         const current = backendRef.current;
         if (!(current instanceof AgentLoop)) {
@@ -1059,6 +1219,7 @@ export function Repl({
     redrawMessages,
     applySessionMode,
     setPendingRewind,
+    showPicker,
   ]);
 
   const runShellBang = useCallback(
@@ -1102,6 +1263,7 @@ export function Repl({
 
   const handleSubmit = useCallback(
     (text: string) => {
+      appendHistory(text);
       if (text.startsWith("!")) {
         // A bang would clobber the streaming turn's abort controller, so it
         // waits in the queue like a regular prompt.
@@ -1118,7 +1280,11 @@ export function Repl({
         if (!parsed) return;
         const command = registry.get(parsed.name);
         if (!command) {
-          pushMessage("system", `Unknown command: /${parsed.name} (try /help)`);
+          const suggestions = registry.complete(parsed.name).map((cmd) => cmd.name);
+          pushMessage(
+            "system",
+            `Unknown command: /${parsed.name} (try /help)${didYouMeanSuffix(suggestions)}`,
+          );
           return;
         }
         void command.run(parsed.args, registry.ctx);
@@ -1145,7 +1311,12 @@ export function Repl({
   );
 
   const commandHints = useMemo(
-    () => registry.list().map((cmd) => ({ name: cmd.name, description: cmd.description })),
+    () =>
+      registry.list().map((cmd) => ({
+        name: cmd.name,
+        description: cmd.description,
+        usage: cmd.usage ?? `/${cmd.name}`,
+      })),
     [registry],
   );
 
@@ -1194,6 +1365,14 @@ export function Repl({
       {pendingRewind && (
         <RewindConfirmPrompt summary={pendingRewind.summary} onDecision={handleRewindDecision} />
       )}
+      {picker && (
+        <SelectPrompt
+          title={picker.title}
+          options={picker.options}
+          onSelect={handlePickerSelect}
+          onCancel={handlePickerCancel}
+        />
+      )}
       {queueItems.map((item) => (
         <Text key={item.id} dimColor>
           queued: {item.text.length > 80 ? `${item.text.slice(0, 80)}…` : item.text}
@@ -1206,10 +1385,11 @@ export function Repl({
       ))}
       <InputBox
         isStreaming={isStreaming}
-        disabled={pending !== null || planApproval || pendingRewind !== null}
+        disabled={pending !== null || planApproval || pendingRewind !== null || picker !== null}
         commands={commandHints}
         cwd={cwd}
         refill={inputRefill}
+        initialHistory={initialHistory}
         onSubmit={handleSubmit}
         onInterrupt={interrupt}
         onExit={handleExit}

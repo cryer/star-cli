@@ -27,6 +27,7 @@ export const ModelConfigSchema = z.object({
 
 export const PermissionsConfigSchema = z.object({
   allow: z.array(z.string()).default([]),
+  deny: z.array(z.string()).default([]),
 });
 
 export const HookConfigSchema = z.object({
@@ -69,7 +70,7 @@ export const ConfigSchema = z.object({
   // STAR_NO_NOTIFY=1 disables without touching the config.
   notifyBell: z.boolean().default(true),
   notifyBellThresholdSec: z.number().positive().default(10),
-  permissions: PermissionsConfigSchema.default({ allow: [] }),
+  permissions: PermissionsConfigSchema.default({ allow: [], deny: [] }),
   hooks: z.array(HookConfigSchema).default([]),
 });
 

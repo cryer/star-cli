@@ -190,6 +190,101 @@ describe("yolo mode", () => {
   });
 });
 
+describe("deny rules", () => {
+  it("denies a matching bash command in auto mode", () => {
+    expect(
+      checkPermission(
+        "auto",
+        req("bash", { command: "npm publish" }, "exec"),
+        ctx,
+        [],
+        ["bash(npm publish*)"],
+      ),
+    ).toBe("deny");
+    expect(
+      checkPermission(
+        "auto",
+        req("bash", { command: "npm test" }, "exec"),
+        ctx,
+        [],
+        ["bash(npm publish*)"],
+      ),
+    ).toBe("allow");
+  });
+
+  it("denies a matching file path for write tools in auto mode", () => {
+    expect(
+      checkPermission(
+        "auto",
+        req("write_file", { path: "src/secret.ts" }, "write"),
+        ctx,
+        [],
+        ["write_file(src/secret*)"],
+      ),
+    ).toBe("deny");
+    expect(
+      checkPermission(
+        "auto",
+        req("write_file", { path: "src/other.ts" }, "write"),
+        ctx,
+        [],
+        ["write_file(src/secret*)"],
+      ),
+    ).toBe("allow");
+  });
+
+  it("beats an allow rule when both match in ask mode", () => {
+    const request = req("bash", { command: "npm test" }, "exec");
+    expect(checkPermission("ask", request, ctx, ["bash(npm *)"], ["bash(npm test)"])).toBe("deny");
+    expect(checkPermission("ask", request, ctx, ["bash(npm *)"], [])).toBe("allow");
+  });
+
+  it("does not affect non-matching requests", () => {
+    expect(
+      checkPermission(
+        "auto",
+        req("bash", { command: "git status" }, "exec"),
+        ctx,
+        [],
+        ["bash(git push*)"],
+      ),
+    ).toBe("allow");
+  });
+
+  it("applies in ask mode for exec-level tools", () => {
+    expect(checkPermission("ask", req("bash", { command: "ls" }, "exec"), ctx, [], ["bash"])).toBe(
+      "deny",
+    );
+  });
+
+  it("ignores malformed deny rules", () => {
+    expect(
+      checkPermission("auto", req("bash", { command: "ls" }, "exec"), ctx, [], ["(broken)"]),
+    ).toBe("allow");
+  });
+
+  it("is bypassed in yolo mode", () => {
+    expect(
+      checkPermission(
+        "yolo",
+        req("bash", { command: "npm publish" }, "exec"),
+        ctx,
+        [],
+        ["bash(npm publish*)"],
+      ),
+    ).toBe("allow");
+  });
+
+  it("does not change readonly mode behavior for safe requests", () => {
+    expect(checkPermission("readonly", req("read_file", { path: "x.ts" }, "read"), ctx)).toBe(
+      "allow",
+    );
+    expect(checkPermission("readonly", req("write_file", { path: "x.ts" }, "write"), ctx)).toBe(
+      "deny",
+    );
+  });
+});
+
 describe("describeDecision", () => {
   it("returns a short Chinese description for each decision", () => {
     expect(describeDecision("allow")).toContain("允许");

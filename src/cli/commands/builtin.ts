@@ -1,4 +1,7 @@
+import { readFileSync } from "node:fs";
 import { discoverSkills } from "../../agent/skills";
+import { appendUserMemory } from "../../agent/user-memory";
+import { userMemoryPath } from "../../config/paths";
 import {
   WORKING_DIFF_MAX_LINES,
   buildCommitPrompt,
@@ -6,36 +9,47 @@ import {
   collectWorkingDiff,
   isGitRepo,
 } from "../../core/git";
+import { formatSearchResults, searchSessions } from "../../session/search";
 import { parseGitDiffLines } from "../diff-preview";
-import type { CommandRegistry } from "./registry";
+import type { CommandRegistry, SlashCommand } from "./registry";
 
 export function registerBuiltinCommands(registry: CommandRegistry): void {
-  registry.register({
+  const register = (command: SlashCommand) => registry.register(command);
+
+  register({
     name: "help",
     description: "List available commands",
     usage: "/help",
+    category: "General",
     run(_args, ctx) {
-      const lines = registry.list().map((cmd) => {
+      const groups = new Map<string, string[]>();
+      for (const cmd of registry.list()) {
+        const category = cmd.category ?? "Other";
         const usage = cmd.usage ?? `/${cmd.name}`;
-        return `${usage} - ${cmd.description}`;
-      });
-      ctx.addSystemMessage(`Available commands:\n${lines.join("\n")}`);
+        const lines = groups.get(category) ?? [];
+        lines.push(`  ${usage} - ${cmd.description}`);
+        groups.set(category, lines);
+      }
+      const sections = [...groups.entries()].map(([name, lines]) => [name, ...lines].join("\n"));
+      ctx.addSystemMessage(`Available commands:\n\n${sections.join("\n\n")}`);
     },
   });
 
-  registry.register({
+  register({
     name: "clear",
     description: "Clear message history",
     usage: "/clear",
+    category: "General",
     run(_args, ctx) {
       ctx.clearMessages();
     },
   });
 
-  registry.register({
+  register({
     name: "new",
     description: "Start a new session with a clean context",
     usage: "/new",
+    category: "Sessions",
     async run(_args, ctx) {
       if (!ctx.newSession) {
         ctx.addSystemMessage("/new: this context cannot start a new session.");
@@ -45,11 +59,12 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
     },
   });
 
-  registry.register({
+  register({
     name: "clear-sessions",
     description:
       "Delete stored sessions: this directory by default, every session with --all (the current session is kept)",
     usage: "/clear-sessions [--all]",
+    category: "Sessions",
     async run(args, ctx) {
       const arg = args.trim();
       if (arg !== "" && arg !== "--all") {
@@ -66,176 +81,262 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
     },
   });
 
-  registry.register({
+  register({
     name: "exit",
     description: "Exit the application",
     usage: "/exit",
+    category: "General",
     run(_args, ctx) {
       ctx.exit();
     },
   });
 
-  registry.register({
+  register({
     name: "q",
     description: "Exit the application (alias of /exit)",
     usage: "/q",
+    category: "General",
     run(_args, ctx) {
       ctx.exit();
     },
   });
 
-  registry.register({
+  register({
     name: "model",
-    description: "List available models or switch the current model",
+    description: "Switch the current model (opens a picker when no name is given)",
     usage: "/model [name]",
+    category: "Settings",
     async run(args, ctx) {
       if (!args) {
-        ctx.addSystemMessage(ctx.listModels());
+        ctx.addSystemMessage(await ctx.pickModel());
       } else {
         ctx.addSystemMessage(await ctx.switchModel(args));
       }
     },
   });
 
-  registry.register({
+  register({
     name: "resume",
-    description: "List sessions or resume a session by id",
+    description: "Resume a session by id, or pick one from a list (--all for every directory)",
     usage: "/resume [sessionId | --all]",
+    category: "Sessions",
     async run(args, ctx) {
       const arg = args.trim();
       if (arg === "--all") {
-        ctx.addSystemMessage(await ctx.listSessions(true));
+        ctx.addSystemMessage(await ctx.pickSession(true));
       } else if (!arg) {
-        ctx.addSystemMessage(await ctx.listSessions());
+        ctx.addSystemMessage(await ctx.pickSession(false));
       } else {
         ctx.addSystemMessage(await ctx.resumeSession(arg));
       }
     },
   });
 
-  registry.register({
+  register({
+    name: "fork",
+    description: "Fork the current session into a new one and switch to it",
+    usage: "/fork",
+    category: "Sessions",
+    async run(_args, ctx) {
+      ctx.addSystemMessage(await ctx.forkSession());
+    },
+  });
+
+  register({
+    name: "search",
+    description: "Full-text search across all stored sessions",
+    usage: "/search <query>",
+    category: "Sessions",
+    async run(args, ctx) {
+      const query = args.trim();
+      if (!query) {
+        ctx.addSystemMessage("Usage: /search <query>");
+        return;
+      }
+      ctx.addSystemMessage(formatSearchResults(await searchSessions(query), query));
+    },
+  });
+
+  register({
     name: "todo",
     description: "Show the current todo list",
     usage: "/todo",
+    category: "Info",
     async run(_args, ctx) {
       ctx.addSystemMessage(await ctx.showTodos());
     },
   });
 
-  registry.register({
+  register({
     name: "tasks",
     description: "List background shell tasks",
     usage: "/tasks",
+    category: "Info",
     run(_args, ctx) {
       ctx.addSystemMessage(ctx.listTasks());
     },
   });
 
-  registry.register({
+  register({
     name: "cost",
     description: "Show API token usage for this session",
     usage: "/cost",
+    category: "Info",
     run(_args, ctx) {
       ctx.addSystemMessage(ctx.showUsage());
     },
   });
 
-  registry.register({
+  register({
     name: "usage",
     description: "Show token usage aggregated across all sessions",
     usage: "/usage",
+    category: "Info",
     async run(_args, ctx) {
       ctx.addSystemMessage(await ctx.showGlobalUsage());
     },
   });
 
-  registry.register({
+  register({
     name: "config",
     description: "Show the current configuration",
     usage: "/config",
+    category: "Info",
     run(_args, ctx) {
       ctx.addSystemMessage(ctx.describeConfig());
     },
   });
 
-  registry.register({
+  register({
     name: "compact",
     description: "Compact the conversation history to free up context",
     usage: "/compact",
+    category: "Sessions",
     async run(_args, ctx) {
       ctx.addSystemMessage(await ctx.compactContext());
     },
   });
 
-  registry.register({
+  register({
     name: "export",
     description: "Export the current session to a Markdown file",
     usage: "/export [path]",
+    category: "Sessions",
     async run(args, ctx) {
       ctx.addSystemMessage(await ctx.exportSession(args));
     },
   });
 
-  registry.register({
+  register({
     name: "permission",
-    description: "Show or set the global permission mode (ask | auto | readonly | yolo)",
+    description: "Set the permission mode (opens a picker when no mode is given)",
     usage: "/permission [ask|auto|readonly|yolo]",
+    category: "Settings",
     async run(args, ctx) {
-      ctx.addSystemMessage(await ctx.permissionMode(args.trim()));
+      const arg = args.trim();
+      if (!arg) {
+        ctx.addSystemMessage(await ctx.pickPermissionMode());
+      } else {
+        ctx.addSystemMessage(await ctx.permissionMode(arg));
+      }
     },
   });
 
-  registry.register({
+  register({
     name: "plan",
     description: "Toggle plan mode: read-only research, then approve the plan before executing",
     usage: "/plan",
+    category: "Settings",
     async run(_args, ctx) {
       ctx.addSystemMessage(await ctx.planMode());
     },
   });
 
-  registry.register({
+  register({
+    name: "memory",
+    description: "Show user memory (MEMORY.md), or add an entry",
+    usage: "/memory [add <text>]",
+    category: "Settings",
+    run(args, ctx) {
+      const arg = args.trim();
+      if (arg === "add" || arg.startsWith("add ")) {
+        const text = arg.slice(3).trim();
+        if (!text) {
+          ctx.addSystemMessage("Usage: /memory add <text>");
+          return;
+        }
+        appendUserMemory(text);
+        ctx.addSystemMessage(`Saved to user memory: - ${text}`);
+        return;
+      }
+      if (arg) {
+        ctx.addSystemMessage(`Unknown argument "${arg}". Usage: /memory [add <text>]`);
+        return;
+      }
+      const file = userMemoryPath();
+      let content = "";
+      try {
+        content = readFileSync(file, "utf8").trim();
+      } catch {
+        content = "";
+      }
+      if (!content) {
+        ctx.addSystemMessage(
+          `No user memory yet (${file}).\nAdd entries with /memory add <text> or ask the agent to remember something.`,
+        );
+        return;
+      }
+      ctx.addSystemMessage(`User memory (${file}):\n${content}`);
+    },
+  });
+
+  register({
     name: "undo",
     description:
       "Undo the last conversation turn: revert its file changes (write_file/edit_file) and retract its messages",
     usage: "/undo",
+    category: "Changes",
     async run(_args, ctx) {
       ctx.addSystemMessage(await ctx.undo());
     },
   });
 
-  registry.register({
+  register({
     name: "rewind",
     description:
       "List file-change checkpoints, or rewind to just before one: restore files and retract the conversation",
     usage: "/rewind [n]",
+    category: "Changes",
     async run(args, ctx) {
       ctx.addSystemMessage(await ctx.rewind(args.trim()));
     },
   });
 
-  registry.register({
+  register({
     name: "init",
     description: "Generate an AGENTS.md for the current project",
     usage: "/init [force]",
+    category: "Settings",
     async run(args, ctx) {
       ctx.addSystemMessage(await ctx.initProject(args));
     },
   });
 
-  registry.register({
+  register({
     name: "doctor",
     description: "Run environment and configuration checks",
     usage: "/doctor",
+    category: "Info",
     async run(_args, ctx) {
       ctx.addSystemMessage(await ctx.runDoctor());
     },
   });
 
-  registry.register({
+  register({
     name: "skills",
     description: "List available skills (project scope overrides user scope)",
     usage: "/skills",
+    category: "Info",
     run(_args, ctx) {
       const skills = discoverSkills(ctx.cwd ?? process.cwd());
       if (skills.length === 0) {
@@ -249,10 +350,11 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
     },
   });
 
-  registry.register({
+  register({
     name: "commit",
     description: "Analyze uncommitted changes and create a git commit (Conventional Commits)",
     usage: "/commit [instructions]",
+    category: "Changes",
     async run(args, ctx) {
       const cwd = ctx.cwd ?? process.cwd();
       if (!isGitRepo(cwd)) {
@@ -272,11 +374,12 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
     },
   });
 
-  registry.register({
+  register({
     name: "copy",
     description:
       "Copy the last assistant reply to the clipboard (`all` for the whole conversation)",
     usage: "/copy [all]",
+    category: "Sessions",
     async run(args, ctx) {
       const arg = args.trim();
       if (arg !== "" && arg !== "all") {
@@ -304,10 +407,11 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
     },
   });
 
-  registry.register({
+  register({
     name: "diff",
     description: "Show uncommitted changes (git status + colored diff)",
     usage: "/diff",
+    category: "Changes",
     run(_args, ctx) {
       const cwd = ctx.cwd ?? process.cwd();
       if (!isGitRepo(cwd)) {

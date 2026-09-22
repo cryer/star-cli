@@ -32,6 +32,14 @@ export function matchAllowRule(rule: AllowRule, req: PermissionRequest): boolean
 }
 
 export function isAllowedByRules(rules: readonly string[], req: PermissionRequest): boolean {
+  return matchesAnyRule(rules, req);
+}
+
+export function isDeniedByRules(rules: readonly string[], req: PermissionRequest): boolean {
+  return matchesAnyRule(rules, req);
+}
+
+function matchesAnyRule(rules: readonly string[], req: PermissionRequest): boolean {
   return rules.some((raw) => {
     const rule = parseAllowRule(raw);
     return rule !== null && matchAllowRule(rule, req);

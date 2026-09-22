@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerBuiltinCommands } from "../src/cli/commands/builtin";
 import {
   type CommandContext,
@@ -28,6 +31,10 @@ function makeCtx(overrides: Partial<CommandContext> = {}) {
     rewind: async (args) => (args ? `rewound to ${args}` : "checkpoint list"),
     permissionMode: async (args) => (args ? `mode set ${args}` : "mode list"),
     planMode: async () => "plan toggled",
+    pickModel: async () => "picked model",
+    pickPermissionMode: async () => "picked mode",
+    pickSession: async (all) => (all ? "picked all sessions" : "picked session"),
+    forkSession: async () => "forked session",
     initProject: async (args) => `init ${args}`,
     runDoctor: async () => "doctor report",
     ...overrides,
@@ -114,15 +121,22 @@ describe("CommandRegistry", () => {
     expect(calls).toEqual([{ type: "exit" }]);
   });
 
-  it("/permission shows the mode list without args and sets a mode with args", async () => {
+  it("/permission opens the picker without args and sets a mode with args", async () => {
     const registry = makeRegistry();
-    const { ctx, calls } = makeCtx();
+    const picks: string[] = [];
+    const { ctx, calls } = makeCtx({
+      pickPermissionMode: async () => {
+        picks.push("called");
+        return "picked mode";
+      },
+    });
 
     await registry.get("permission")?.run("", ctx);
     await registry.get("permission")?.run("yolo", ctx);
 
+    expect(picks).toEqual(["called"]);
     expect(calls).toEqual([
-      { type: "system", text: "mode list" },
+      { type: "system", text: "picked mode" },
       { type: "system", text: "mode set yolo" },
     ]);
   });
@@ -136,7 +150,7 @@ describe("CommandRegistry", () => {
     expect(calls).toEqual([{ type: "system", text: "plan toggled" }]);
   });
 
-  it("/help lists all commands", async () => {
+  it("/help groups commands under category headers", async () => {
     const registry = makeRegistry();
     const { ctx, calls } = makeCtx();
 
@@ -144,9 +158,17 @@ describe("CommandRegistry", () => {
 
     expect(calls).toHaveLength(1);
     const text = calls[0]?.text ?? "";
-    for (const cmd of registry.list()) {
-      expect(text).toContain(`/${cmd.name}`);
+    expect(text).toContain("Available commands:");
+    for (const header of ["General", "Sessions", "Changes", "Info", "Settings"]) {
+      expect(text).toContain(`\n${header}\n`);
     }
+    for (const cmd of registry.list()) {
+      expect(text).toContain(`  ${cmd.usage ?? `/${cmd.name}`} - ${cmd.description}`);
+    }
+    // Grouped, not flat: the header precedes its commands.
+    expect(text.indexOf("\nGeneral\n")).toBeLessThan(text.indexOf("  /exit"));
+    expect(text.indexOf("\nSessions\n")).toBeLessThan(text.indexOf("  /resume"));
+    expect(text.indexOf("\nSettings\n")).toBeLessThan(text.indexOf("  /model"));
   });
 
   it("/cost shows usage summary from context", async () => {
@@ -168,64 +190,144 @@ describe("CommandRegistry", () => {
     );
   });
 
-  it("/model without args lists models, with args switches", async () => {
+  it("/model without args opens the picker, with args switches", async () => {
     const registry = makeRegistry();
     const switched: string[] = [];
+    const picks: string[] = [];
     const { ctx, calls } = makeCtx({
       switchModel: async (name) => {
         switched.push(name);
         return `switched to ${name}`;
+      },
+      pickModel: async () => {
+        picks.push("called");
+        return "picked model";
       },
     });
 
     await registry.get("model")?.run("", ctx);
     await registry.get("model")?.run("gpt-4o", ctx);
 
+    expect(picks).toEqual(["called"]);
     expect(switched).toEqual(["gpt-4o"]);
     expect(calls).toEqual([
-      { type: "system", text: "models list" },
+      { type: "system", text: "picked model" },
       { type: "system", text: "switched to gpt-4o" },
     ]);
   });
 
-  it("/resume without args lists sessions, with id resumes", async () => {
+  it("/resume without args picks a session, with id resumes directly", async () => {
     const registry = makeRegistry();
     const resumed: string[] = [];
+    const picked: (boolean | undefined)[] = [];
     const { ctx, calls } = makeCtx({
       resumeSession: async (id) => {
         resumed.push(id);
         return `resumed ${id}`;
+      },
+      pickSession: async (all) => {
+        picked.push(all);
+        return "picked session";
       },
     });
 
     await registry.get("resume")?.run("", ctx);
     await registry.get("resume")?.run("abc123", ctx);
 
+    expect(picked).toEqual([false]);
     expect(resumed).toEqual(["abc123"]);
     expect(calls).toEqual([
-      { type: "system", text: "sessions list" },
+      { type: "system", text: "picked session" },
       { type: "system", text: "resumed abc123" },
     ]);
   });
 
-  it("/resume --all lists sessions across all directories", async () => {
+  it("/resume --all picks across all directories", async () => {
     const registry = makeRegistry();
-    const listed: (boolean | undefined)[] = [];
+    const picked: (boolean | undefined)[] = [];
     const { ctx, calls } = makeCtx({
-      listSessions: async (all) => {
-        listed.push(all);
-        return all ? "all sessions list" : "sessions list";
+      pickSession: async (all) => {
+        picked.push(all);
+        return all ? "picked all sessions" : "picked session";
       },
     });
 
     await registry.get("resume")?.run("--all", ctx);
     await registry.get("resume")?.run("  --all  ", ctx);
 
-    expect(listed).toEqual([true, true]);
+    expect(picked).toEqual([true, true]);
     expect(calls).toEqual([
-      { type: "system", text: "all sessions list" },
-      { type: "system", text: "all sessions list" },
+      { type: "system", text: "picked all sessions" },
+      { type: "system", text: "picked all sessions" },
     ]);
+  });
+
+  it("/fork forks the session via the context hook", async () => {
+    const registry = makeRegistry();
+    const { ctx, calls } = makeCtx();
+
+    await registry.get("fork")?.run("", ctx);
+
+    expect(calls).toEqual([{ type: "system", text: "forked session" }]);
+  });
+
+  describe("/memory", () => {
+    let home: string;
+
+    beforeEach(() => {
+      home = mkdtempSync(path.join(tmpdir(), "star-memory-cmd-"));
+      vi.stubEnv("STAR_HOME", home);
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      rmSync(home, { recursive: true, force: true });
+    });
+
+    it("shows a hint with the path when the memory file is missing", async () => {
+      const registry = makeRegistry();
+      const { ctx, calls } = makeCtx();
+
+      await registry.get("memory")?.run("", ctx);
+
+      const text = calls[0]?.text ?? "";
+      expect(text).toContain("No user memory yet");
+      expect(text).toContain(path.join(home, "MEMORY.md"));
+      expect(text).toContain("/memory add <text>");
+    });
+
+    it("shows the current memory content", async () => {
+      writeFileSync(path.join(home, "MEMORY.md"), "- prefers pnpm\n", "utf8");
+      const registry = makeRegistry();
+      const { ctx, calls } = makeCtx();
+
+      await registry.get("memory")?.run("", ctx);
+
+      const text = calls[0]?.text ?? "";
+      expect(text).toContain("User memory");
+      expect(text).toContain("- prefers pnpm");
+    });
+
+    it("/memory add appends a bullet to the memory file", async () => {
+      const registry = makeRegistry();
+      const { ctx, calls } = makeCtx();
+
+      await registry.get("memory")?.run("add uses vim keybindings", ctx);
+
+      expect(calls).toEqual([
+        { type: "system", text: "Saved to user memory: - uses vim keybindings" },
+      ]);
+      expect(readFileSync(path.join(home, "MEMORY.md"), "utf8")).toBe("- uses vim keybindings\n");
+    });
+
+    it("/memory add without text shows usage", async () => {
+      const registry = makeRegistry();
+      const { ctx, calls } = makeCtx();
+
+      await registry.get("memory")?.run("add", ctx);
+
+      expect(calls).toEqual([{ type: "system", text: "Usage: /memory add <text>" }]);
+    });
   });
 
   it("/new starts a fresh session via the context hook", async () => {

@@ -19,6 +19,13 @@ export interface CommandContext {
   rewind(args: string): Promise<string>;
   permissionMode(args: string): Promise<string>;
   planMode(): Promise<string>;
+  // Interactive pickers backed by the REPL's SelectPrompt; each returns the
+  // user-facing result text (an "unchanged" note when the picker is cancelled).
+  pickModel(): Promise<string>;
+  pickPermissionMode(): Promise<string>;
+  pickSession(all?: boolean): Promise<string>;
+  // Forks the live session into a new stored session and swaps to it.
+  forkSession(): Promise<string>;
   initProject(args: string): Promise<string>;
   runDoctor(): Promise<string>;
   submitPrompt?(text: string): void | Promise<void>;
@@ -43,6 +50,9 @@ export interface SlashCommand {
   name: string;
   description: string;
   usage?: string;
+  // /help groups commands under this heading; uncategorized commands fall
+  // into "Other".
+  category?: string;
   run(args: string, ctx: CommandContext): void | Promise<void>;
 }
 

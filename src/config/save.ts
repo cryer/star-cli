@@ -4,6 +4,14 @@ import { parse, stringify } from "smol-toml";
 import { globalConfigPath } from "./paths";
 
 export async function addAllowRule(rule: string): Promise<boolean> {
+  return addPermissionRule("allow", rule);
+}
+
+export async function addDenyRule(rule: string): Promise<boolean> {
+  return addPermissionRule("deny", rule);
+}
+
+async function addPermissionRule(kind: "allow" | "deny", rule: string): Promise<boolean> {
   const filePath = globalConfigPath();
   let raw: Record<string, unknown> = {};
   try {
@@ -16,9 +24,9 @@ export async function addAllowRule(rule: string): Promise<boolean> {
     typeof raw.permissions === "object" && raw.permissions !== null
       ? (raw.permissions as Record<string, unknown>)
       : {};
-  const allow = Array.isArray(permissions.allow) ? (permissions.allow as string[]) : [];
-  if (allow.includes(rule)) return false;
-  permissions.allow = [...allow, rule];
+  const rules = Array.isArray(permissions[kind]) ? (permissions[kind] as string[]) : [];
+  if (rules.includes(rule)) return false;
+  permissions[kind] = [...rules, rule];
   raw.permissions = permissions;
   await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
   await fs.promises.writeFile(filePath, stringify(raw), "utf8");

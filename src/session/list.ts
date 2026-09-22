@@ -49,7 +49,7 @@ export async function resolveSessionId(query: string): Promise<string | null> {
   return matches.length === 1 ? (matches[0]?.id ?? null) : null;
 }
 
-function relativeTime(timestamp: number): string {
+export function relativeTime(timestamp: number): string {
   const diff = Date.now() - timestamp;
   const minutes = Math.floor(diff / 60_000);
   if (minutes < 1) return "刚刚";

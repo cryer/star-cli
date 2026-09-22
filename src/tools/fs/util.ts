@@ -1,3 +1,4 @@
+import { readFileSync, statSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
@@ -9,9 +10,16 @@ export interface WalkedFile {
   mtimeMs: number;
 }
 
+export type IgnorePredicate = (absPath: string, isDir: boolean) => boolean;
+
+export interface WalkOptions {
+  ignore?: IgnorePredicate;
+}
+
 export async function walkFiles(
   root: string,
   skipDirs: Set<string> = SKIP_DIRS,
+  options: WalkOptions = {},
 ): Promise<WalkedFile[]> {
   const out: WalkedFile[] = [];
   async function walk(dir: string, relBase: string): Promise<void> {
@@ -23,10 +31,14 @@ export async function walkFiles(
       const abs = path.join(dir, entry.name);
       const rel = relBase ? `${relBase}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
-        if (!skipDirs.has(entry.name)) {
-          await walk(abs, rel);
+        if (skipDirs.has(entry.name) || options.ignore?.(abs, true)) {
+          continue;
         }
+        await walk(abs, rel);
       } else if (entry.isFile()) {
+        if (options.ignore?.(abs, false)) {
+          continue;
+        }
         try {
           const st = await stat(abs);
           out.push({ abs, rel, mtimeMs: st.mtimeMs });
@@ -78,6 +90,84 @@ export function matchesGlob(pattern: string, relPath: string): boolean {
     return globToRegExp(normalized).test(base);
   }
   return globToRegExp(normalized).test(relPath);
+}
+
+export const IGNORE_FILE = ".starignore";
+
+export interface IgnorePattern {
+  pattern: string;
+  dirOnly: boolean;
+}
+
+const ignoreCache = new Map<string, { mtimeMs: number; patterns: IgnorePattern[] }>();
+
+function parseIgnorePatterns(body: string): IgnorePattern[] {
+  const out: IgnorePattern[] = [];
+  for (const raw of body.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+    if (line.endsWith("/")) {
+      const pattern = line.slice(0, -1);
+      if (pattern) {
+        out.push({ pattern, dirOnly: true });
+      }
+    } else {
+      out.push({ pattern: line, dirOnly: false });
+    }
+  }
+  return out;
+}
+
+// Reads <dir>/.starignore. Cached by file path and re-read only when the
+// mtime changes, mirroring readProjectMemory in agent/project-memory.ts.
+export function loadIgnorePatterns(dir: string): IgnorePattern[] {
+  const file = path.join(dir, IGNORE_FILE);
+  let mtimeMs: number;
+  try {
+    mtimeMs = statSync(file).mtimeMs;
+  } catch {
+    return [];
+  }
+  const hit = ignoreCache.get(file);
+  if (hit && hit.mtimeMs === mtimeMs) {
+    return hit.patterns;
+  }
+  let patterns: IgnorePattern[] = [];
+  try {
+    patterns = parseIgnorePatterns(readFileSync(file, "utf8"));
+  } catch {
+    patterns = [];
+  }
+  ignoreCache.set(file, { mtimeMs, patterns });
+  return patterns;
+}
+
+// Builds an ignore predicate from <cwd>/.starignore, or undefined when there
+// are no patterns so callers keep a zero-overhead path. Paths are matched
+// relative to cwd with forward slashes; "!" negation is not supported.
+export function createIgnorePredicate(cwd: string): IgnorePredicate | undefined {
+  const patterns = loadIgnorePatterns(cwd);
+  if (patterns.length === 0) {
+    return undefined;
+  }
+  const root = path.resolve(cwd);
+  return (absPath, isDir) => {
+    const rel = path.relative(root, absPath).split(path.sep).join("/");
+    if (!rel || rel.startsWith("..")) {
+      return false;
+    }
+    for (const { pattern, dirOnly } of patterns) {
+      if (dirOnly && !isDir) {
+        continue;
+      }
+      if (matchesGlob(pattern, rel)) {
+        return true;
+      }
+    }
+    return false;
+  };
 }
 
 export function isSensitivePath(filePath: string): boolean {

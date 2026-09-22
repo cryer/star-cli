@@ -1,6 +1,6 @@
 import { readdir } from "node:fs/promises";
 import path from "node:path";
-import { SKIP_DIRS } from "../tools/fs/util";
+import { SKIP_DIRS, createIgnorePredicate } from "../tools/fs/util";
 import { MAX_SUGGESTIONS } from "./commands/suggest";
 
 // Lazy scan: only the single directory the typed prefix points into is read,
@@ -46,6 +46,7 @@ export async function suggestPaths(
   const dirAbs = path.resolve(cwd, dirPart === "" ? "." : dirPart);
   const entries = await readdir(dirAbs, { withFileTypes: true }).catch(() => null);
   if (!entries) return [];
+  const ignore = createIgnorePredicate(cwd);
   const lower = basePrefix.toLowerCase();
   const matches: PathSuggestion[] = [];
   let scanned = 0;
@@ -57,6 +58,7 @@ export async function suggestPaths(
     if (isDir && SKIP_DIRS.has(entry.name)) continue;
     if (entry.name.startsWith(".") && !basePrefix.startsWith(".")) continue;
     if (!entry.name.toLowerCase().startsWith(lower)) continue;
+    if (ignore?.(path.join(dirAbs, entry.name), isDir)) continue;
     matches.push({ path: `${dirPart}${entry.name}${isDir ? "/" : ""}`, isDir });
   }
   matches.sort((a, b) => a.path.localeCompare(b.path));

@@ -70,6 +70,7 @@ export function registerCustomCommands(
       name: command.name,
       description: command.description,
       usage: `/${command.name} [args]`,
+      category: "Custom",
       run(args, ctx) {
         const prompt = command.template.split("$ARGUMENTS").join(args);
         if (ctx.submitPrompt) {

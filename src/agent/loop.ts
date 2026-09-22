@@ -21,6 +21,7 @@ import type { ToolResult } from "../tools/types";
 import { readProjectMemory } from "./project-memory";
 import { createSkillTool, discoverSkills, formatSkillsBlock } from "./skills";
 import { MAX_SUBAGENT_DEPTH, createSubagentTool } from "./subagent";
+import { createRememberTool, readUserMemory } from "./user-memory";
 
 export interface AgentLoopOptions {
   model: LanguageModel;
@@ -74,6 +75,9 @@ export class AgentLoop {
     // mode. Skills are discovered lazily at execute time, so ones added
     // mid-session work without re-registering.
     opts.registry?.register(createSkillTool({ cwd: opts.cwd }));
+    // Write-level like the fs write tools, so the permission gate still
+    // applies in ask mode; available at every subagent depth.
+    opts.registry?.register(createRememberTool());
     const depth = opts.subagentDepth ?? 0;
     if (opts.registry && depth < MAX_SUBAGENT_DEPTH) {
       opts.registry.register(
@@ -360,8 +364,9 @@ export class AgentLoop {
   // /model switch) replaced the history with one that has none. Git context
   // (branch, dirty count, recent commits) is refreshed here too, so the model
   // always sees the current repo state; any git failure is silently skipped.
-  // Project memory (AGENTS.md in the cwd) is appended as a delimited block;
-  // readProjectMemory caches by mtime, so this stays cheap per turn. The
+  // Project memory (AGENTS.md in the cwd) and user memory (~/.star-cli/
+  // MEMORY.md) are appended as delimited blocks; both cache by mtime, so this
+  // stays cheap per turn. The
   // skills listing is refreshed here as well, so skills added mid-session
   // show up in the next turn's system prompt.
   private syncSystemMessage(): void {
@@ -372,6 +377,8 @@ export class AgentLoop {
     if (plan) parts.push(PLAN_MODE_PROMPT.trim());
     const memory = readProjectMemory(this.opts.cwd);
     if (memory) parts.push(memory);
+    const userMemory = readUserMemory();
+    if (userMemory) parts.push(userMemory);
     const skills = discoverSkills(this.opts.cwd);
     if (skills.length > 0) parts.push(formatSkillsBlock(skills));
     const git = getGitSummary(this.opts.cwd);
@@ -469,6 +476,7 @@ export class AgentLoop {
       { toolName: call.name, args: call.args, level: tool.permission },
       { cwd },
       config.permissions.allow,
+      config.permissions.deny,
     );
 
     if (decision === "deny") {
