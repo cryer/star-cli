@@ -90,7 +90,7 @@ async function checkTaskComplete(
         `<task>\n${request.slice(0, 2000)}\n</task>`,
         "The agent has stopped calling tools and ended with this reply:",
         `<reply>\n${finalReply.slice(0, 2000)}\n</reply>`,
-        "Has the agent fully completed the task — every requested action actually performed — or is it only describing, planning, or reporting progress with work still left? Answer with exactly one word: DONE or NOT_DONE.",
+        "Has the agent fully completed the task — every requested action actually performed, and the result verified by running a check (tests, build, or inspecting the produced output) rather than assumed? Or is it only describing, planning, or reporting progress with work still left? Answer with exactly one word: DONE or NOT_DONE.",
       ].join("\n"),
     });
     const verdict = text.trim().toUpperCase();
