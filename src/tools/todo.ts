@@ -84,13 +84,25 @@ export function formatTodos(items: TodoItem[]): string {
 
 const defaultStore = new TodoStore();
 
+// Full parsed list from a todo_write args payload, or null when malformed.
+// The REPL uses this to mirror the todo list next to the input box.
+export function parseTodoArgs(args: unknown): TodoItem[] | null {
+  const parsed = writeSchema.safeParse(args);
+  return parsed.success ? parsed.data.todos : null;
+}
+
 // Titles of unfinished items from a todo_write args payload; [] when the
 // payload is malformed. Used by the agent loop to spot turns that end while
 // the model's own todo list still has open work.
 export function pendingTodoTitles(args: unknown): string[] {
-  const parsed = writeSchema.safeParse(args);
-  if (!parsed.success) return [];
-  return parsed.data.todos.filter((t) => t.status !== "done").map((t) => t.title);
+  return (parseTodoArgs(args) ?? []).filter((t) => t.status !== "done").map((t) => t.title);
+}
+
+// Load the persisted todo list for a cwd into the default store and return
+// it — used by the REPL to show todos that predate the current session.
+export async function loadTodos(cwd: string): Promise<TodoItem[]> {
+  await defaultStore.load(cwd);
+  return defaultStore.list();
 }
 
 export function createTodoTools(store: TodoStore = defaultStore): Tool[] {

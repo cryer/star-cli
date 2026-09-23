@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TodoStore, createDefaultRegistry, createTodoTools } from "../src/tools";
 import type { TodoItem } from "../src/tools";
+import { parseTodoArgs, pendingTodoTitles } from "../src/tools/todo";
 import type { Tool, ToolContext, ToolResult } from "../src/tools/types";
 
 let dir: string;
@@ -97,5 +98,18 @@ describe("registry", () => {
     const registry = createDefaultRegistry();
     expect(registry.names()).toContain("todo_write");
     expect(registry.names()).toContain("todo_read");
+  });
+});
+
+describe("parseTodoArgs / pendingTodoTitles", () => {
+  it("parses a valid todo_write payload", () => {
+    expect(parseTodoArgs({ todos: sample })).toEqual(sample);
+    expect(pendingTodoTitles({ todos: sample })).toEqual(["write docs", "fix bug"]);
+  });
+
+  it("rejects malformed payloads", () => {
+    expect(parseTodoArgs({ todos: [{ id: "x" }] })).toBeNull();
+    expect(parseTodoArgs(null)).toBeNull();
+    expect(pendingTodoTitles(undefined)).toEqual([]);
   });
 });

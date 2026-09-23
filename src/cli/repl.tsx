@@ -32,7 +32,7 @@ import {
   rewindToSnapshot,
   undoTurnSnapshots,
 } from "../tools/fs/snapshots";
-import { formatTodos } from "../tools/todo";
+import { type TodoItem, formatTodos, loadTodos, parseTodoArgs } from "../tools/todo";
 import { VERSION } from "../version";
 import type { ChatBackend } from "./backend";
 import { budgetState } from "./budget";
@@ -58,6 +58,7 @@ import {
   ThinkingIndicator,
   truncateTail,
 } from "./components/ThinkingIndicator";
+import { TodoPanel } from "./components/TodoPanel";
 import { type ToolCardData, formatToolCard } from "./components/ToolCallCard";
 import { computeCostUsd, estimateCost, formatDollars } from "./cost";
 import { type DiffPreview, generateDiffPreview } from "./diff-preview";
@@ -176,6 +177,7 @@ export function Repl({
   const [spinnerTick, setSpinnerTick] = useState(0);
   const [activity, setActivity] = useState<string | null>(null);
   const [bgLabels, setBgLabels] = useState<string[]>(() => runningTaskLabels());
+  const [todos, setTodos] = useState<TodoItem[]>([]);
   const [permissionModeState, setPermissionModeState] = useState(permissionMode);
   const [planApproval, setPlanApprovalState] = useState(false);
   const [pendingRewind, setPendingRewindState] = useState<PendingRewind | null>(null);
@@ -412,6 +414,14 @@ export function Repl({
       if (message) pushMessage("system", message);
     });
   }, [pushMessage]);
+
+  // Seed the todo panel from the on-disk list (previous sessions); live
+  // updates arrive via todo_write tool-call events during a turn.
+  useEffect(() => {
+    loadTodos(cwd)
+      .then(setTodos)
+      .catch(() => {});
+  }, [cwd]);
 
   useEffect(() => {
     const onUpdate = (task: TaskSnapshot) => {
@@ -698,6 +708,10 @@ export function Repl({
               name: event.name,
               argsSummary: summarizeArgs(event.args),
             });
+            if (event.name === "todo_write") {
+              const list = parseTodoArgs(event.args);
+              if (list) setTodos(list);
+            }
             setActivity(`running ${event.name}: ${summarizeArgs(event.args, 60)}`);
           } else if (event.type === "tool-result") {
             const card = toolCardsRef.current.get(event.id) ?? {
@@ -1393,6 +1407,7 @@ export function Repl({
           [image attached: {staged.image.path}]
         </Text>
       ))}
+      <TodoPanel todos={todos} />
       <InputBox
         isStreaming={isStreaming}
         disabled={pending !== null || planApproval || pendingRewind !== null || picker !== null}
