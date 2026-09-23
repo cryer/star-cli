@@ -51,13 +51,15 @@ interface PendingToolCall {
 }
 
 // Matches announcements of pending work ("我会保留…", "接下来我将…",
-// "I will now convert…") in a text-only reply — the signature of a model
-// that ended its turn without doing what it just said it would do.
+// "开始执行转换…", "I will now convert…") in a text-only reply — the signature
+// of a model that ended its turn without doing what it just said it would do.
+// Keyword matching can never catch every phrasing, so this is only the first
+// line of defense: a text-only reply to a nudge is re-nudged unconditionally.
 const PENDING_WORK_PATTERN =
-  /(?:我将|我会|我现在|接下来|下一步|下面(?:我|将)|稍后|随后|准备开始|现在开始|让我(?:们)?(?:来)?|I will|I'll|I am going to|I'm going to|I shall|let me|next,? I|I will now)/i;
+  /(?:我将|我会|我现在|接下来|下一步|下面(?:我|将)|稍后|随后|准备开始|现在开始|马上|即将|这就|待会|开始(?:执行|进行|处理|转换|动手|生成|写入|运行|创建)|(?:完成后|然后|接着)会|让我(?:们)?(?:来)?|I will|I'll|I am going to|I'm going to|I shall|let me|next,? I|I will now)/i;
 
 const AUTO_CONTINUE_NUDGE =
-  "[auto-continue] You ended your turn while announcing pending work. Continue the task now with tool calls; only if the task is already fully complete, say so briefly.";
+  "[auto-continue] You ended your turn with words instead of actions. Do not describe or restate the plan — continue the task NOW by calling tools. Reply with text only if the task is already fully complete.";
 
 const STREAM_RETRY_BASE_DELAY_MS = 1000;
 
@@ -286,6 +288,7 @@ export class AgentLoop {
     const { config, registry, cwd } = this.opts;
     const aiTools = this.buildAiTools();
     let autoContinues = 0;
+    let lastWasNudge = false;
 
     for (let step = 0; step < config.maxSteps; step++) {
       const maxTokens = this.opts.contextMaxTokens ?? config.contextMaxTokens;
@@ -387,16 +390,23 @@ export class AgentLoop {
         // Weaker models sometimes end the turn with a text-only reply that
         // merely announces work ("我会…", "I will…") instead of calling tools.
         // Nudge them to actually continue, a bounded number of times; never
-        // in plan mode, where a text-only plan is the intended end state.
+        // in plan mode, where a text-only plan is the intended end state. A
+        // text-only reply to a nudge means the nudge was ignored — re-nudge
+        // regardless of phrasing, since keyword matching cannot catch every
+        // way of saying "I am about to do it".
+        const nudgeIgnored = lastWasNudge;
         if (
           config.permissionMode !== "plan" &&
           autoContinues < config.maxAutoContinues &&
-          PENDING_WORK_PATTERN.test(text)
+          (nudgeIgnored || PENDING_WORK_PATTERN.test(text))
         ) {
           autoContinues++;
+          lastWasNudge = true;
           yield {
             type: "notice",
-            message: `Reply announced unfinished work; asking the model to continue (${autoContinues}/${config.maxAutoContinues}).`,
+            message: nudgeIgnored
+              ? `Reply still had no tool calls; asking the model to continue (${autoContinues}/${config.maxAutoContinues}).`
+              : `Reply announced unfinished work; asking the model to continue (${autoContinues}/${config.maxAutoContinues}).`,
           };
           const nudge: CoreMessage = { role: "user", content: AUTO_CONTINUE_NUDGE };
           this.messages.push(nudge);
@@ -406,6 +416,7 @@ export class AgentLoop {
         await this.runEventHooks("Stop");
         return;
       }
+      lastWasNudge = false;
 
       const answered = new Set<string>();
       try {

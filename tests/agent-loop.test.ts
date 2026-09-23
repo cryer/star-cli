@@ -732,4 +732,56 @@ describe("AgentLoop", () => {
     expect(events.some((e) => e.type === "notice")).toBe(false);
     expect(loop.getMessages().filter((m) => m.role === "user")).toHaveLength(1);
   });
+
+  it("nudges on announcement phrasings beyond 我会/我将", async () => {
+    const loop = makeLoop(
+      mockModel([
+        textRound("开始执行转换并写入 dataset 目录，完成后会核对数量。"),
+        toolCallRound("call-1", "todo_read", {}),
+        textRound("全部完成。"),
+      ]),
+    );
+
+    const events = await collect(loop.stream("convert", new AbortController().signal));
+
+    expect(events.filter((e) => e.type === "notice")).toHaveLength(1);
+  });
+
+  it("re-nudges when a nudge is answered with more words instead of tool calls", async () => {
+    const loop = makeLoop(
+      mockModel([
+        textRound("我现在执行转换。"),
+        textRound("正在处理数据。"),
+        toolCallRound("call-1", "todo_read", {}),
+        textRound("全部完成。"),
+      ]),
+    );
+
+    const events = await collect(loop.stream("convert the dataset", new AbortController().signal));
+
+    expect(events.filter((e) => e.type === "notice")).toHaveLength(2);
+    expect(events.filter((e) => e.type === "tool-call")).toHaveLength(1);
+    const lastAssistant = [...loop.getMessages()].reverse().find((m) => m.role === "assistant");
+    expect(lastAssistant?.content).toEqual([{ type: "text", text: "全部完成。" }]);
+  });
+
+  it("stops when an ignored nudge hits the cap", async () => {
+    const loop = makeLoop(mockModel([textRound("我现在执行转换。"), textRound("正在处理数据。")]), {
+      maxAutoContinues: 1,
+    });
+
+    const events = await collect(loop.stream("convert", new AbortController().signal));
+
+    expect(events.filter((e) => e.type === "notice")).toHaveLength(1);
+    expect(
+      loop
+        .getMessages()
+        .filter(
+          (m) =>
+            m.role === "user" &&
+            typeof m.content === "string" &&
+            m.content.includes("auto-continue"),
+        ),
+    ).toHaveLength(1);
+  });
 });
