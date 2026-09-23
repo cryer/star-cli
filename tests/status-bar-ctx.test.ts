@@ -24,6 +24,7 @@ function makeConfig(): StarConfig {
     streamIdleTimeoutSec: 20,
     streamFirstChunkTimeoutSec: 300,
     streamMaxRetries: 3,
+    maxAutoContinues: 2,
     notifyBell: false,
     notifyBellThresholdSec: 10,
     permissions: { allow: [], deny: [] },

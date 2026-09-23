@@ -736,6 +736,8 @@ export function Repl({
               "system",
               `Request failed, retrying (${event.attempt}/${event.maxAttempts}): ${event.reason}`,
             );
+          } else if (event.type === "notice") {
+            pushMessage("system", event.message);
           } else if (event.type === "error") {
             pushMessage("system", `Error: ${formatStreamError(event.error)}`);
           }
@@ -1206,6 +1208,7 @@ export function Repl({
           `streamIdleTimeoutSec: ${config.streamIdleTimeoutSec}`,
           `streamFirstChunkTimeoutSec: ${config.streamFirstChunkTimeoutSec}`,
           `streamMaxRetries: ${config.streamMaxRetries}`,
+          `maxAutoContinues: ${config.maxAutoContinues}`,
           `permissions.allow (${config.permissions.allow.length}): ${config.permissions.allow.join(", ") || "(none)"}`,
           `hooks (${config.hooks.length}): ${config.hooks.map((h) => h.event).join(", ") || "(none)"}`,
         ].join("\n"),

@@ -81,6 +81,7 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     streamIdleTimeoutSec: 20,
     streamFirstChunkTimeoutSec: 300,
     streamMaxRetries: 3,
+    maxAutoContinues: 2,
     notifyBell: true,
     notifyBellThresholdSec: 10,
     permissions: { allow: [], deny: [] },
@@ -663,5 +664,72 @@ describe("AgentLoop", () => {
     if (last?.type === "error") {
       expect(last.error.message).toContain("empty response");
     }
+  });
+
+  it("nudges the model to continue when it stops after announcing pending work", async () => {
+    const loop = makeLoop(
+      mockModel([
+        toolCallRound("call-1", "todo_read", {}),
+        textRound("检查完成，我会立即生成转换脚本并执行。"),
+        toolCallRound("call-2", "todo_read", {}),
+        textRound("全部完成。"),
+      ]),
+    );
+
+    const events = await collect(loop.stream("convert the dataset", new AbortController().signal));
+
+    expect(events.some((e) => e.type === "notice")).toBe(true);
+    expect(events.filter((e) => e.type === "tool-call")).toHaveLength(2);
+    const nudge = loop
+      .getMessages()
+      .find(
+        (m) =>
+          m.role === "user" && typeof m.content === "string" && m.content.includes("auto-continue"),
+      );
+    expect(nudge).toBeDefined();
+    const lastAssistant = [...loop.getMessages()].reverse().find((m) => m.role === "assistant");
+    expect(lastAssistant?.content).toEqual([{ type: "text", text: "全部完成。" }]);
+  });
+
+  it("does not nudge when the final reply announces nothing pending", async () => {
+    const loop = makeLoop(
+      mockModel([toolCallRound("call-1", "todo_read", {}), textRound("配置里的模型是 gpt6。")]),
+    );
+
+    const events = await collect(loop.stream("what model?", new AbortController().signal));
+
+    expect(events.some((e) => e.type === "notice")).toBe(false);
+    expect(loop.getMessages().filter((m) => m.role === "user")).toHaveLength(1);
+  });
+
+  it("caps auto-continue nudges at maxAutoContinues", async () => {
+    const loop = makeLoop(mockModel([textRound("我接下来会做这件事。")]), {
+      maxAutoContinues: 2,
+    });
+
+    const events = await collect(loop.stream("do it", new AbortController().signal));
+
+    expect(events.filter((e) => e.type === "notice")).toHaveLength(2);
+    expect(
+      loop
+        .getMessages()
+        .filter(
+          (m) =>
+            m.role === "user" &&
+            typeof m.content === "string" &&
+            m.content.includes("auto-continue"),
+        ),
+    ).toHaveLength(2);
+  });
+
+  it("never nudges in plan mode", async () => {
+    const loop = makeLoop(mockModel([textRound("我会先读取代码，然后给出计划。")]), {
+      permissionMode: "plan",
+    });
+
+    const events = await collect(loop.stream("plan this", new AbortController().signal));
+
+    expect(events.some((e) => e.type === "notice")).toBe(false);
+    expect(loop.getMessages().filter((m) => m.role === "user")).toHaveLength(1);
   });
 });

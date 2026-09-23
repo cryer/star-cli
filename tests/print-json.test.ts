@@ -79,6 +79,7 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     streamIdleTimeoutSec: 20,
     streamFirstChunkTimeoutSec: 300,
     streamMaxRetries: 3,
+    maxAutoContinues: 2,
     notifyBell: true,
     notifyBellThresholdSec: 10,
     permissions: { allow: [], deny: [] },

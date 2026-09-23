@@ -50,6 +50,15 @@ interface PendingToolCall {
   args: unknown;
 }
 
+// Matches announcements of pending work ("我会保留…", "接下来我将…",
+// "I will now convert…") in a text-only reply — the signature of a model
+// that ended its turn without doing what it just said it would do.
+const PENDING_WORK_PATTERN =
+  /(?:我将|我会|我现在|接下来|下一步|下面(?:我|将)|稍后|随后|准备开始|现在开始|让我(?:们)?(?:来)?|I will|I'll|I am going to|I'm going to|I shall|let me|next,? I|I will now)/i;
+
+const AUTO_CONTINUE_NUDGE =
+  "[auto-continue] You ended your turn while announcing pending work. Continue the task now with tool calls; only if the task is already fully complete, say so briefly.";
+
 const STREAM_RETRY_BASE_DELAY_MS = 1000;
 
 // Client/validation failures will fail again identically, so only transient
@@ -276,6 +285,7 @@ export class AgentLoop {
 
     const { config, registry, cwd } = this.opts;
     const aiTools = this.buildAiTools();
+    let autoContinues = 0;
 
     for (let step = 0; step < config.maxSteps; step++) {
       const maxTokens = this.opts.contextMaxTokens ?? config.contextMaxTokens;
@@ -374,6 +384,25 @@ export class AgentLoop {
       this.maybeScheduleTitle(text);
 
       if (toolCalls.length === 0) {
+        // Weaker models sometimes end the turn with a text-only reply that
+        // merely announces work ("我会…", "I will…") instead of calling tools.
+        // Nudge them to actually continue, a bounded number of times; never
+        // in plan mode, where a text-only plan is the intended end state.
+        if (
+          config.permissionMode !== "plan" &&
+          autoContinues < config.maxAutoContinues &&
+          PENDING_WORK_PATTERN.test(text)
+        ) {
+          autoContinues++;
+          yield {
+            type: "notice",
+            message: `Reply announced unfinished work; asking the model to continue (${autoContinues}/${config.maxAutoContinues}).`,
+          };
+          const nudge: CoreMessage = { role: "user", content: AUTO_CONTINUE_NUDGE };
+          this.messages.push(nudge);
+          await this.persist(nudge);
+          continue;
+        }
         await this.runEventHooks("Stop");
         return;
       }

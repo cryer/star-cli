@@ -13,4 +13,7 @@ export type StreamEvent =
   // A model request failed (or came back empty) and is about to be retried;
   // `attempt`/`maxAttempts` are 1-based counts of the upcoming attempt.
   | { type: "retry"; attempt: number; maxAttempts: number; reason: string }
+  // Informational note worth surfacing in the UI (e.g. an auto-continue
+  // nudge was injected because the model stopped with work announced).
+  | { type: "notice"; message: string }
   | { type: "error"; error: Error };
