@@ -22,6 +22,8 @@ function makeConfig(): StarConfig {
     contextMaxTokens: 100_000,
     contextCompaction: "summary",
     streamIdleTimeoutSec: 20,
+    streamFirstChunkTimeoutSec: 300,
+    streamMaxRetries: 3,
     notifyBell: false,
     notifyBellThresholdSec: 10,
     permissions: { allow: [], deny: [] },

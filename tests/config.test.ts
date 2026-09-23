@@ -56,6 +56,8 @@ describe("loadConfig", () => {
       maxSteps: 50,
       contextMaxTokens: 100_000,
       streamIdleTimeoutSec: 20,
+      streamFirstChunkTimeoutSec: 300,
+      streamMaxRetries: 3,
       contextCompaction: "summary",
       notifyBell: true,
       notifyBellThresholdSec: 10,

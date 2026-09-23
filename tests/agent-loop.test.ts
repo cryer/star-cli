@@ -13,6 +13,7 @@ import { createDefaultRegistry } from "../src/tools";
 type Chunk =
   | { type: "text-delta"; textDelta: string }
   | { type: "reasoning"; textDelta: string }
+  | { type: "error"; error: unknown }
   | {
       type: "tool-call";
       toolCallType: "function";
@@ -78,6 +79,8 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     contextMaxTokens: 100_000,
     contextCompaction: "summary",
     streamIdleTimeoutSec: 20,
+    streamFirstChunkTimeoutSec: 300,
+    streamMaxRetries: 3,
     notifyBell: true,
     notifyBellThresholdSec: 10,
     permissions: { allow: [], deny: [] },
@@ -119,6 +122,8 @@ describe("AgentLoop", () => {
       registry: createDefaultRegistry(),
       config: makeConfig(configOverrides),
       cwd,
+      // Near-zero retry backoff keeps failure-retry tests fast.
+      retryDelayMs: 1,
     });
   }
 
@@ -552,5 +557,111 @@ describe("AgentLoop", () => {
       expect(error.error.message).toContain("Model tried to call unavailable tool 'nope_tool'");
     }
     expect(events.some((e) => e.type === "tool-result")).toBe(false);
+  });
+
+  it("retries a transient stream error and completes the turn", async () => {
+    let calls = 0;
+    const model = new MockLanguageModelV1({
+      doStream: async () => {
+        calls++;
+        const chunks: Chunk[] =
+          calls === 1 ? [{ type: "error", error: new Error("socket hang up") }] : textRound("ok");
+        return {
+          stream: convertArrayToReadableStream(chunks),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const loop = makeLoop(model);
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    expect(calls).toBe(2);
+    const retry = events.find((e) => e.type === "retry");
+    expect(retry).toBeDefined();
+    if (retry?.type === "retry") {
+      expect(retry.attempt).toBe(2);
+      expect(retry.maxAttempts).toBe(4);
+      expect(retry.reason).toContain("socket hang up");
+    }
+    expect(events.some((e) => e.type === "error")).toBe(false);
+    const assistant = loop.getMessages().find((m) => m.role === "assistant");
+    expect(assistant?.content).toEqual([{ type: "text", text: "ok" }]);
+  });
+
+  it("retries an empty response instead of silently ending the turn", async () => {
+    const loop = makeLoop(mockModel([[], textRound("recovered")]));
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    const retry = events.find((e) => e.type === "retry");
+    expect(retry).toBeDefined();
+    if (retry?.type === "retry") {
+      expect(retry.reason).toContain("empty response");
+    }
+    const assistant = loop.getMessages().find((m) => m.role === "assistant");
+    expect(assistant?.content).toEqual([{ type: "text", text: "recovered" }]);
+  });
+
+  it("gives up with a visible error after retries are exhausted", async () => {
+    let calls = 0;
+    const model = new MockLanguageModelV1({
+      doStream: async () => {
+        calls++;
+        return {
+          stream: convertArrayToReadableStream([
+            { type: "error", error: new Error("relay down") } satisfies Chunk,
+          ]),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const loop = makeLoop(model, { streamMaxRetries: 2 });
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    expect(calls).toBe(3);
+    expect(events.filter((e) => e.type === "retry")).toHaveLength(2);
+    const last = events[events.length - 1];
+    expect(last?.type).toBe("error");
+    if (last?.type === "error") {
+      expect(last.error.message).toContain("relay down");
+    }
+  });
+
+  it("does not retry non-retryable client errors", async () => {
+    let calls = 0;
+    const model = new MockLanguageModelV1({
+      doStream: async () => {
+        calls++;
+        const error = new Error("Incorrect API key");
+        error.name = "AI_APICallError";
+        (error as unknown as { statusCode: number }).statusCode = 401;
+        return {
+          stream: convertArrayToReadableStream([{ type: "error", error } satisfies Chunk]),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const loop = makeLoop(model);
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    expect(calls).toBe(1);
+    expect(events.some((e) => e.type === "retry")).toBe(false);
+    expect(events[events.length - 1]?.type).toBe("error");
+  });
+
+  it("ends an endlessly empty stream with an error after retries", async () => {
+    const loop = makeLoop(mockModel([[]]), { streamMaxRetries: 1 });
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    expect(events.filter((e) => e.type === "retry")).toHaveLength(1);
+    const last = events[events.length - 1];
+    expect(last?.type).toBe("error");
+    if (last?.type === "error") {
+      expect(last.error.message).toContain("empty response");
+    }
   });
 });

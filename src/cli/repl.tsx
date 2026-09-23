@@ -731,6 +731,11 @@ export function Repl({
               setUsageVersion((v) => v + 1);
               sessionStoreRef.current?.addUsage(event.usage).catch(() => {});
             }
+          } else if (event.type === "retry") {
+            pushMessage(
+              "system",
+              `Request failed, retrying (${event.attempt}/${event.maxAttempts}): ${event.reason}`,
+            );
           } else if (event.type === "error") {
             pushMessage("system", `Error: ${formatStreamError(event.error)}`);
           }
@@ -1199,6 +1204,8 @@ export function Repl({
           `maxSteps: ${config.maxSteps}`,
           `contextMaxTokens: ${config.contextMaxTokens}`,
           `streamIdleTimeoutSec: ${config.streamIdleTimeoutSec}`,
+          `streamFirstChunkTimeoutSec: ${config.streamFirstChunkTimeoutSec}`,
+          `streamMaxRetries: ${config.streamMaxRetries}`,
           `permissions.allow (${config.permissions.allow.length}): ${config.permissions.allow.join(", ") || "(none)"}`,
           `hooks (${config.hooks.length}): ${config.hooks.map((h) => h.event).join(", ") || "(none)"}`,
         ].join("\n"),

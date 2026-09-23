@@ -61,6 +61,15 @@ export const ConfigSchema = z.object({
   // gracefully (some relays never send the terminal chunks). Applies once
   // streaming has started; the first part gets a longer, fixed allowance.
   streamIdleTimeoutSec: z.number().positive().default(20),
+  // Seconds to wait for the very first stream part before giving up; slow
+  // thinking-model relays can buffer for minutes before sending anything.
+  streamFirstChunkTimeoutSec: z.number().positive().default(300),
+  // Extra attempts per model request when a stream fails transiently
+  // (network error, 429/5xx, idle watchdog cutoff) or comes back empty, so a
+  // relay hiccup does not silently end a half-finished turn. 0 disables.
+  // Retries after a timeout/empty failure scale both stream timeouts up
+  // (attempt number ×, capped at 3x) since the relay is likely overloaded.
+  streamMaxRetries: z.number().int().min(0).default(3),
   contextCompaction: z.enum(["summary", "truncate"]).default("summary"),
   // Optional per-session dollar budget; when set, the REPL stops the session
   // once the estimated cost for the session reaches this amount.

@@ -37,6 +37,8 @@ export interface AgentLoopOptions {
   // MAX_SUBAGENT_DEPTH the subagent tool is not registered, so subagents
   // cannot spawn further subagents.
   subagentDepth?: number;
+  // Base delay between stream retries (doubled per attempt); tests shrink it.
+  retryDelayMs?: number;
 }
 
 export const PLAN_MODE_PROMPT =
@@ -46,6 +48,44 @@ interface PendingToolCall {
   id: string;
   name: string;
   args: unknown;
+}
+
+const STREAM_RETRY_BASE_DELAY_MS = 1000;
+
+// Client/validation failures will fail again identically, so only transient
+// conditions merit another attempt: rate limits, server errors, and
+// network/parse failures without a status.
+const NON_RETRYABLE_ERROR_NAMES = new Set([
+  "AI_NoSuchToolError",
+  "AI_InvalidToolArgumentsError",
+  "AI_InvalidPromptError",
+  "AI_NoSuchModelError",
+  "AI_LoadAPIKeyError",
+]);
+
+function isRetryableStreamError(error: Error): boolean {
+  if (NON_RETRYABLE_ERROR_NAMES.has(error.name)) return false;
+  const status = (error as { statusCode?: unknown }).statusCode;
+  if (typeof status === "number") {
+    return status === 408 || status === 429 || status >= 500;
+  }
+  return true;
+}
+
+// Resolves true after `ms`, or false immediately when the signal aborts.
+function sleep(ms: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 export class AgentLoop {
@@ -244,35 +284,78 @@ export class AgentLoop {
         this.messages = await this.applyCompactionSummary(compacted);
       }
 
+      // One model step, with retries: a transient stream failure (network
+      // error, 429/5xx, idle watchdog cutoff) or an empty response must not
+      // silently end a half-finished turn. Partial output from a failed
+      // attempt is discarded — only a clean attempt is persisted.
+      const maxRetries = Math.max(0, config.streamMaxRetries);
+      const baseDelay = this.opts.retryDelayMs ?? STREAM_RETRY_BASE_DELAY_MS;
       let text = "";
       const toolCalls: PendingToolCall[] = [];
-      let failed = false;
+      let failure: Error | null = null;
 
-      try {
-        for await (const event of this.streamOnce(aiTools, signal)) {
-          if (event.type === "text-delta") {
-            text += event.text;
-            yield event;
-          } else if (event.type === "reasoning") {
-            yield event;
-          } else if (event.type === "tool-call") {
-            toolCalls.push({ id: event.id, name: event.name, args: event.args });
-            yield event;
-          } else if (event.type === "error") {
-            failed = true;
-            yield event;
-          } else {
-            yield event;
+      for (let attempt = 0; ; attempt++) {
+        text = "";
+        toolCalls.length = 0;
+        failure = null;
+        let finishReason: string | undefined;
+        // Retried attempts get more patient stream timeouts (1x, 2x, 3x): a
+        // relay that just timed out is overloaded, so re-asking with the same
+        // deadline would hit the same wall.
+        const timeoutScale = Math.min(attempt + 1, 3);
+
+        try {
+          for await (const event of this.streamOnce(aiTools, signal, timeoutScale)) {
+            if (event.type === "text-delta") {
+              text += event.text;
+              yield event;
+            } else if (event.type === "reasoning") {
+              yield event;
+            } else if (event.type === "tool-call") {
+              toolCalls.push({ id: event.id, name: event.name, args: event.args });
+              yield event;
+            } else if (event.type === "finish") {
+              finishReason = event.finishReason;
+              yield event;
+            } else if (event.type === "error") {
+              // Held back until retries are exhausted, so the UI shows retry
+              // notices instead of an error for a turn that then recovers.
+              failure = event.error;
+            } else {
+              yield event;
+            }
           }
+        } catch (error) {
+          // A user-initiated abort is a normal end of the turn, not an error.
+          if (signal.aborted) return;
+          failure = error instanceof Error ? error : new Error(String(error));
         }
-      } catch (error) {
-        // A user-initiated abort is a normal end of the turn, not an error.
+
         if (signal.aborted) return;
-        yield { type: "error", error: error instanceof Error ? error : new Error(String(error)) };
-        return;
+        if (!failure && (text.length > 0 || toolCalls.length > 0)) break;
+        if (failure && !isRetryableStreamError(failure)) break;
+        if (attempt >= maxRetries) break;
+
+        yield {
+          type: "retry",
+          attempt: attempt + 2,
+          maxAttempts: maxRetries + 1,
+          reason: failure ? failure.message : `empty response (finish: ${finishReason ?? "none"})`,
+        };
+        if (!(await sleep(baseDelay * 2 ** attempt, signal))) return;
       }
 
-      if (failed) return;
+      if (failure) {
+        yield { type: "error", error: failure };
+        return;
+      }
+      if (text.length === 0 && toolCalls.length === 0) {
+        yield {
+          type: "error",
+          error: new Error("The model returned an empty response after retries; ending the turn."),
+        };
+        return;
+      }
 
       const assistantMessage: CoreMessage = {
         role: "assistant",
@@ -416,6 +499,7 @@ export class AgentLoop {
   private async *streamOnce(
     aiTools: Record<string, unknown>,
     signal: AbortSignal,
+    timeoutScale = 1,
   ): AsyncGenerator<StreamEvent> {
     const { streamChat } = await import("../llm/stream");
     yield* streamChat({
@@ -423,7 +507,8 @@ export class AgentLoop {
       messages: this.messages,
       tools: aiTools,
       abortSignal: signal,
-      idleTimeoutMs: this.opts.config.streamIdleTimeoutSec * 1000,
+      idleTimeoutMs: this.opts.config.streamIdleTimeoutSec * 1000 * timeoutScale,
+      firstPartTimeoutMs: this.opts.config.streamFirstChunkTimeoutSec * 1000 * timeoutScale,
     });
   }
 

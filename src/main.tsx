@@ -26,7 +26,9 @@ import { VERSION } from "./version";
 const SYSTEM_PROMPT = `You are Star CLI, an AI coding agent running in the user's terminal.
 You help with software engineering tasks: reading, writing and editing code, running shell commands, and managing todos.
 Be concise and direct. Use tools when they help accomplish the task.
-The working directory is the user's project root; never touch files outside it without explicit instruction.`;
+The working directory is the user's project root; never touch files outside it without explicit instruction.
+When a tool call or command fails, read the error output, work out the cause, and try again with a corrected or alternative approach — never repeat an identical failing call without changing something.
+Do not end your turn while the task is still incomplete; keep going until it is done or you are genuinely blocked, and if you are blocked, state exactly what is missing.`;
 
 async function createLoop(
   config: StarConfig,
@@ -117,6 +119,12 @@ async function printMode(
         }
         case "finish":
           usage.add(event.usage);
+          break;
+        case "retry":
+          if (!json)
+            process.stderr.write(
+              `\n[retry ${event.attempt}/${event.maxAttempts}] ${event.reason}\n`,
+            );
           break;
         case "error":
           if (!json) process.stderr.write(`\n[error] ${formatStreamError(event.error)}\n`);
