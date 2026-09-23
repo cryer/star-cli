@@ -132,6 +132,19 @@ export function InputBox({
       return;
     }
     if (key.return) {
+      // Shift+Enter inserts a newline where the terminal reports the
+      // modifier; Windows Terminal sends plain \r for both, so the
+      // backslash+Enter fallback below covers it.
+      if (key.shift) {
+        edit(`${value.slice(0, cursor)}\n${value.slice(cursor)}`, cursor + 1);
+        return;
+      }
+      // Backslash immediately before the cursor + Enter: universal manual
+      // newline (works on every terminal, Claude-Code style).
+      if (value[cursor - 1] === "\\") {
+        edit(`${value.slice(0, cursor - 1)}\n${value.slice(cursor)}`, cursor);
+        return;
+      }
       const text = value.trim();
       if (text.length > 0) {
         setHistory((prev) => [...prev, text]);
@@ -140,6 +153,12 @@ export function InputBox({
       edit("", 0);
       historyIndexRef.current = null;
       draftRef.current = "";
+      return;
+    }
+    // Ctrl+J arrives as a raw \n, Alt+Enter as ESC+CR (Ink strips the ESC),
+    // and kitty-protocol Shift+Enter as the unparsed sequence [13;Nu.
+    if (input === "\n" || input === "\r" || /^\[13;\d+u$/.test(input)) {
+      edit(`${value.slice(0, cursor)}\n${value.slice(cursor)}`, cursor + 1);
       return;
     }
     if (key.tab) {
@@ -221,21 +240,33 @@ export function InputBox({
       return;
     }
     if (input && !key.ctrl && !key.meta) {
-      edit(value.slice(0, cursor) + input + value.slice(cursor), cursor + input.length);
+      // Pasted text may carry CRLF line endings; normalize so the value only
+      // ever holds \n and rendering stays consistent.
+      const text = input.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      edit(value.slice(0, cursor) + text + value.slice(cursor), cursor + text.length);
     }
   });
 
   const before = value.slice(0, cursor);
-  const at = value[cursor] ?? " ";
+  const at = value[cursor];
   const after = value.slice(cursor + 1);
+  // A newline under the cursor is shown as an inverse space at the line end,
+  // with the newline itself rendered after it.
+  const cursorChar = at === "\n" || at === undefined ? " " : at;
+  const tail = (at === "\n" ? "\n" : "") + after;
+
+  // One pre-styled string in a single Text node. Sibling Text nodes wrap
+  // independently (stranding the cursor on its own line on soft-wrap), and
+  // inserting/removing children inside ink-text skips Yoga's dirty marking
+  // (ink's insertBeforeNode early-return), leaving the node measured at a
+  // stale width so text spills over the border. A lone string child only
+  // ever updates nodeValue, which always re-measures.
+  const styled = `\u001B[36m> \u001B[39m${before}\u001B[7m${cursorChar}\u001B[27m${tail}`;
 
   return (
     <Box flexDirection="column">
       <Box borderStyle="round" borderColor="gray" paddingX={1}>
-        <Text color="cyan">{"> "}</Text>
-        <Text>{before}</Text>
-        <Text inverse>{at}</Text>
-        <Text>{after}</Text>
+        <Text>{styled}</Text>
       </Box>
       {suggestions.length > 0 && (
         <Box flexDirection="column" paddingLeft={2}>

@@ -174,4 +174,55 @@ describe("InputBox", () => {
       app.unmount();
     }
   });
+
+  it("ctrl+j inserts a newline instead of submitting", async () => {
+    const { app, onSubmit } = setup();
+    await type(app.stdin, "line1", "\n", "line2", ENTER);
+    await submitted(onSubmit, "line1\nline2");
+    app.unmount();
+  });
+
+  it("backslash + enter inserts a newline instead of submitting", async () => {
+    const { app, onSubmit } = setup();
+    await type(app.stdin, "line1", "\\", ENTER);
+    await tick();
+    expect(onSubmit).not.toHaveBeenCalled();
+    await type(app.stdin, "line2", ENTER);
+    await submitted(onSubmit, "line1\nline2");
+    app.unmount();
+  });
+
+  it("kitty shift+enter sequence inserts a newline", async () => {
+    const { app, onSubmit } = setup();
+    await type(app.stdin, "x", "\x1B[13;2u", "y", ENTER);
+    await submitted(onSubmit, "x\ny");
+    app.unmount();
+  });
+
+  it("pasted CRLF line endings normalize to \\n", async () => {
+    const { app, onSubmit } = setup();
+    await type(app.stdin, "a\r\nb", ENTER);
+    await submitted(onSubmit, "a\nb");
+    app.unmount();
+  });
+
+  it("renders multi-line input with the cursor after the last char", async () => {
+    const { app } = setup();
+    await type(app.stdin, "first", "\n", "sec");
+    const frame = app.lastFrame() ?? "";
+    expect(stripAnsi(frame)).toContain("first");
+    expect(stripAnsi(frame)).toContain("sec");
+    expect(frame).toContain("sec\u001B[7m \u001B[27m");
+    app.unmount();
+  });
+
+  it("keeps the cursor attached to the text end when the input soft-wraps", async () => {
+    const { app } = setup();
+    await type(app.stdin, "a".repeat(110));
+    const frame = app.lastFrame() ?? "";
+    // The inverse cursor must directly follow the final typed character —
+    // not stranded on its own line by independently-wrapping Text nodes.
+    expect(frame).toContain("a\u001B[7m \u001B[27m");
+    app.unmount();
+  });
 });
