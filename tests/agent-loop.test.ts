@@ -69,6 +69,29 @@ function mockModel(rounds: Chunk[][]): MockLanguageModelV1 {
   });
 }
 
+// Streams the given rounds like mockModel, and answers generateText (the
+// completion check) with the verdicts in order, repeating the last one.
+function judgeModel(verdicts: string[], rounds: Chunk[][]): MockLanguageModelV1 {
+  let call = 0;
+  let verdict = 0;
+  return new MockLanguageModelV1({
+    doStream: async () => {
+      const chunks = rounds[Math.min(call, rounds.length - 1)] ?? [];
+      call++;
+      return {
+        stream: convertArrayToReadableStream(chunks),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      };
+    },
+    doGenerate: async () => ({
+      finishReason: "stop" as const,
+      usage: { promptTokens: 1, completionTokens: 1 },
+      text: verdicts[Math.min(verdict++, verdicts.length - 1)] ?? "",
+      rawCall: { rawPrompt: null, rawSettings: {} },
+    }),
+  });
+}
+
 function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
   return {
     defaultModel: "test",
@@ -783,5 +806,72 @@ describe("AgentLoop", () => {
             m.content.includes("auto-continue"),
         ),
     ).toHaveLength(1);
+  });
+
+  it("nudges when todo_write leaves open items at turn end", async () => {
+    const loop = makeLoop(
+      mockModel([
+        toolCallRound("call-1", "todo_write", {
+          todos: [
+            { id: 1, title: "写转换脚本", status: "in_progress" },
+            { id: 2, title: "校验输出", status: "pending" },
+          ],
+        }),
+        textRound("检查完成，目录结构正常。"),
+        toolCallRound("call-2", "todo_write", {
+          todos: [
+            { id: 1, title: "写转换脚本", status: "done" },
+            { id: 2, title: "校验输出", status: "done" },
+          ],
+        }),
+        textRound("全部完成。"),
+      ]),
+    );
+
+    const events = await collect(loop.stream("convert the dataset", new AbortController().signal));
+
+    expect(events.filter((e) => e.type === "notice")).toHaveLength(1);
+    const nudge = loop
+      .getMessages()
+      .find(
+        (m) =>
+          m.role === "user" && typeof m.content === "string" && m.content.includes("auto-continue"),
+      );
+    expect(typeof nudge?.content === "string" && nudge.content.includes("写转换脚本")).toBe(true);
+  });
+
+  it("nudges when the completion check reports NOT_DONE", async () => {
+    const loop = makeLoop(
+      judgeModel(
+        ["NOT_DONE", "DONE"],
+        [
+          toolCallRound("call-1", "todo_read", {}),
+          textRound("全量检查完成，目录结构正常。"),
+          toolCallRound("call-2", "todo_read", {}),
+          textRound("全部完成。"),
+        ],
+      ),
+    );
+
+    const events = await collect(loop.stream("convert the dataset", new AbortController().signal));
+
+    const notices = events.filter((e) => e.type === "notice");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.type === "notice" && notices[0].message.includes("completion check")).toBe(
+      true,
+    );
+    const lastAssistant = [...loop.getMessages()].reverse().find((m) => m.role === "assistant");
+    expect(lastAssistant?.content).toEqual([{ type: "text", text: "全部完成。" }]);
+  });
+
+  it("ends the turn when the completion check reports DONE", async () => {
+    const loop = makeLoop(
+      judgeModel(["DONE"], [toolCallRound("call-1", "todo_read", {}), textRound("结果如上。")]),
+    );
+
+    const events = await collect(loop.stream("what is in the file?", new AbortController().signal));
+
+    expect(events.some((e) => e.type === "notice")).toBe(false);
+    expect(loop.getMessages().filter((m) => m.role === "user")).toHaveLength(1);
   });
 });

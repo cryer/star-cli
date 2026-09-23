@@ -84,6 +84,15 @@ export function formatTodos(items: TodoItem[]): string {
 
 const defaultStore = new TodoStore();
 
+// Titles of unfinished items from a todo_write args payload; [] when the
+// payload is malformed. Used by the agent loop to spot turns that end while
+// the model's own todo list still has open work.
+export function pendingTodoTitles(args: unknown): string[] {
+  const parsed = writeSchema.safeParse(args);
+  if (!parsed.success) return [];
+  return parsed.data.todos.filter((t) => t.status !== "done").map((t) => t.title);
+}
+
 export function createTodoTools(store: TodoStore = defaultStore): Tool[] {
   const todoWrite: Tool<typeof writeSchema> = {
     name: "todo_write",

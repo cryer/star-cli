@@ -1,5 +1,4 @@
-import type { LanguageModel } from "ai";
-import { tool as aiTool } from "ai";
+import { type LanguageModel, tool as aiTool, generateText } from "ai";
 import type { StarConfig } from "../config/schema";
 import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
 import type { StreamEvent } from "../core/events";
@@ -17,6 +16,7 @@ import type { SessionStore } from "../session/store";
 import { scheduleSessionTitle } from "../session/title";
 import { beginTurn, currentTurnSeq, setSnapshotHooks } from "../tools/fs/snapshots";
 import type { ToolRegistry } from "../tools/registry";
+import { pendingTodoTitles } from "../tools/todo";
 import type { ToolResult } from "../tools/types";
 import { readProjectMemory } from "./project-memory";
 import { createSkillTool, discoverSkills, formatSkillsBlock } from "./skills";
@@ -60,6 +60,49 @@ const PENDING_WORK_PATTERN =
 
 const AUTO_CONTINUE_NUDGE =
   "[auto-continue] You ended your turn with words instead of actions. Do not describe or restate the plan — continue the task NOW by calling tools. Reply with text only if the task is already fully complete.";
+
+const COMPLETION_CHECK_TIMEOUT_MS = 30_000;
+
+// Keyword matching cannot catch every phrasing of "I am about to…", so a
+// text-only end to a turn that used tools gets a semantic check: the model
+// itself judges whether the user's request is actually finished. Returns
+// null when the check fails (network, timeout, unparseable reply) — the
+// caller then treats the turn as complete rather than nudging on a broken
+// signal.
+async function checkTaskComplete(
+  model: LanguageModel,
+  request: string,
+  finalReply: string,
+  signal: AbortSignal,
+): Promise<boolean | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), COMPLETION_CHECK_TIMEOUT_MS);
+  const onAbort = () => controller.abort();
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    const { text } = await generateText({
+      model,
+      maxTokens: 8,
+      abortSignal: controller.signal,
+      prompt: [
+        "An AI coding agent was given this task by the user:",
+        `<task>\n${request.slice(0, 2000)}\n</task>`,
+        "The agent has stopped calling tools and ended with this reply:",
+        `<reply>\n${finalReply.slice(0, 2000)}\n</reply>`,
+        "Has the agent fully completed the task — every requested action actually performed — or is it only describing, planning, or reporting progress with work still left? Answer with exactly one word: DONE or NOT_DONE.",
+      ].join("\n"),
+    });
+    const verdict = text.trim().toUpperCase();
+    if (verdict.startsWith("NOT_DONE")) return false;
+    if (verdict.startsWith("DONE")) return true;
+    return null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", onAbort);
+  }
+}
 
 const STREAM_RETRY_BASE_DELAY_MS = 1000;
 
@@ -258,7 +301,7 @@ export class AgentLoop {
   ): AsyncGenerator<StreamEvent> {
     this.syncSystemMessage();
 
-    const text = typeof input === "string" ? input : input.text;
+    const inputText = typeof input === "string" ? input : input.text;
     const images = typeof input === "string" ? [] : input.images;
     const userMessage: CoreMessage =
       images.length > 0
@@ -270,10 +313,10 @@ export class AgentLoop {
                 image: img.data,
                 mimeType: img.mimeType,
               })),
-              { type: "text" as const, text },
+              { type: "text" as const, text: inputText },
             ],
           }
-        : { role: "user", content: text };
+        : { role: "user", content: inputText };
     this.messages.push(userMessage);
     // Only the root loop opens a new snapshot turn: a subagent runs inside the
     // parent's turn, and its file changes must keep the parent's turn seq and
@@ -289,6 +332,10 @@ export class AgentLoop {
     const aiTools = this.buildAiTools();
     let autoContinues = 0;
     let lastWasNudge = false;
+    let usedToolsThisTurn = false;
+    // Open items from the latest todo_write this turn — a deterministic
+    // "work still pending" signal that needs no text interpretation.
+    let openTodos: string[] = [];
 
     for (let step = 0; step < config.maxSteps; step++) {
       const maxTokens = this.opts.contextMaxTokens ?? config.contextMaxTokens;
@@ -387,28 +434,43 @@ export class AgentLoop {
       this.maybeScheduleTitle(text);
 
       if (toolCalls.length === 0) {
-        // Weaker models sometimes end the turn with a text-only reply that
-        // merely announces work ("我会…", "I will…") instead of calling tools.
-        // Nudge them to actually continue, a bounded number of times; never
-        // in plan mode, where a text-only plan is the intended end state. A
-        // text-only reply to a nudge means the nudge was ignored — re-nudge
-        // regardless of phrasing, since keyword matching cannot catch every
-        // way of saying "I am about to do it".
-        const nudgeIgnored = lastWasNudge;
+        // A turn that ends in text only is suspect: weaker models announce
+        // work ("我会…") instead of calling tools. Escalating signals decide
+        // whether to nudge the model onward (bounded by maxAutoContinues,
+        // never in plan mode, where a text-only plan is the intended end):
+        // open todo items written this turn (deterministic), an ignored
+        // previous nudge (behavioral), announcement keywords (heuristic),
+        // and finally a semantic completion check by the model itself for
+        // turns that used tools but match no keyword.
+        let reason: string | null = null;
+        let nudgeText = AUTO_CONTINUE_NUDGE;
+        if (openTodos.length > 0) {
+          reason = `${openTodos.length} todo item(s) still open`;
+          nudgeText = `[auto-continue] You ended your turn with unfinished todo item(s): ${openTodos
+            .map((t) => `"${t}"`)
+            .join(
+              ", ",
+            )}. Complete them now with tool calls, or update the list with todo_write if they are no longer needed.`;
+        } else if (lastWasNudge) {
+          reason = "reply still had no tool calls";
+        } else if (PENDING_WORK_PATTERN.test(text)) {
+          reason = "reply announced unfinished work";
+        } else if (usedToolsThisTurn && !signal.aborted) {
+          const complete = await checkTaskComplete(this.opts.model, inputText, text, signal);
+          if (complete === false) reason = "completion check reports the task unfinished";
+        }
         if (
+          reason !== null &&
           config.permissionMode !== "plan" &&
-          autoContinues < config.maxAutoContinues &&
-          (nudgeIgnored || PENDING_WORK_PATTERN.test(text))
+          autoContinues < config.maxAutoContinues
         ) {
           autoContinues++;
           lastWasNudge = true;
           yield {
             type: "notice",
-            message: nudgeIgnored
-              ? `Reply still had no tool calls; asking the model to continue (${autoContinues}/${config.maxAutoContinues}).`
-              : `Reply announced unfinished work; asking the model to continue (${autoContinues}/${config.maxAutoContinues}).`,
+            message: `${reason}; asking the model to continue (${autoContinues}/${config.maxAutoContinues}).`,
           };
-          const nudge: CoreMessage = { role: "user", content: AUTO_CONTINUE_NUDGE };
+          const nudge: CoreMessage = { role: "user", content: nudgeText };
           this.messages.push(nudge);
           await this.persist(nudge);
           continue;
@@ -417,6 +479,7 @@ export class AgentLoop {
         return;
       }
       lastWasNudge = false;
+      usedToolsThisTurn = true;
 
       const answered = new Set<string>();
       try {
@@ -437,6 +500,9 @@ export class AgentLoop {
           this.messages.push(toolMessage);
           await this.persist(toolMessage);
           answered.add(call.id);
+          if (call.name === "todo_write" && !result.isError) {
+            openTodos = pendingTodoTitles(call.args);
+          }
           yield {
             type: "tool-result",
             id: call.id,
