@@ -180,7 +180,9 @@ describe("background task tools", () => {
   it("task_list reports the empty state before any task runs", async () => {
     // Must stay the first test in this describe block: defaultTaskManager is a
     // shared singleton and keeps records of finished tasks.
-    expect((await run("task_list", {})).content).toBe("No background tasks.");
+    expect((await run("task_list", {})).content).toBe(
+      "No background tasks.\nNo background subagents.",
+    );
   });
 
   it("bash run_in_background returns a task id and registers the task", async () => {

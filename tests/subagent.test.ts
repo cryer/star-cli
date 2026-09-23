@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { defaultAgentTasks } from "../src/agent/agent-tasks";
 import { AgentLoop, type AgentLoopOptions } from "../src/agent/loop";
 import type { StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
@@ -103,6 +104,7 @@ describe("subagent tool", () => {
   });
 
   afterEach(() => {
+    defaultAgentTasks.cleanup();
     rmSync(cwd, { recursive: true, force: true });
   });
 
@@ -233,5 +235,62 @@ describe("subagent tool", () => {
       expect(error.error.message).toContain("unavailable tool 'subagent'");
     }
     expect(events.some((e) => e.type === "tool-result")).toBe(false);
+  });
+
+  it("runs a subagent in the background and returns a task id immediately", async () => {
+    const { loop } = makeLoop(
+      mockModel([
+        toolCallRound("call-1", "subagent", {
+          prompt: "investigate the repo",
+          description: "repo survey",
+          run_in_background: true,
+        }),
+        textRound("spawned the survey"),
+        textRound("spawned the survey"),
+      ]),
+    );
+
+    const events = await collect(loop.stream("survey in background", new AbortController().signal));
+
+    const toolResult = events.find((e) => e.type === "tool-result" && e.name === "subagent");
+    expect(toolResult).toBeDefined();
+    if (toolResult?.type === "tool-result") {
+      expect(toolResult.isError).toBeFalsy();
+      expect(toolResult.content).toContain("Background subagent agent-");
+      expect(toolResult.content).toContain('"repo survey"');
+    }
+    // The child runs on the same mock model and finishes by itself.
+    for (let i = 0; i < 50 && defaultAgentTasks.runningCount() > 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(defaultAgentTasks.runningCount()).toBe(0);
+  });
+
+  it("delivers finished background subagent reports at the next step boundary", async () => {
+    defaultAgentTasks.start(() => Promise.resolve("child report: 42 files"), {
+      prompt: "count files",
+      description: "file count",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const { loop } = makeLoop(
+      mockModel([toolCallRound("call-1", "todo_read", {}), textRound("done")]),
+    );
+
+    await collect(loop.stream("continue working", new AbortController().signal));
+
+    const note = loop
+      .getMessages()
+      .find(
+        (m) =>
+          m.role === "user" &&
+          typeof m.content === "string" &&
+          m.content.includes("child report: 42 files"),
+      );
+    expect(note).toBeDefined();
+    if (note && typeof note.content === "string") {
+      expect(note.content).toContain('"file count"');
+      expect(note.content).toContain("completed");
+    }
   });
 });

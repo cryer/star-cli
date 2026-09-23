@@ -1,5 +1,6 @@
 import { Box, Text, render, useApp, useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type AgentTaskSnapshot, defaultAgentTasks } from "../agent/agent-tasks";
 import { AgentLoop } from "../agent/loop";
 import { addAllowRule, savePermissionMode } from "../config/save";
 import { type StarConfig, contextWindowTokens } from "../config/schema";
@@ -95,10 +96,15 @@ function emptyUsage(): UsageStats {
 }
 
 function runningTaskLabels(): string[] {
-  return defaultTaskManager
+  const shells = defaultTaskManager
     .list()
     .filter((t) => t.status === "running")
     .map((t) => t.description ?? t.command);
+  const agents = defaultAgentTasks
+    .list()
+    .filter((t) => t.status === "running")
+    .map((t) => t.description ?? t.id);
+  return [...shells, ...agents];
 }
 
 // Shift+Tab cycles these in order; yolo is reachable only via /permission.
@@ -439,10 +445,30 @@ export function Repl({
         });
       }
     };
+    const onAgentUpdate = (task: AgentTaskSnapshot) => {
+      setBgLabels(runningTaskLabels());
+      const label = task.description ? `: ${task.description}` : "";
+      pushMessage(
+        "system",
+        task.status === "running"
+          ? `Background subagent ${task.id} started${label}`
+          : `Background subagent ${task.id} ${task.status}${label}`,
+      );
+      if (task.status !== "running") {
+        notifyBell({
+          enabled: config.notifyBell,
+          thresholdSec: config.notifyBellThresholdSec,
+          noNotifyEnv: process.env.STAR_NO_NOTIFY === "1",
+        });
+      }
+    };
     defaultTaskManager.on("update", onUpdate);
+    defaultAgentTasks.on("update", onAgentUpdate);
     return () => {
       defaultTaskManager.off("update", onUpdate);
+      defaultAgentTasks.off("update", onAgentUpdate);
       defaultTaskManager.cleanup();
+      defaultAgentTasks.cleanup();
     };
   }, [pushMessage, config]);
 
@@ -487,11 +513,10 @@ export function Repl({
 
   const handleExit = useCallback(() => {
     const killed = defaultTaskManager.cleanup();
-    if (killed.length > 0) {
-      pushMessage(
-        "system",
-        `Stopped ${killed.length} background task(s): ${killed.map((t) => t.id).join(", ")}`,
-      );
+    const killedAgents = defaultAgentTasks.cleanup();
+    const stopped = [...killed.map((t) => t.id), ...killedAgents.map((t) => t.id)];
+    if (stopped.length > 0) {
+      pushMessage("system", `Stopped ${stopped.length} background task(s): ${stopped.join(", ")}`);
     }
     exit();
   }, [exit, pushMessage]);

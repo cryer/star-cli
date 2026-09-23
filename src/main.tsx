@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { defaultAgentTasks } from "./agent/agent-tasks";
 import { AgentLoop } from "./agent/loop";
 import { formatStreamError } from "./cli/format";
 import { MAX_IMAGE_BYTES, imageMimeType, readImageInput, resolveMentions } from "./cli/mentions";
@@ -158,6 +159,7 @@ async function printMode(
   }
   if (!json) process.stdout.write("\n");
   defaultTaskManager.cleanup();
+  defaultAgentTasks.cleanup();
   return exitCode;
 }
 

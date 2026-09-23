@@ -1,44 +1,70 @@
 import { z } from "zod";
-import { formatTaskLine, formatTaskList } from "../tasks/format";
+import { type AgentTaskSnapshot, defaultAgentTasks } from "../agent/agent-tasks";
+import { formatDuration, formatTaskLine, formatTaskList } from "../tasks/format";
 import { defaultTaskManager } from "../tasks/manager";
 import type { Tool } from "./types";
 
 const idSchema = z.object({
-  id: z.string().describe("Task id, e.g. task-1"),
+  id: z.string().describe("Task id, e.g. task-1 or agent-1"),
 });
+
+function formatAgentTaskLine(task: AgentTaskSnapshot): string {
+  const duration = formatDuration(task.startedAt, task.endedAt);
+  const label = task.description ?? task.prompt.slice(0, 60);
+  const status =
+    task.status === "running" ? `running ${duration}` : `${task.status} after ${duration}`;
+  return `${task.id} [${status}] ${label}`;
+}
 
 export const taskListTool: Tool = {
   name: "task_list",
-  description: "List background shell tasks with status, runtime, and exit code.",
+  description: "List background tasks (shell commands and subagents) with status and runtime.",
   permission: "read",
   parameters: z.object({}),
   execute() {
-    return Promise.resolve({ content: formatTaskList(defaultTaskManager.list()) });
+    const shell = formatTaskList(defaultTaskManager.list());
+    const agents = defaultAgentTasks.list();
+    const agentLines =
+      agents.length === 0
+        ? "No background subagents."
+        : `Background subagents:\n${agents.map(formatAgentTaskLine).join("\n")}`;
+    return Promise.resolve({ content: `${shell}\n${agentLines}` });
   },
 };
 
 export const taskOutputTool: Tool<typeof idSchema> = {
   name: "task_output",
-  description: "Read the current output of a background shell task (works while still running).",
+  description:
+    "Read the current output of a background task (shell command or subagent; works while still running).",
   permission: "read",
   parameters: idSchema,
   execute(args) {
-    const task = defaultTaskManager.get(args.id);
-    if (!task) {
-      return Promise.resolve({ content: `Unknown task: ${args.id}`, isError: true });
+    const shell = defaultTaskManager.get(args.id);
+    if (shell) {
+      const body = shell.output.replace(/\s+$/, "") || "(no output yet)";
+      return Promise.resolve({ content: `${formatTaskLine(shell)}\n${body}` });
     }
-    const body = task.output.replace(/\s+$/, "") || "(no output yet)";
-    return Promise.resolve({ content: `${formatTaskLine(task)}\n${body}` });
+    const agent = defaultAgentTasks.get(args.id);
+    if (agent) {
+      const body =
+        agent.status === "running"
+          ? "(still running)"
+          : agent.result.replace(/\s+$/, "") || "(no report)";
+      return Promise.resolve({ content: `${formatAgentTaskLine(agent)}\n${body}` });
+    }
+    return Promise.resolve({ content: `Unknown task: ${args.id}`, isError: true });
   },
 };
 
 export const taskKillTool: Tool<typeof idSchema> = {
   name: "task_kill",
-  description: "Stop a running background shell task (kills the whole process tree).",
+  description: "Stop a running background task (shell command process tree or subagent).",
   permission: "exec",
   parameters: idSchema,
   execute(args) {
-    const task = defaultTaskManager.get(args.id);
+    const shell = defaultTaskManager.get(args.id);
+    const agent = shell ? undefined : defaultAgentTasks.get(args.id);
+    const task = shell ?? agent;
     if (!task) {
       return Promise.resolve({ content: `Unknown task: ${args.id}`, isError: true });
     }
@@ -48,7 +74,11 @@ export const taskKillTool: Tool<typeof idSchema> = {
         isError: true,
       });
     }
-    defaultTaskManager.kill(args.id);
+    if (shell) {
+      defaultTaskManager.kill(args.id);
+    } else {
+      defaultAgentTasks.kill(args.id);
+    }
     return Promise.resolve({ content: `Task ${args.id} stopped.` });
   },
 };

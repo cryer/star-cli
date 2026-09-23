@@ -18,6 +18,7 @@ import { beginTurn, currentTurnSeq, setSnapshotHooks } from "../tools/fs/snapsho
 import type { ToolRegistry } from "../tools/registry";
 import { pendingTodoTitles } from "../tools/todo";
 import type { ToolResult } from "../tools/types";
+import { defaultAgentTasks } from "./agent-tasks";
 import { readProjectMemory } from "./project-memory";
 import { createSkillTool, discoverSkills, formatSkillsBlock } from "./skills";
 import { MAX_SUBAGENT_DEPTH, createSubagentTool } from "./subagent";
@@ -338,6 +339,20 @@ export class AgentLoop {
     let openTodos: string[] = [];
 
     for (let step = 0; step < config.maxSteps; step++) {
+      // Deliver finished background subagent reports at step boundaries so
+      // the parent monitors its children without polling. Only the root
+      // loop drains — children cannot spawn subagents.
+      if ((this.opts.subagentDepth ?? 0) === 0) {
+        for (const finished of defaultAgentTasks.drainNotifications()) {
+          const label = finished.description ? ` "${finished.description}"` : "";
+          const note: CoreMessage = {
+            role: "user",
+            content: `[background subagent ${finished.id}${label} ${finished.status}]\n${finished.result}`,
+          };
+          this.messages.push(note);
+          await this.persist(note);
+        }
+      }
       const maxTokens = this.opts.contextMaxTokens ?? config.contextMaxTokens;
       const compacted = compactMessages([...this.messages], maxTokens);
       if (compacted.compacted) {
