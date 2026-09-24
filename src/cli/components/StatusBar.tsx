@@ -11,6 +11,9 @@ interface StatusBarProps {
   gitBranch?: string | null;
   // Context window usage in percent; null when unknown (non-loop backend).
   contextPercent?: number | null;
+  // Prompt cache hit rate 0-100; null when the provider never reported cache
+  // fields (rendered as "Not provided").
+  cachePercent?: number | null;
   sessionCostUsd?: number | null;
   // Labels of currently running background tasks (description or command).
   backgroundTasks?: string[];
@@ -35,6 +38,7 @@ export const StatusBar = memo(function StatusBar({
   tokens,
   gitBranch,
   contextPercent,
+  cachePercent,
   sessionCostUsd,
   backgroundTasks = [],
 }: StatusBarProps) {
@@ -55,6 +59,7 @@ export const StatusBar = memo(function StatusBar({
       )}
       <Text dimColor>model: {model}</Text>
       {contextPercent != null && <Text dimColor>ctx: {contextPercent}%</Text>}
+      <Text dimColor>cache: {cachePercent != null ? `${cachePercent}%` : "Not provided"}</Text>
       {sessionCostUsd != null && sessionCostUsd > 0 && (
         <Text dimColor>${formatDollars(sessionCostUsd)}</Text>
       )}

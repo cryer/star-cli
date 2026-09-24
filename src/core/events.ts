@@ -2,6 +2,12 @@ export interface TokenUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  // Prompt tokens served from the provider cache, reported as a subset of
+  // promptTokens (OpenAI / openai-compatible style).
+  cachedPromptTokens?: number;
+  // Cache-read tokens reported outside promptTokens (Anthropic style), so
+  // they also count toward the effective prompt total.
+  cacheReadInputTokens?: number;
 }
 
 export type StreamEvent =

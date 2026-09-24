@@ -38,6 +38,12 @@ import { type TodoItem, formatTodos, loadTodos, parseTodoArgs } from "../tools/t
 import { VERSION } from "../version";
 import type { ChatBackend } from "./backend";
 import { budgetState } from "./budget";
+import {
+  type CacheTotals,
+  addToCacheTotals,
+  cacheHitPercent,
+  cacheUsageReported,
+} from "./cache-stats";
 import { copyText, readClipboardImage } from "./clipboard";
 import { compactSession, exportSession } from "./commands/actions";
 import { registerBuiltinCommands } from "./commands/builtin";
@@ -95,6 +101,8 @@ export interface UsageStats {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  // Prompt-cache totals; absent until a provider reports cache fields.
+  cache?: CacheTotals;
 }
 
 function emptyUsage(): UsageStats {
@@ -782,6 +790,10 @@ export function Repl({
               usage.promptTokens += event.usage.promptTokens;
               usage.completionTokens += event.usage.completionTokens;
               usage.totalTokens += event.usage.totalTokens;
+              if (cacheUsageReported(event.usage)) {
+                if (!usage.cache) usage.cache = { cachedTokens: 0, promptTokens: 0 };
+                addToCacheTotals(usage.cache, event.usage);
+              }
               setUsageVersion((v) => v + 1);
               sessionStoreRef.current?.addUsage(event.usage).catch(() => {});
             }
@@ -1499,6 +1511,7 @@ export function Repl({
         tokens={usageRef.current.totalTokens}
         gitBranch={gitBranch}
         contextPercent={contextPercent}
+        cachePercent={usageRef.current.cache ? cacheHitPercent(usageRef.current.cache) : null}
         sessionCostUsd={sessionCost}
         backgroundTasks={bgLabels}
       />

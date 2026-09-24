@@ -113,6 +113,105 @@ describe("streamChat", () => {
     ]);
   });
 
+  it("extracts OpenAI-style cachedPromptTokens from providerMetadata", async () => {
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: convertArrayToReadableStream([
+          {
+            type: "finish",
+            finishReason: "stop",
+            usage: { promptTokens: 100, completionTokens: 10 },
+            providerMetadata: { openai: { cachedPromptTokens: 40 } },
+          },
+        ]),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+
+    const events = await collect(
+      streamChat({ model, messages: [{ role: "user", content: "hi" }] }),
+    );
+
+    expect(events).toEqual([
+      {
+        type: "finish",
+        finishReason: "stop",
+        usage: {
+          promptTokens: 100,
+          completionTokens: 10,
+          totalTokens: 110,
+          cachedPromptTokens: 40,
+        },
+      },
+    ]);
+  });
+
+  it("extracts Anthropic-style cacheReadInputTokens from providerMetadata", async () => {
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: convertArrayToReadableStream([
+          {
+            type: "finish",
+            finishReason: "stop",
+            usage: { promptTokens: 50, completionTokens: 10 },
+            providerMetadata: {
+              anthropic: { cacheReadInputTokens: 30, cacheCreationInputTokens: 12 },
+            },
+          },
+        ]),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+
+    const events = await collect(
+      streamChat({ model, messages: [{ role: "user", content: "hi" }] }),
+    );
+
+    expect(events).toEqual([
+      {
+        type: "finish",
+        finishReason: "stop",
+        usage: {
+          promptTokens: 50,
+          completionTokens: 10,
+          totalTokens: 60,
+          cacheReadInputTokens: 30,
+        },
+      },
+    ]);
+  });
+
+  it("ignores missing or non-numeric cache fields in providerMetadata", async () => {
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: convertArrayToReadableStream([
+          {
+            type: "finish",
+            finishReason: "stop",
+            usage: { promptTokens: 7, completionTokens: 3 },
+            providerMetadata: {
+              openai: { cachedPromptTokens: "40", reasoningTokens: 5 },
+              custom: { note: "no cache fields here" },
+            },
+          },
+        ]),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+
+    const events = await collect(
+      streamChat({ model, messages: [{ role: "user", content: "hi" }] }),
+    );
+
+    expect(events).toEqual([
+      {
+        type: "finish",
+        finishReason: "stop",
+        usage: { promptTokens: 7, completionTokens: 3, totalTokens: 10 },
+      },
+    ]);
+  });
+
   it("maps reasoning stream parts to reasoning events", async () => {
     const model = new MockLanguageModelV1({
       doStream: async () => ({

@@ -107,6 +107,40 @@ describe("StatusBar background tasks", () => {
   });
 });
 
+describe("StatusBar cache field", () => {
+  it("shows Not provided when no cache data was reported", async () => {
+    const app = renderApp(
+      createElement(StatusBar, {
+        cwd: "/tmp/project",
+        model: "gpt6",
+        permissionMode: "auto",
+        tokens: 0,
+        cachePercent: null,
+      }),
+    );
+    await tick();
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("cache: Not provided");
+    app.unmount();
+  });
+
+  it("shows the hit rate percent when cache data exists", async () => {
+    const app = renderApp(
+      createElement(StatusBar, {
+        cwd: "/tmp/project",
+        model: "gpt6",
+        permissionMode: "auto",
+        tokens: 0,
+        cachePercent: 42,
+      }),
+    );
+    await tick();
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("cache: 42%");
+    expect(frame).not.toContain("Not provided");
+    app.unmount();
+  });
+});
+
 describe("RewindConfirmPrompt", () => {
   const diff = {
     label: "f.txt",

@@ -160,7 +160,7 @@ Keys: `ESC` / `Ctrl+C` interrupts the current stream — the partial reply gener
 
 While the model is working, a spinner (`- \ | /`) shows `star is thinking…`; reasoning models also stream a dimmed tail of their thinking (last ~200 chars), which collapses to a one-line summary once the answer starts.
 
-The status bar shows the working directory (full path on wide terminals), the git branch, the model, the permission mode, context usage as a percentage of the model's context window (its own `contextMaxTokens` when set, else the top-level one), the session cost when the model has pricing configured, and total tokens.
+The status bar shows the working directory (full path on wide terminals), the git branch, the model, the permission mode, context usage as a percentage of the model's context window (its own `contextMaxTokens` when set, else the top-level one), the session prompt-cache hit rate when the provider reports cache usage (`cache: 42%`, or `cache: Not provided` when it never does), the session cost when the model has pricing configured, and total tokens.
 
 ## !shell passthrough
 
