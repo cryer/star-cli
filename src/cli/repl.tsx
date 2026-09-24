@@ -6,6 +6,7 @@ import { addAllowRule, savePermissionMode } from "../config/save";
 import { type StarConfig, contextWindowTokens } from "../config/schema";
 import { estimateTokens } from "../context/tokens";
 import { getGitSummary } from "../core/git";
+import { MAX_IMAGE_DIMENSION } from "../core/image";
 import type { CoreMessage, ImageInput } from "../core/messages";
 import { createModel } from "../llm/provider";
 import { listModels } from "../llm/registry";
@@ -380,10 +381,17 @@ export function Repl({
   );
 
   const handlePasteImage = useCallback(() => {
-    void readClipboardImage().then((img) => {
-      if (img) stageClipboardImage(img);
+    void readClipboardImage().then((result) => {
+      if (!result) return;
+      if (result.oversized) {
+        pushMessage(
+          "system",
+          `Image exceeds ${MAX_IMAGE_DIMENSION}px on its longest side and could not be resized automatically; the model may reject it.`,
+        );
+      }
+      stageClipboardImage(result.image);
     });
-  }, [stageClipboardImage]);
+  }, [stageClipboardImage, pushMessage]);
 
   const handleRewindDecision = useCallback(
     (decision: RewindDecision) => {

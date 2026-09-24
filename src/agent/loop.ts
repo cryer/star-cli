@@ -3,6 +3,7 @@ import type { StarConfig } from "../config/schema";
 import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
 import type { StreamEvent } from "../core/events";
 import { formatGitSummary, getGitSummary } from "../core/git";
+import { isOversizedImageError, stripOversizedImages } from "../core/image";
 import {
   type ChatInput,
   type CoreMessage,
@@ -297,6 +298,17 @@ export class AgentLoop {
     await this.opts.sessionStore?.append(message);
   }
 
+  // Replaces oversized image parts in the in-memory history with text
+  // placeholders and rewrites the persisted session, so the failed request
+  // can be resent and a later resume never carries the offending images.
+  private async stripOversizedImages(): Promise<number> {
+    const { messages, removed } = stripOversizedImages(this.messages);
+    if (removed === 0) return 0;
+    this.messages = messages;
+    await this.opts.sessionStore?.replaceMessages([...this.messages]);
+    return removed;
+  }
+
   // After the first assistant reply, kick off background title generation
   // for the session. Runs once per loop; the store-level title check makes
   // resumed sessions that already have a title a no-op.
@@ -425,6 +437,10 @@ export class AgentLoop {
       let text = "";
       const toolCalls: PendingToolCall[] = [];
       let failure: Error | null = null;
+      // One free retry per step, outside the transient-retry budget: when the
+      // provider rejects the request for an oversized image (a 4xx), the
+      // offending images are stripped from the history and the request resent.
+      let oversizedImagesStripped = false;
 
       for (let attempt = 0; ; attempt++) {
         text = "";
@@ -469,6 +485,17 @@ export class AgentLoop {
           return;
         }
         if (!failure && (text.length > 0 || toolCalls.length > 0)) break;
+        if (failure && !oversizedImagesStripped && isOversizedImageError(failure)) {
+          oversizedImagesStripped = true;
+          const removed = await this.stripOversizedImages();
+          if (removed > 0) {
+            yield {
+              type: "notice",
+              message: `Removed ${removed} oversized image(s) the model rejected; retrying the request.`,
+            };
+            continue;
+          }
+        }
         if (failure && !isRetryableStreamError(failure)) break;
         if (attempt >= maxRetries) break;
 

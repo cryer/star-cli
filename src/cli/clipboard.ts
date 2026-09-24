@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { ImageInput } from "../core/messages";
+import { downsampleImageIfNeeded } from "./image";
 
 export const CLIPBOARD_TIMEOUT_MS = 5000;
 const MAX_CLIPBOARD_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -98,9 +99,23 @@ async function commandExists(command: string): Promise<boolean> {
   }
 }
 
-// Reads a PNG image from the system clipboard. Every failure — unsupported
-// platform, missing tool, no image on the clipboard, timeout — returns null.
-export async function readClipboardImage(): Promise<ImageInput | null> {
+export interface ClipboardImage {
+  image: ImageInput;
+  /** The source exceeded the model-friendly dimension cap but could not be
+   * resized (no platform tool or resize failure) — the caller should warn. */
+  oversized: boolean;
+}
+
+async function finalizeClipboardImage(image: ImageInput): Promise<ClipboardImage> {
+  const result = await downsampleImageIfNeeded(image);
+  return { image: result.image, oversized: result.oversized && !result.resized };
+}
+
+// Reads a PNG image from the system clipboard, downsampling anything larger
+// than MAX_IMAGE_DIMENSION on its longest side. Every read failure —
+// unsupported platform, missing tool, no image on the clipboard, timeout —
+// returns null.
+export async function readClipboardImage(): Promise<ClipboardImage | null> {
   const tempFile = path.join(os.tmpdir(), `star-clipboard-${randomUUID()}.png`);
   const hasPngpaste = process.platform === "darwin" ? await commandExists("pngpaste") : false;
   const plan = clipboardImagePlan(process.platform, tempFile, hasPngpaste);
@@ -114,12 +129,20 @@ export async function readClipboardImage(): Promise<ImageInput | null> {
       });
       const buf = stdout as unknown as Buffer;
       if (buf.length === 0) return null;
-      return { path: "clipboard.png", mimeType: "image/png", data: buf.toString("base64") };
+      return finalizeClipboardImage({
+        path: "clipboard.png",
+        mimeType: "image/png",
+        data: buf.toString("base64"),
+      });
     }
     await execFileAsync(plan.command, plan.args, { timeout: CLIPBOARD_TIMEOUT_MS });
     const buf = await readFile(tempFile).catch(() => null);
     if (!buf || buf.length === 0) return null;
-    return { path: "clipboard.png", mimeType: "image/png", data: buf.toString("base64") };
+    return finalizeClipboardImage({
+      path: "clipboard.png",
+      mimeType: "image/png",
+      data: buf.toString("base64"),
+    });
   } catch {
     return null;
   } finally {

@@ -2,6 +2,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { ImageInput } from "../core/messages";
 import { type IgnorePredicate, createIgnorePredicate, isSensitivePath } from "../tools/fs/util";
+import { downsampleImageIfNeeded } from "./image";
 
 export const MAX_MENTION_BYTES = 100 * 1024;
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -20,8 +21,9 @@ export function imageMimeType(filePath: string): string | null {
   return IMAGE_MIME_TYPES[path.extname(filePath).toLowerCase()] ?? null;
 }
 
-// Reads an image file into a base64 ImageInput. Returns null when the path is
-// not a supported image or cannot be read.
+// Reads an image file into a base64 ImageInput, downsampling anything past
+// the dimension cap. Returns null when the path is not a supported image or
+// cannot be read.
 export async function readImageInput(filePath: string, cwd: string): Promise<ImageInput | null> {
   const mimeType = imageMimeType(filePath);
   if (!mimeType) return null;
@@ -30,7 +32,12 @@ export async function readImageInput(filePath: string, cwd: string): Promise<Ima
   if (!st || !st.isFile() || st.size > MAX_IMAGE_BYTES) return null;
   const buf = await readFile(abs).catch(() => null);
   if (!buf) return null;
-  return { path: filePath, mimeType, data: buf.toString("base64") };
+  const result = await downsampleImageIfNeeded({
+    path: filePath,
+    mimeType,
+    data: buf.toString("base64"),
+  });
+  return result.image;
 }
 
 export interface ParsedMentions {
@@ -185,8 +192,13 @@ export async function resolveMentions(text: string, cwd: string): Promise<Resolv
         skipped.push({ path: mention, reason: "unreadable" });
         continue;
       }
+      const result = await downsampleImageIfNeeded({
+        path: mention,
+        mimeType,
+        data: buf.toString("base64"),
+      });
       attached.push(mention);
-      images.push({ path: mention, mimeType, data: buf.toString("base64") });
+      images.push(result.image);
       continue;
     }
     const st = await stat(abs).catch(() => null);
