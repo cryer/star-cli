@@ -155,7 +155,9 @@ async function directoryBlock(
   if (!probe) return null;
   await listDirEntries(abs, "", 1, state, ignore);
   if (state.total > state.shown) {
-    state.lines.push(`... (truncated, ${state.total - state.shown} more entries)`);
+    state.lines.push(
+      `... (truncated, ${state.total - state.shown} more entries — use glob/grep tools or mention a subdirectory to see more)`,
+    );
   }
   return `--- @${display} (directory) ---\n${state.lines.join("\n")}\n--- end ---`;
 }

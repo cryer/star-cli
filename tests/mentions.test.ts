@@ -162,7 +162,7 @@ describe("resolveMentions", () => {
     }
     const resolved = await resolveMentions("read @sub", dir);
     expect(resolved.attached).toEqual(["sub"]);
-    expect(resolved.input).toContain("... (truncated, 3 more entries)");
+    expect(resolved.input).toContain("... (truncated, 3 more entries — use glob/grep tools");
     expect(resolved.input).toContain("f000.txt");
     expect(resolved.input).not.toContain("f202.txt");
   });
