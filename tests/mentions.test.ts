@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  MAX_DIR_MENTION_ENTRIES,
   MAX_IMAGE_BYTES,
   MAX_MENTION_BYTES,
   parseMentions,
@@ -63,6 +64,12 @@ describe("parseMentions", () => {
     expect(mentions).toEqual(["a.ts"]);
     expect(cleanText).toBe("");
   });
+
+  it("extracts directory mentions with a trailing slash", () => {
+    const { cleanText, mentions } = parseMentions("look at @src/agent/ please");
+    expect(mentions).toEqual(["src/agent/"]);
+    expect(cleanText).toBe("look at  please");
+  });
 });
 
 describe("resolveMentions", () => {
@@ -89,12 +96,82 @@ describe("resolveMentions", () => {
     expect(resolved.input).toBe("read");
   });
 
-  it("skips directories", async () => {
+  it("inlines a directory as a tree listing", async () => {
+    const dir = tempDir();
+    mkdirSync(path.join(dir, "sub", "nested"), { recursive: true });
+    writeFileSync(path.join(dir, "sub", "b.txt"), "b");
+    writeFileSync(path.join(dir, "sub", "a.txt"), "a");
+    writeFileSync(path.join(dir, "sub", "nested", "c.txt"), "c");
+    const resolved = await resolveMentions("read @sub", dir);
+    expect(resolved.attached).toEqual(["sub"]);
+    expect(resolved.skipped).toEqual([]);
+    expect(resolved.input).toBe(
+      [
+        "read",
+        "",
+        "--- @sub/ (directory) ---",
+        "sub/",
+        "├── nested/",
+        "│   └── c.txt",
+        "├── a.txt",
+        "└── b.txt",
+        "--- end ---",
+      ].join("\n"),
+    );
+  });
+
+  it("inlines an empty directory", async () => {
+    const dir = tempDir();
+    mkdirSync(path.join(dir, "empty"));
+    const resolved = await resolveMentions("read @empty", dir);
+    expect(resolved.attached).toEqual(["empty"]);
+    expect(resolved.input).toBe("read\n\n--- @empty/ (directory) ---\nempty/\n--- end ---");
+  });
+
+  it("resolves directory mentions with a trailing slash", async () => {
     const dir = tempDir();
     mkdirSync(path.join(dir, "sub"));
+    writeFileSync(path.join(dir, "sub", "a.txt"), "a");
+    const resolved = await resolveMentions("read @sub/", dir);
+    expect(resolved.attached).toEqual(["sub/"]);
+    expect(resolved.skipped).toEqual([]);
+    expect(resolved.input).toContain("--- @sub/ (directory) ---\nsub/\n└── a.txt\n--- end ---");
+  });
+
+  it("honors .starignore and sensitive files in directory listings", async () => {
+    const dir = tempDir();
+    writeFileSync(path.join(dir, ".starignore"), "secret/\n*.log\n");
+    mkdirSync(path.join(dir, "sub", "secret"), { recursive: true });
+    writeFileSync(path.join(dir, "sub", "secret", "hidden.txt"), "x");
+    writeFileSync(path.join(dir, "sub", "debug.log"), "x");
+    writeFileSync(path.join(dir, "sub", ".env"), "SECRET=1");
+    writeFileSync(path.join(dir, "sub", "keep.txt"), "x");
     const resolved = await resolveMentions("read @sub", dir);
+    expect(resolved.attached).toEqual(["sub"]);
+    expect(resolved.input).toContain("└── keep.txt");
+    expect(resolved.input).not.toContain("secret");
+    expect(resolved.input).not.toContain("debug.log");
+    expect(resolved.input).not.toContain(".env");
+  });
+
+  it("truncates directory listings past the entry cap", async () => {
+    const dir = tempDir();
+    mkdirSync(path.join(dir, "sub"));
+    for (let i = 0; i < MAX_DIR_MENTION_ENTRIES + 3; i++) {
+      writeFileSync(path.join(dir, "sub", `f${String(i).padStart(3, "0")}.txt`), "x");
+    }
+    const resolved = await resolveMentions("read @sub", dir);
+    expect(resolved.attached).toEqual(["sub"]);
+    expect(resolved.input).toContain("... (truncated, 3 more entries)");
+    expect(resolved.input).toContain("f000.txt");
+    expect(resolved.input).not.toContain("f202.txt");
+  });
+
+  it("skips missing directories with a reason", async () => {
+    const dir = tempDir();
+    const resolved = await resolveMentions("read @nope/", dir);
     expect(resolved.attached).toEqual([]);
-    expect(resolved.skipped).toEqual([{ path: "sub", reason: "is a directory" }]);
+    expect(resolved.skipped).toEqual([{ path: "nope/", reason: "file not found" }]);
   });
 
   it("skips binary files", async () => {

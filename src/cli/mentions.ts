@@ -1,10 +1,12 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { ImageInput } from "../core/messages";
-import { isSensitivePath } from "../tools/fs/util";
+import { type IgnorePredicate, createIgnorePredicate, isSensitivePath } from "../tools/fs/util";
 
 export const MAX_MENTION_BYTES = 100 * 1024;
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+export const MAX_DIR_MENTION_ENTRIES = 200;
+export const MAX_DIR_MENTION_DEPTH = 10;
 
 const IMAGE_MIME_TYPES: Record<string, string> = {
   ".png": "image/png",
@@ -86,6 +88,71 @@ function isBinaryContent(buf: Buffer): boolean {
   return probe.includes(0);
 }
 
+interface DirListState {
+  lines: string[];
+  shown: number;
+  total: number;
+}
+
+async function listDirEntries(
+  dir: string,
+  prefix: string,
+  depth: number,
+  state: DirListState,
+  ignore: IgnorePredicate | undefined,
+): Promise<void> {
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => null);
+  if (!entries) return;
+  const visible = entries
+    .filter((entry) => entry.isDirectory() || entry.isFile())
+    .filter((entry) => !isSensitivePath(entry.name))
+    .filter((entry) => !ignore?.(path.join(dir, entry.name), entry.isDirectory()))
+    .sort((a, b) => {
+      const dirDiff = Number(b.isDirectory()) - Number(a.isDirectory());
+      return dirDiff !== 0 ? dirDiff : a.name.localeCompare(b.name);
+    });
+  for (let i = 0; i < visible.length; i++) {
+    const entry = visible[i];
+    if (!entry) continue;
+    state.total += 1;
+    const last = i === visible.length - 1;
+    const isDir = entry.isDirectory();
+    if (state.shown < MAX_DIR_MENTION_ENTRIES) {
+      state.shown += 1;
+      state.lines.push(`${prefix}${last ? "└── " : "├── "}${entry.name}${isDir ? "/" : ""}`);
+      if (isDir && depth < MAX_DIR_MENTION_DEPTH) {
+        await listDirEntries(
+          path.join(dir, entry.name),
+          `${prefix}${last ? "    " : "│   "}`,
+          depth + 1,
+          state,
+          ignore,
+        );
+      }
+    } else if (isDir && depth < MAX_DIR_MENTION_DEPTH) {
+      await listDirEntries(path.join(dir, entry.name), prefix, depth + 1, state, ignore);
+    }
+  }
+}
+
+// Renders a directory mention as an indented tree block. Returns null when the
+// directory cannot be read at all.
+async function directoryBlock(
+  abs: string,
+  mention: string,
+  ignore: IgnorePredicate | undefined,
+): Promise<string | null> {
+  const display = `${mention.replace(/\\/g, "/").replace(/\/+$/, "")}/`;
+  const state: DirListState = { lines: [`${display}`], shown: 0, total: 0 };
+  const probe = await readdir(abs).catch(() => null);
+  if (!probe) return null;
+  await listDirEntries(abs, "", 1, state, ignore);
+  if (state.total > state.shown) {
+    state.lines.push(`... (truncated, ${state.total - state.shown} more entries)`);
+  }
+  return `--- @${display} (directory) ---\n${state.lines.join("\n")}\n--- end ---`;
+}
+
 export async function resolveMentions(text: string, cwd: string): Promise<ResolvedMentions> {
   const { cleanText, mentions } = parseMentions(text);
   if (mentions.length === 0) {
@@ -95,6 +162,7 @@ export async function resolveMentions(text: string, cwd: string): Promise<Resolv
   const attached: string[] = [];
   const skipped: MentionSkip[] = [];
   const images: ImageInput[] = [];
+  let ignore: IgnorePredicate | null | undefined;
   for (const mention of mentions) {
     const abs = path.resolve(cwd, mention);
     if (isSensitivePath(abs)) {
@@ -127,7 +195,16 @@ export async function resolveMentions(text: string, cwd: string): Promise<Resolv
       continue;
     }
     if (st.isDirectory()) {
-      skipped.push({ path: mention, reason: "is a directory" });
+      if (ignore === undefined) {
+        ignore = createIgnorePredicate(cwd) ?? null;
+      }
+      const block = await directoryBlock(abs, mention, ignore ?? undefined);
+      if (!block) {
+        skipped.push({ path: mention, reason: "unreadable" });
+        continue;
+      }
+      attached.push(mention);
+      blocks.push(block);
       continue;
     }
     if (st.size > MAX_MENTION_BYTES) {

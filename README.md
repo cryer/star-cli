@@ -264,6 +264,8 @@ star -p "what's wrong in this UI?" --image screenshot.png --image mockup.jpg
 
 Invalid `--image` paths (unsupported type, missing, unreadable, or oversized) abort print mode with a non-zero exit.
 
+A directory mention (`@src/agent/`, with or without the trailing slash) inlines an indented tree of the directory instead of file contents — handy for giving the model project structure without pasting `tree` output. Listings honor `.starignore` and skip sensitive files, and are capped at 200 entries / 10 levels deep with a `... (truncated, N more entries)` marker when larger.
+
 Missing, binary, oversized (>100KB for text, >5MB for images), or sensitive files (`.env`, private keys) are skipped with a note. The chat history keeps your original `@path` text, so resumed sessions don't carry the injected bulk.
 
 ## .starignore
