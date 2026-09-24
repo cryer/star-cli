@@ -81,7 +81,7 @@ export function ConnectWizard({
     {
       value: "custom",
       label: "Custom",
-      description: "relay or any OpenAI/Anthropic-compatible endpoint",
+      description: "any OpenAI/Anthropic-compatible endpoint",
     },
   ];
 

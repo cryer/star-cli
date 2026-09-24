@@ -50,9 +50,9 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
 export const PROTOCOLS: Protocol[] = ["openai-compatible", "anthropic", "openai-responses"];
 
 export const PROTOCOL_DESCRIPTIONS: Record<Protocol, string> = {
-  "openai-compatible": "POST /chat/completions — most providers and relays",
+  "openai-compatible": "POST /chat/completions — most providers",
   anthropic: "Anthropic Messages API",
-  "openai-responses": "OpenAI Responses API (relays exposing only /responses)",
+  "openai-responses": "OpenAI Responses API (endpoints exposing only /responses)",
 };
 
 // Context window written into new [[models]] blocks; edit after saving when
