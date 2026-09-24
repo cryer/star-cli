@@ -22,6 +22,7 @@ import { type SessionMeta, SessionStore } from "./session/store";
 import { defaultTaskManager } from "./tasks/manager";
 import { createDefaultRegistry } from "./tools";
 import { hydrateSnapshots } from "./tools/fs/snapshots";
+import { loadTodos } from "./tools/todo";
 import { VERSION } from "./version";
 
 const SYSTEM_PROMPT = `You are Star CLI, an AI coding agent running in the user's terminal.
@@ -283,6 +284,9 @@ program
     }
     if (resumed) {
       await loop.loadMessages(resumed.messages);
+      // Resuming explicitly continues the project: rehydrate its todo list
+      // (fresh sessions leave it alone even when .star/todos.json exists).
+      await loadTodos(cwd);
       if (sessionStore) {
         hydrateSnapshots(await loadSessionSnapshots(sessionStore.dir));
       }

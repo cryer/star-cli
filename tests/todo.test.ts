@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TodoStore, createDefaultRegistry, createTodoTools } from "../src/tools";
 import type { TodoItem } from "../src/tools";
-import { parseTodoArgs, pendingTodoTitles } from "../src/tools/todo";
+import { loadTodos, parseTodoArgs, pendingTodoTitles, resetTodos } from "../src/tools/todo";
 import type { Tool, ToolContext, ToolResult } from "../src/tools/types";
 
 let dir: string;
@@ -57,13 +57,19 @@ describe("todo_write / todo_read", () => {
     expect(read.content).not.toContain("write docs");
   });
 
-  it("persists to .star/todos.json and a fresh store loads it", async () => {
+  it("persists to .star/todos.json, but a fresh store stays empty until load()", async () => {
     const raw = await readFile(path.join(dir, ".star", "todos.json"), "utf8");
     expect(JSON.parse(raw)).toEqual([{ id: 9, title: "only item", status: "pending" }]);
 
+    // A new session never resurrects the persisted list on its own…
     const fresh = new TodoStore();
     const freshTools = createTodoTools(fresh);
     const readTool = freshTools.find((t) => t.name === "todo_read");
+    const before = await readTool?.execute({}, ctx);
+    expect(before?.content).toBe("No todos.");
+
+    // …until the caller explicitly continues the project (session resume).
+    await fresh.load(dir);
     const res = await readTool?.execute({}, ctx);
     expect(res?.content).toContain("only item");
   });
@@ -84,12 +90,32 @@ describe("todo_write / todo_read", () => {
   });
 
   it("formats output with status symbols", async () => {
-    const res = await run("todo_write", { todos: sample });
+    await run("todo_write", { todos: sample });
+    const res = await run("todo_read", {});
     expect(res.content).toContain("[ ] 1. write docs");
     expect(res.content).toContain("[~] 2. fix bug");
     expect(res.content).toContain("(in_progress)");
     expect(res.content).toContain("[x] 3. ship it");
     expect(res.content).toContain("(done)");
+  });
+
+  it("confirms a todo_write compactly instead of echoing the list", async () => {
+    const res = await run("todo_write", { todos: sample });
+    expect(res.content).toBe("Todo list updated (1/3 done).");
+  });
+
+  it("resetTodos clears the in-memory list without touching the disk file", async () => {
+    const loaded = await loadTodos(dir);
+    expect(loaded.length).toBeGreaterThan(0);
+    const before = await readFile(path.join(dir, ".star", "todos.json"), "utf8");
+
+    resetTodos();
+    const [read] = createTodoTools().filter((t) => t.name === "todo_read");
+    const res = await read?.execute({}, ctx);
+    expect(res?.content).toBe("No todos.");
+
+    const after = await readFile(path.join(dir, ".star", "todos.json"), "utf8");
+    expect(after).toBe(before);
   });
 });
 

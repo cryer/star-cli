@@ -99,10 +99,17 @@ export function pendingTodoTitles(args: unknown): string[] {
 }
 
 // Load the persisted todo list for a cwd into the default store and return
-// it — used by the REPL to show todos that predate the current session.
+// it. Called only when the user explicitly continues a project (session
+// resume) — a fresh session never rehydrates stale todos on its own.
 export async function loadTodos(cwd: string): Promise<TodoItem[]> {
   await defaultStore.load(cwd);
   return defaultStore.list();
+}
+
+// Clear the in-memory list without touching .star/todos.json — a new session
+// starts clean even when a previous session's list is still on disk.
+export function resetTodos(): void {
+  defaultStore.replace([]);
 }
 
 export function createTodoTools(store: TodoStore = defaultStore): Tool[] {
@@ -117,10 +124,14 @@ export function createTodoTools(store: TodoStore = defaultStore): Tool[] {
       if (!parsed.success) {
         return { content: `Invalid todos: ${parsed.error.message}`, isError: true };
       }
-      await store.load(ctx.cwd);
       store.replace(parsed.data.todos);
       await store.save(ctx.cwd);
-      return { content: formatTodos(store.list()) };
+      const items = store.list();
+      const done = items.filter((it) => it.status === "done").length;
+      // The caller just supplied the list and the REPL mirrors it live, so a
+      // compact confirmation is enough — echoing the whole list back would be
+      // re-billed as prompt tokens on every following request.
+      return { content: `Todo list updated (${done}/${items.length} done).` };
     },
   };
 
@@ -129,8 +140,9 @@ export function createTodoTools(store: TodoStore = defaultStore): Tool[] {
     description: "Read the current todo list.",
     permission: "read",
     parameters: readSchema,
-    async execute(_args, ctx) {
-      await store.load(ctx.cwd);
+    async execute() {
+      // In-memory only: disk is hydrated explicitly on session resume, so a
+      // fresh session's todo_read never resurrects the previous list.
       return { content: formatTodos(store.list()) };
     },
   };

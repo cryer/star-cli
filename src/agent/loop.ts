@@ -63,6 +63,26 @@ const PENDING_WORK_PATTERN =
 const AUTO_CONTINUE_NUDGE =
   "[auto-continue] You ended your turn with words instead of actions. Do not describe or restate the plan — continue the task NOW by calling tools. Reply with text only if the task is already fully complete.";
 
+const EMPTY_REPLY_NUDGE =
+  "[auto-continue] Your previous reply was empty — no text and no tool calls. If the task is fully complete, reply with one short confirmation; otherwise continue NOW by calling tools.";
+
+// An empty reply the model finished deliberately (stop/content-filter) is not
+// a sick stream: resending the identical request mostly reproduces it, so
+// after one identical resend it is steered with a nudge (a changed request)
+// instead of burning the rest of the retry budget.
+function isSteerableEmptyFinish(finishReason: string | undefined): boolean {
+  return finishReason === "stop" || finishReason === "content-filter";
+}
+
+// Appended to a nudge that spends the last continuation budget, so the model
+// knows the next tool-less reply hands the turn back to the user instead of
+// being nudged again — its cue to wrap up or report what remains.
+function finalNudgeWarning(autoContinues: number, maxAutoContinues: number): string {
+  return autoContinues >= maxAutoContinues
+    ? " This is the final automatic continuation — if your next reply again has no tool calls, nudging stops and the turn is handed back to the user. Finish the work now or summarize what remains."
+    : "";
+}
+
 const COMPLETION_CHECK_TIMEOUT_MS = 30_000;
 
 // Keyword matching cannot catch every phrasing of "I am about to…", so a
@@ -437,6 +457,11 @@ export class AgentLoop {
       let text = "";
       const toolCalls: PendingToolCall[] = [];
       let failure: Error | null = null;
+      // Finish reason of the latest attempt: distinguishes a model that
+      // actively returned nothing (stop/content-filter — the same request
+      // tends to fail again) from a stream that died empty (idle-timeout,
+      // network — worth resending as-is).
+      let lastFinishReason: string | undefined;
       // One free retry per step, outside the transient-retry budget: when the
       // provider rejects the request for an oversized image (a 4xx), the
       // offending images are stripped from the history and the request resent.
@@ -446,7 +471,7 @@ export class AgentLoop {
         text = "";
         toolCalls.length = 0;
         failure = null;
-        let finishReason: string | undefined;
+        lastFinishReason = undefined;
         // Retried attempts get more patient stream timeouts (1x, 2x, 3x): a
         // relay that just timed out is overloaded, so re-asking with the same
         // deadline would hit the same wall.
@@ -463,7 +488,7 @@ export class AgentLoop {
               toolCalls.push({ id: event.id, name: event.name, args: event.args });
               yield event;
             } else if (event.type === "finish") {
-              finishReason = event.finishReason;
+              lastFinishReason = event.finishReason;
               yield event;
             } else if (event.type === "error") {
               // Held back until retries are exhausted, so the UI shows retry
@@ -498,12 +523,27 @@ export class AgentLoop {
         }
         if (failure && !isRetryableStreamError(failure)) break;
         if (attempt >= maxRetries) break;
+        // One identical resend covers flaky backends; when an empty reply was
+        // finished deliberately (stop/content-filter), the same request tends
+        // to fail again — break out and let the steering logic below change
+        // the model's input instead of burning the rest of the retry budget
+        // on identical re-sends, each of which bills the full prompt again.
+        if (
+          !failure &&
+          text.length === 0 &&
+          toolCalls.length === 0 &&
+          attempt >= 1 &&
+          isSteerableEmptyFinish(lastFinishReason)
+        )
+          break;
 
         yield {
           type: "retry",
           attempt: attempt + 2,
           maxAttempts: maxRetries + 1,
-          reason: failure ? failure.message : `empty response (finish: ${finishReason ?? "none"})`,
+          reason: failure
+            ? failure.message
+            : `empty response (finish: ${lastFinishReason ?? "none"})`,
         };
         if (!(await sleep(baseDelay * 2 ** attempt, signal))) return;
       }
@@ -513,6 +553,29 @@ export class AgentLoop {
         return;
       }
       if (text.length === 0 && toolCalls.length === 0) {
+        // Steering beats repeating: a nudge changes the model's input, which
+        // breaks a deterministic empty reply where an identical resend would
+        // not. Shares the auto-continue budget, so a model that keeps
+        // answering with nothing still stops.
+        if (
+          isSteerableEmptyFinish(lastFinishReason) &&
+          config.permissionMode !== "plan" &&
+          autoContinues < config.maxAutoContinues
+        ) {
+          autoContinues++;
+          lastWasNudge = true;
+          yield {
+            type: "notice",
+            message: `the model returned an empty reply; asking the model to continue (${autoContinues}/${config.maxAutoContinues}).`,
+          };
+          const nudge: CoreMessage = {
+            role: "user",
+            content: EMPTY_REPLY_NUDGE + finalNudgeWarning(autoContinues, config.maxAutoContinues),
+          };
+          this.messages.push(nudge);
+          await this.persist(nudge);
+          continue;
+        }
         yield {
           type: "error",
           error: new Error("The model returned an empty response after retries; ending the turn."),
@@ -573,16 +636,31 @@ export class AgentLoop {
             type: "notice",
             message: `${reason}; asking the model to continue (${autoContinues}/${config.maxAutoContinues}).`,
           };
-          const nudge: CoreMessage = { role: "user", content: nudgeText };
+          const nudge: CoreMessage = {
+            role: "user",
+            content: nudgeText + finalNudgeWarning(autoContinues, config.maxAutoContinues),
+          };
           this.messages.push(nudge);
           await this.persist(nudge);
           continue;
+        }
+        if (reason !== null && config.permissionMode !== "plan") {
+          // Never stop silently with work pending: say why the turn is ending
+          // and how to get it going again.
+          yield {
+            type: "notice",
+            message: `${reason}; auto-continue limit reached, handing the turn back — reply "continue" to keep going.`,
+          };
         }
         await this.runEventHooks("Stop");
         return;
       }
       lastWasNudge = false;
       usedToolsThisTurn = true;
+      // Tool calls are real progress: the budget guards against *consecutive*
+      // unproductive replies, so a working turn earns its nudges back and a
+      // long productive task is no longer cut off mid-way.
+      autoContinues = 0;
 
       const answered = new Set<string>();
       try {

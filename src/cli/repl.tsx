@@ -36,7 +36,7 @@ import {
   rewindToSnapshot,
   undoTurnSnapshots,
 } from "../tools/fs/snapshots";
-import { type TodoItem, formatTodos, loadTodos, parseTodoArgs } from "../tools/todo";
+import { type TodoItem, formatTodos, loadTodos, parseTodoArgs, resetTodos } from "../tools/todo";
 import { VERSION } from "../version";
 import type { ChatBackend } from "./backend";
 import { budgetState } from "./budget";
@@ -504,13 +504,17 @@ export function Repl({
     });
   }, [pushMessage]);
 
-  // Seed the todo panel from the on-disk list (previous sessions); live
-  // updates arrive via todo_write tool-call events during a turn.
+  // Restore the todo panel only when this session explicitly continues the
+  // project (started via -c/-r; /resume is handled in the resume callback).
+  // A fresh session starts with an empty list even when the project's
+  // .star/todos.json still holds a previous session's items.
+  const resumedAtStart = initialMessages !== undefined;
   useEffect(() => {
+    if (!resumedAtStart) return;
     loadTodos(cwd)
       .then(setTodos)
       .catch(() => {});
-  }, [cwd]);
+  }, [cwd, resumedAtStart]);
 
   useEffect(() => {
     const onUpdate = (task: TaskSnapshot) => {
@@ -725,6 +729,9 @@ export function Repl({
         return `Session not found: ${id}`;
       }
       await current.loadMessages(resumed.messages);
+      // Resuming is the explicit "continue this project" gesture: bring the
+      // persisted todo list back into the panel (and the model's todo_read).
+      setTodos(await loadTodos(cwd));
       const store = await SessionStore.open(resolvedId);
       if (store) {
         hydrateSnapshots(await loadSessionSnapshots(store.dir));
@@ -736,7 +743,7 @@ export function Repl({
       setUsageVersion((v) => v + 1);
       return `Resumed session ${resolvedId} (${resumed.messages.length} messages).`;
     },
-    [applyMessages],
+    [applyMessages, cwd],
   );
 
   const runStream = useCallback(
@@ -1162,6 +1169,9 @@ export function Repl({
         await current.loadMessages(first?.role === "system" ? [first] : []);
         clearSnapshots();
         redrawMessages([]);
+        // A new session no longer carries the project's persisted todo list.
+        resetTodos();
+        setTodos([]);
         usageRef.current = emptyUsage();
         budgetWarnedRef.current = false;
         budgetExceededRef.current = false;

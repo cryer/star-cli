@@ -173,6 +173,30 @@ describe("AgentLoop interrupt persistence", () => {
     expect((await store.messages()).every((m) => m.role !== "assistant")).toBe(true);
   });
 
+  it("ends promptly when the abort lands before the stream starts", async () => {
+    const store = await SessionStore.create(cwd, "test");
+    const loop = new AgentLoop({
+      model: hangingModel([]),
+      registry: createDefaultRegistry(),
+      config: makeConfig(),
+      cwd,
+      sessionStore: store,
+    });
+
+    // Aborting before stream() runs used to be missed by the downstream
+    // abort listener, hanging the turn until the idle watchdog fired.
+    const controller = new AbortController();
+    controller.abort();
+    const events: StreamEvent[] = [];
+    for await (const event of loop.stream("hi", controller.signal)) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([]);
+    expect(loop.getMessages().every((m) => m.role !== "assistant")).toBe(true);
+    expect((await store.messages()).every((m) => m.role !== "assistant")).toBe(true);
+  });
+
   it("closes streamed tool calls with synthetic results when aborted before execution", async () => {
     let executed = false;
     const spyTool: Tool = {

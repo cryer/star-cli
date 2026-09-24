@@ -52,6 +52,11 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
   const controller = new AbortController();
   const onAbort = () => controller.abort();
   opts.abortSignal?.addEventListener("abort", onAbort);
+  // Abort listeners only fire on future aborts: mirror an abort that already
+  // happened before this listener was registered (Esc landing while the loop
+  // was still preparing the request), or the request would run on until the
+  // idle watchdog despite having been cancelled.
+  if (opts.abortSignal?.aborted) controller.abort();
   const result = streamText({
     model: opts.model,
     messages: opts.messages,

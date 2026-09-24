@@ -689,6 +689,116 @@ describe("AgentLoop", () => {
     }
   });
 
+  it("steers an empty stop reply with a nudge instead of burning the retry budget", async () => {
+    const emptyStop: Chunk[] = [
+      {
+        type: "finish",
+        finishReason: "stop",
+        usage: { promptTokens: 5, completionTokens: 0 },
+      },
+    ];
+    const loop = makeLoop(
+      mockModel([
+        emptyStop,
+        emptyStop,
+        toolCallRound("call-1", "todo_read", {}),
+        textRound("全部完成。"),
+      ]),
+    );
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    // One identical resend covers flaky backends, then steering takes over.
+    expect(events.filter((e) => e.type === "retry")).toHaveLength(1);
+    expect(events.some((e) => e.type === "notice" && e.message.includes("empty reply"))).toBe(true);
+    expect(events.some((e) => e.type === "error")).toBe(false);
+    const nudge = loop
+      .getMessages()
+      .find(
+        (m) =>
+          m.role === "user" &&
+          typeof m.content === "string" &&
+          m.content.includes("previous reply was empty"),
+      );
+    expect(nudge).toBeDefined();
+  });
+
+  it("still errors on deliberate empty replies when nudging is disabled", async () => {
+    const emptyStop: Chunk[] = [
+      {
+        type: "finish",
+        finishReason: "stop",
+        usage: { promptTokens: 5, completionTokens: 0 },
+      },
+    ];
+    const loop = makeLoop(mockModel([emptyStop]), { streamMaxRetries: 1, maxAutoContinues: 0 });
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    expect(events.filter((e) => e.type === "retry")).toHaveLength(1);
+    expect(events.some((e) => e.type === "notice")).toBe(false);
+    const last = events[events.length - 1];
+    expect(last?.type).toBe("error");
+    if (last?.type === "error") {
+      expect(last.error.message).toContain("empty response");
+    }
+  });
+
+  it("stops resending a deliberate empty reply even when the nudge budget is exhausted", async () => {
+    let calls = 0;
+    const emptyStop: Chunk[] = [
+      {
+        type: "finish",
+        finishReason: "stop",
+        usage: { promptTokens: 5, completionTokens: 0 },
+      },
+    ];
+    const model = new MockLanguageModelV1({
+      doStream: async () => {
+        calls++;
+        return {
+          stream: convertArrayToReadableStream(emptyStop),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const loop = makeLoop(model, { streamMaxRetries: 3, maxAutoContinues: 0 });
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    // A deterministic empty stop fails again identically, so after one
+    // resend the loop stops — each further attempt would re-bill the full
+    // prompt without changing the outcome.
+    expect(calls).toBe(2);
+    expect(events.filter((e) => e.type === "retry")).toHaveLength(1);
+    expect(events[events.length - 1]?.type).toBe("error");
+  });
+
+  it("resets the auto-continue budget when the model makes progress between nudges", async () => {
+    const loop = makeLoop(
+      mockModel([
+        textRound("我接下来会做这件事。"),
+        toolCallRound("call-1", "todo_read", {}),
+        textRound("我接下来会做这件事。"),
+        toolCallRound("call-2", "todo_read", {}),
+        textRound("全部完成。"),
+      ]),
+      { maxAutoContinues: 1 },
+    );
+
+    const events = await collect(loop.stream("do it", new AbortController().signal));
+
+    // Progress between nudges earns the budget back: with a flat counter,
+    // maxAutoContinues 1 would have stopped the turn after the first nudge.
+    const continuations = events.filter(
+      (e) => e.type === "notice" && e.message.includes("asking the model to continue"),
+    );
+    expect(continuations).toHaveLength(2);
+    expect(
+      events.some((e) => e.type === "notice" && e.message.includes("handing the turn back")),
+    ).toBe(false);
+  });
+
   it("nudges the model to continue when it stops after announcing pending work", async () => {
     const loop = makeLoop(
       mockModel([
@@ -732,7 +842,12 @@ describe("AgentLoop", () => {
 
     const events = await collect(loop.stream("do it", new AbortController().signal));
 
-    expect(events.filter((e) => e.type === "notice")).toHaveLength(2);
+    const notices = events.filter((e) => e.type === "notice");
+    expect(
+      notices.filter((e) => e.type === "notice" && e.message.includes("asking the model")),
+    ).toHaveLength(2);
+    const last = notices[notices.length - 1];
+    expect(last?.type === "notice" && last.message.includes("handing the turn back")).toBe(true);
     expect(
       loop
         .getMessages()
@@ -795,17 +910,24 @@ describe("AgentLoop", () => {
 
     const events = await collect(loop.stream("convert", new AbortController().signal));
 
-    expect(events.filter((e) => e.type === "notice")).toHaveLength(1);
+    const notices = events.filter((e) => e.type === "notice");
     expect(
-      loop
-        .getMessages()
-        .filter(
-          (m) =>
-            m.role === "user" &&
-            typeof m.content === "string" &&
-            m.content.includes("auto-continue"),
-        ),
+      notices.filter((e) => e.type === "notice" && e.message.includes("asking the model")),
     ).toHaveLength(1);
+    const last = notices[notices.length - 1];
+    expect(last?.type === "notice" && last.message.includes("handing the turn back")).toBe(true);
+    const nudges = loop
+      .getMessages()
+      .filter(
+        (m) =>
+          m.role === "user" && typeof m.content === "string" && m.content.includes("auto-continue"),
+      );
+    expect(nudges).toHaveLength(1);
+    // The last-budget nudge warns the model no further nudge will follow.
+    expect(
+      typeof nudges[0]?.content === "string" &&
+        nudges[0].content.includes("final automatic continuation"),
+    ).toBe(true);
   });
 
   it("nudges when todo_write leaves open items at turn end", async () => {

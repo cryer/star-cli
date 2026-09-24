@@ -70,10 +70,13 @@ export const ConfigSchema = z.object({
   // Retries after a timeout/empty failure scale both stream timeouts up
   // (attempt number ×, capped at 3x) since the relay is likely overloaded.
   streamMaxRetries: z.number().int().min(0).default(3),
-  // How many times a turn may be nudged to continue when the model ends it
-  // with a text-only reply that announces pending work ("我将…", "I will…")
-  // instead of tool calls — a common premature-stop failure of weaker
-  // agentic models. Never fires in plan mode. 0 disables.
+  // How many consecutive unproductive replies may be nudged before the turn
+  // is handed back: a text-only reply that announces pending work ("我将…",
+  // "I will…") or answers a nudge with more words, or an empty reply the
+  // model finished deliberately (steered with a nudge after one identical
+  // resend instead of burning the stream retry budget). Tool calls reset the
+  // count, so a productive task keeps going; exhaustion surfaces a notice
+  // instead of stopping silently. Never fires in plan mode. 0 disables.
   maxAutoContinues: z.number().int().min(0).default(2),
   contextCompaction: z.enum(["summary", "truncate"]).default("summary"),
   // Optional per-session dollar budget; when set, the REPL stops the session
