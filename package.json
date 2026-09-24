@@ -11,21 +11,11 @@
   },
   "homepage": "https://github.com/cryer/star-cli#readme",
   "bugs": "https://github.com/cryer/star-cli/issues",
-  "keywords": [
-    "ai",
-    "agent",
-    "cli",
-    "llm",
-    "openai",
-    "anthropic",
-    "terminal"
-  ],
+  "keywords": ["ai", "agent", "cli", "llm", "openai", "anthropic", "terminal"],
   "bin": {
     "star": "./dist/main.js"
   },
-  "files": [
-    "dist"
-  ],
+  "files": ["dist"],
   "publishConfig": {
     "access": "public"
   },
