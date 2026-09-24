@@ -126,6 +126,29 @@ describe("ConnectWizard", () => {
     app.unmount();
   });
 
+  it("accepts a bracketed paste in the baseURL field and stays editable", async () => {
+    const onSave = vi.fn(async () => "saved ok");
+    const { app } = setup({ onSave });
+
+    await tick();
+    await typeText(app.stdin, DOWN, DOWN, DOWN, DOWN, ENTER); // Custom
+    await typeText(app.stdin, ENTER); // openai-compatible
+    expect(frame(app)).toContain("baseURL:");
+
+    await typeText(app.stdin, "\u001B[200~https://api.example.com/v11\u001B[201~");
+    const shown = frame(app);
+    expect(shown).toContain("https://api.example.com/v11");
+    expect(shown).not.toContain("200~");
+
+    // still editable after the paste: drop the stray digit, then submit
+    await typeText(app.stdin, "\x7f", ENTER);
+    await typeText(app.stdin, API_KEY, ENTER);
+    await typeText(app.stdin, "my-model", ENTER);
+    const summary = frame(app);
+    expect(summary).toContain("baseURL:   https://api.example.com/v1");
+    app.unmount();
+  });
+
   it("dedupes provider and model names against existing entries", async () => {
     const onSave = vi.fn(async () => "saved ok");
     const { app } = setup({
