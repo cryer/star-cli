@@ -67,14 +67,53 @@ describe("appendHistory", () => {
     expect(loadHistory()).toEqual(["same", "other", "same"]);
   });
 
-  it("rewrites to the last 500 entries once the file exceeds 1000 lines", () => {
-    const lines = Array.from({ length: 1001 }, (_, i) => `cmd${i}`);
+  it("keeps only the last 50 entries", () => {
+    const lines = Array.from({ length: 60 }, (_, i) => `cmd${i}`);
     fs.writeFileSync(historyFile, `${lines.join("\n")}\n`);
     appendHistory("new entry");
-    const result = loadHistory(2000);
-    expect(result).toHaveLength(500);
-    expect(result[0]).toBe("cmd502");
-    expect(result[499]).toBe("new entry");
+    const result = loadHistory();
+    expect(result).toHaveLength(50);
+    expect(result[0]).toBe("cmd11");
+    expect(result[49]).toBe("new entry");
+  });
+
+  it("trims an oversized file down to 50 entries on load", () => {
+    const lines = Array.from({ length: 80 }, (_, i) => `cmd${i}`);
+    fs.writeFileSync(historyFile, `${lines.join("\n")}\n`);
+    const result = loadHistory();
+    expect(result).toHaveLength(50);
+    expect(result[0]).toBe("cmd30");
+    expect(fs.readFileSync(historyFile, "utf8").trim().split("\n")).toHaveLength(50);
+  });
+
+  it("drops single-character junk lines on load and rewrites the file", () => {
+    fs.writeFileSync(historyFile, `ok\n${"x".repeat(500)}\nreal command\n`);
+    expect(loadHistory()).toEqual(["ok", "real command"]);
+    expect(fs.readFileSync(historyFile, "utf8")).toBe("ok\nreal command\n");
+  });
+
+  it("keeps short repeated-character entries", () => {
+    fs.writeFileSync(historyFile, "xxxxxxxx\n??\n");
+    expect(loadHistory()).toEqual(["xxxxxxxx", "??"]);
+  });
+
+  it("ignores junk entries made of one repeated character", () => {
+    appendHistory("x".repeat(1000));
+    appendHistory("real command");
+    expect(loadHistory()).toEqual(["real command"]);
+  });
+
+  it("never records slash commands", () => {
+    appendHistory("/q");
+    appendHistory("/model");
+    appendHistory("real command");
+    expect(loadHistory()).toEqual(["real command"]);
+  });
+
+  it("drops stored slash-command lines on load and rewrites the file", () => {
+    fs.writeFileSync(historyFile, "/q\nok\n/help\n");
+    expect(loadHistory()).toEqual(["ok"]);
+    expect(fs.readFileSync(historyFile, "utf8")).toBe("ok\n");
   });
 
   it("never throws when the history directory is not writable", () => {

@@ -8,6 +8,26 @@ export interface InputRefill {
   seq: number;
 }
 
+// Cursor position one visual line up/down (lines split on \n), keeping the
+// column clamped to the target line's length. Null when there is no line in
+// that direction.
+export function moveCursorLines(value: string, cursor: number, delta: -1 | 1): number | null {
+  const lineStart = value.lastIndexOf("\n", cursor - 1) + 1;
+  const col = cursor - lineStart;
+  if (delta === -1) {
+    if (lineStart === 0) return null;
+    const prevEnd = lineStart - 1;
+    const prevStart = value.lastIndexOf("\n", prevEnd - 1) + 1;
+    return prevStart + Math.min(col, prevEnd - prevStart);
+  }
+  const lineEndIndex = value.indexOf("\n", cursor);
+  if (lineEndIndex === -1) return null;
+  const nextStart = lineEndIndex + 1;
+  const nextEndIndex = value.indexOf("\n", nextStart);
+  const nextEnd = nextEndIndex === -1 ? value.length : nextEndIndex;
+  return nextStart + Math.min(col, nextEnd - nextStart);
+}
+
 interface InputBoxProps {
   isStreaming: boolean;
   disabled?: boolean;
@@ -47,6 +67,11 @@ export function InputBox({
   const refillSeqRef = useRef(0);
 
   const edit = (next: string, nextCursor: number) => {
+    // Editing a recalled history entry (or typing anything else) ends the
+    // pristine history-browsing state, so up/down go back to moving the
+    // cursor between lines instead of switching entries.
+    const idx = historyIndexRef.current;
+    if (idx !== null && next !== history[idx]) historyIndexRef.current = null;
     setValue(next);
     setCursor(Math.max(0, Math.min(nextCursor, next.length)));
     setHighlight(0);
@@ -132,13 +157,6 @@ export function InputBox({
       return;
     }
     if (key.return) {
-      // Shift+Enter inserts a newline where the terminal reports the
-      // modifier; Windows Terminal sends plain \r for both, so the
-      // backslash+Enter fallback below covers it.
-      if (key.shift) {
-        edit(`${value.slice(0, cursor)}\n${value.slice(cursor)}`, cursor + 1);
-        return;
-      }
       // Backslash immediately before the cursor + Enter: universal manual
       // newline (works on every terminal, Claude-Code style).
       if (value[cursor - 1] === "\\") {
@@ -147,7 +165,8 @@ export function InputBox({
       }
       const text = value.trim();
       if (text.length > 0) {
-        setHistory((prev) => [...prev, text]);
+        // Slash commands are ephemeral; keep them out of the history.
+        if (!text.startsWith("/")) setHistory((prev) => [...prev, text]);
         onSubmit(text);
       }
       edit("", 0);
@@ -155,9 +174,8 @@ export function InputBox({
       draftRef.current = "";
       return;
     }
-    // Ctrl+J arrives as a raw \n, Alt+Enter as ESC+CR (Ink strips the ESC),
-    // and kitty-protocol Shift+Enter as the unparsed sequence [13;Nu.
-    if (input === "\n" || input === "\r" || /^\[13;\d+u$/.test(input)) {
+    // Ctrl+J arrives as a raw \n and Alt+Enter as ESC+CR (Ink strips the ESC).
+    if (input === "\n" || input === "\r") {
       edit(`${value.slice(0, cursor)}\n${value.slice(cursor)}`, cursor + 1);
       return;
     }
@@ -169,34 +187,51 @@ export function InputBox({
         return;
       }
     } else if (key.upArrow) {
+      // Pristine history browsing beats suggestion cycling: a recalled
+      // slash command activates the suggestion menu and would otherwise
+      // trap the arrows in it.
+      if (historyIndexRef.current !== null) {
+        if (historyIndexRef.current > 0) {
+          historyIndexRef.current -= 1;
+          const entry = history[historyIndexRef.current] ?? "";
+          edit(entry, entry.length);
+        }
+        return;
+      }
       if (suggestionCount > 0) {
         setHighlight((prev) => (prev - 1 + suggestionCount) % suggestionCount);
         return;
       }
-      if (history.length === 0) return;
-      if (historyIndexRef.current === null) {
-        draftRef.current = value;
-        historyIndexRef.current = history.length - 1;
-      } else if (historyIndexRef.current > 0) {
-        historyIndexRef.current -= 1;
+      // Own (or edited) text: move the cursor between lines first.
+      const moved = moveCursorLines(value, cursor, -1);
+      if (moved !== null) {
+        setCursor(moved);
+        return;
       }
+      if (history.length === 0) return;
+      draftRef.current = value;
+      historyIndexRef.current = history.length - 1;
       const entry = history[historyIndexRef.current] ?? "";
       edit(entry, entry.length);
       return;
     } else if (key.downArrow) {
+      if (historyIndexRef.current !== null) {
+        if (historyIndexRef.current < history.length - 1) {
+          historyIndexRef.current += 1;
+          const entry = history[historyIndexRef.current] ?? "";
+          edit(entry, entry.length);
+        } else {
+          historyIndexRef.current = null;
+          edit(draftRef.current, draftRef.current.length);
+        }
+        return;
+      }
       if (suggestionCount > 0) {
         setHighlight((prev) => (prev + 1) % suggestionCount);
         return;
       }
-      if (historyIndexRef.current === null) return;
-      if (historyIndexRef.current < history.length - 1) {
-        historyIndexRef.current += 1;
-        const entry = history[historyIndexRef.current] ?? "";
-        edit(entry, entry.length);
-      } else {
-        historyIndexRef.current = null;
-        edit(draftRef.current, draftRef.current.length);
-      }
+      const moved = moveCursorLines(value, cursor, 1);
+      if (moved !== null) setCursor(moved);
       return;
     } else if (key.leftArrow) {
       setCursor((prev) => Math.max(0, prev - 1));

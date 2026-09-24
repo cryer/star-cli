@@ -21,6 +21,7 @@ const type = typeText;
 const LEFT = "\u001B[D";
 const RIGHT = "\u001B[C";
 const UP = "\u001B[A";
+const DOWN = "\u001B[B";
 const BACKSPACE = "\b";
 const DELETE = "\x7f";
 const CTRL_A = "\x01";
@@ -121,6 +122,66 @@ describe("InputBox", () => {
     app.unmount();
   });
 
+  it("up/down switch between pristine history entries and back to the draft", async () => {
+    const onSubmit = vi.fn();
+    const app = renderApp(
+      createElement(InputBox, {
+        isStreaming: false,
+        initialHistory: ["one", "two"],
+        onSubmit,
+        onInterrupt: () => {},
+        onExit: () => {},
+      }),
+    );
+    await type(app.stdin, UP);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("two");
+    await type(app.stdin, UP);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("one");
+    await type(app.stdin, DOWN);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("two");
+    await type(app.stdin, DOWN);
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).not.toContain("two");
+    expect(frame).not.toContain("one");
+    app.unmount();
+  });
+
+  it("editing a recalled entry ends history browsing; up recalls history again", async () => {
+    const onSubmit = vi.fn();
+    const app = renderApp(
+      createElement(InputBox, {
+        isStreaming: false,
+        initialHistory: ["one"],
+        onSubmit,
+        onInterrupt: () => {},
+        onExit: () => {},
+      }),
+    );
+    await type(app.stdin, UP, "x");
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("onex");
+    await type(app.stdin, UP);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("one");
+    await type(app.stdin, ENTER);
+    await submitted(onSubmit, "one");
+    app.unmount();
+  });
+
+  it("up/down move the cursor between lines of multi-line input", async () => {
+    const { app, onSubmit } = setup();
+    await type(app.stdin, "ab", "\n", "xyz");
+    await type(app.stdin, UP, "Z", ENTER);
+    await submitted(onSubmit, "abZ\nxyz");
+    app.unmount();
+  });
+
+  it("down restores the column clamped to the shorter line", async () => {
+    const { app, onSubmit } = setup();
+    await type(app.stdin, "ab", "\n", "xyz");
+    await type(app.stdin, UP, DOWN, "W", ENTER);
+    await submitted(onSubmit, "ab\nxyWz");
+    app.unmount();
+  });
+
   it("renders an inverse cursor at end of line", async () => {
     const { app } = setup();
     await type(app.stdin, "hi");
@@ -192,10 +253,39 @@ describe("InputBox", () => {
     app.unmount();
   });
 
-  it("kitty shift+enter sequence inserts a newline", async () => {
+  it("slash command submissions stay out of the history", async () => {
     const { app, onSubmit } = setup();
-    await type(app.stdin, "x", "\x1B[13;2u", "y", ENTER);
-    await submitted(onSubmit, "x\ny");
+    await type(app.stdin, "/q", ENTER);
+    await submitted(onSubmit, "/q");
+    await type(app.stdin, "real", ENTER);
+    await submitted(onSubmit, "real");
+    await type(app.stdin, UP);
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("real");
+    expect(frame).not.toContain("/q");
+    app.unmount();
+  });
+
+  it("history recall does not get stuck on a slash-command entry", async () => {
+    const onSubmit = vi.fn();
+    const app = renderApp(
+      createElement(InputBox, {
+        isStreaming: false,
+        commands: [{ name: "q", description: "quit" }],
+        initialHistory: ["real command", "/q"],
+        onSubmit,
+        onInterrupt: () => {},
+        onExit: () => {},
+      }),
+    );
+    await type(app.stdin, UP);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("/q");
+    // The recalled "/q" activates the slash suggestion menu, but up must
+    // keep navigating history instead of cycling the single suggestion.
+    await type(app.stdin, UP);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("real command");
+    await type(app.stdin, ENTER);
+    await submitted(onSubmit, "real command");
     app.unmount();
   });
 
