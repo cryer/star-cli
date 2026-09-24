@@ -1,4 +1,4 @@
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useInput, useStdout } from "ink";
 import { useEffect, useRef, useState } from "react";
 import { type SlashCommandHint, filterCommands } from "../commands/suggest";
 import { type PathSuggestion, extractAtToken, suggestPaths } from "../path-suggest";
@@ -55,12 +55,93 @@ interface ReverseSearch {
 export const PASTE_COLLAPSE_MIN_LINES = 10;
 export const PASTE_COLLAPSE_MIN_CHARS = 500;
 
+// Fallback for terminals without bracketed paste: after a collapse, input
+// arriving within this window right after the placeholder and looking
+// paste-like (has a newline or is at least this long) is folded into the
+// same paste entry instead of leaking into the editable text. The bounds
+// keep characters typed right after a paste from being swallowed.
+export const PASTE_MERGE_WINDOW_MS = 100;
+export const PASTE_MERGE_MIN_CHARS = 32;
+
 // Zero-width spaces delimit the placeholder token so the visible label
 // "[pasted #1: 12 lines]" typed by hand never collides with a real one.
 const PASTE_DELIM = "\u200B";
 const PASTE_TOKEN_RE = /\u200B\[pasted #(\d+): \d+ lines?\]\u200B/g;
-// Trailing bracketed-paste marker (the leading ESC is already stripped by Ink).
+// Bracketed-paste markers. Ink strips a chunk-leading ESC, so at the start
+// of an input event they show up without it ("[200~" / "[201~").
+const BRACKETED_PASTE_START = "\u001B[200~";
 const BRACKETED_PASTE_END = "\u001B[201~";
+// A tail that could be the beginning of a marker split across two input
+// events; held back until the next event resolves it.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matches an ESC-prefixed marker fragment
+const PARTIAL_BRACKET_RE = /\u001B(?:\[(?:2(?:0(?:[01])?)?)?)?$/;
+
+export interface BracketPasteState {
+  // Inside the bracket: everything is buffered until the end marker.
+  active: boolean;
+  buffer: string;
+  // Unresolved trailing bytes that may complete a marker in the next event.
+  pending: string;
+}
+
+export type PasteSegment = { type: "text" | "paste"; text: string };
+
+// Character-stream state machine over Ink's chunked input events: splits an
+// event into plain-text and complete-bracketed-paste segments, buffering
+// paste content (and marker fragments) across events. Null when the event
+// was fully absorbed into the buffer. Stray ESC bytes are stripped from
+// text segments so a marker fragment that never completes can never reach
+// the editable text.
+export function feedBracketedPaste(state: BracketPasteState, raw: string): PasteSegment[] | null {
+  let stream = state.pending + raw;
+  state.pending = "";
+  if (stream.startsWith("[200~") || stream.startsWith("[201~")) {
+    stream = `\u001B${stream}`;
+  }
+  const segments: PasteSegment[] = [];
+  let buffer = state.buffer;
+  let bracketed = state.active;
+  let i = 0;
+  const pushText = (text: string) => {
+    const cleaned = text.replaceAll("\u001B", "");
+    if (cleaned.length > 0) segments.push({ type: "text", text: cleaned });
+  };
+  const holdPartial = (tail: string) => {
+    const partial = PARTIAL_BRACKET_RE.exec(tail);
+    if (!partial) return tail;
+    state.pending = partial[0];
+    return tail.slice(0, tail.length - partial[0].length);
+  };
+  while (i < stream.length) {
+    if (bracketed) {
+      const idx = stream.indexOf(BRACKETED_PASTE_END, i);
+      if (idx === -1) {
+        buffer += holdPartial(stream.slice(i));
+        i = stream.length;
+      } else {
+        buffer += stream.slice(i, idx);
+        segments.push({ type: "paste", text: buffer });
+        buffer = "";
+        bracketed = false;
+        i = idx + BRACKETED_PASTE_END.length;
+      }
+    } else {
+      const idx = stream.indexOf(BRACKETED_PASTE_START, i);
+      if (idx === -1) {
+        pushText(holdPartial(stream.slice(i)));
+        i = stream.length;
+      } else {
+        pushText(stream.slice(i, idx));
+        buffer = "";
+        bracketed = true;
+        i = idx + BRACKETED_PASTE_START.length;
+      }
+    }
+  }
+  state.active = bracketed;
+  state.buffer = buffer;
+  return segments.length === 0 ? null : segments;
+}
 
 function pasteToken(id: number, lineCount: number): string {
   const label = `[pasted #${id}: ${lineCount} ${lineCount === 1 ? "line" : "lines"}]`;
@@ -113,6 +194,32 @@ export function InputBox({
   // Collapsed paste contents by placeholder id; expanded back on submit.
   const pastesRef = useRef(new Map<number, string>());
   const pasteSeqRef = useRef(0);
+  const bracketRef = useRef<BracketPasteState>({ active: false, buffer: "", pending: "" });
+  // The most recent placeholder: id, current token text, cursor position
+  // right after it, and when it was created/last merged into.
+  const lastPasteRef = useRef<{ id: number; token: string; cursor: number; time: number } | null>(
+    null,
+  );
+  // Ref mirrors of value/cursor: paste chunks drained from stdin in one go
+  // are handled by a stale render closure, so the paste paths must not rely
+  // on the state variables.
+  const valueRef = useRef(value);
+  const cursorRef = useRef(cursor);
+  useEffect(() => {
+    valueRef.current = value;
+    cursorRef.current = cursor;
+  });
+
+  // Ask the terminal to wrap pastes in bracketed-paste markers so a paste
+  // split into several stdin chunks can be reassembled reliably.
+  const { stdout } = useStdout();
+  useEffect(() => {
+    if (!stdout?.isTTY) return;
+    stdout.write("\u001B[?2004h");
+    return () => {
+      stdout.write("\u001B[?2004l");
+    };
+  }, [stdout]);
 
   const expandPastes = (raw: string) =>
     raw.replace(PASTE_TOKEN_RE, (match, id) => pastesRef.current.get(Number(id)) ?? match);
@@ -120,6 +227,11 @@ export function InputBox({
   const clearPastes = () => {
     pastesRef.current.clear();
     pasteSeqRef.current = 0;
+    lastPasteRef.current = null;
+    const bracket = bracketRef.current;
+    bracket.active = false;
+    bracket.buffer = "";
+    bracket.pending = "";
   };
 
   const edit = (next: string, nextCursor: number) => {
@@ -128,10 +240,94 @@ export function InputBox({
     // cursor between lines instead of switching entries.
     const idx = historyIndexRef.current;
     if (idx !== null && next !== history[idx]) historyIndexRef.current = null;
+    const clamped = Math.max(0, Math.min(nextCursor, next.length));
+    valueRef.current = next;
+    cursorRef.current = clamped;
     setValue(next);
-    setCursor(Math.max(0, Math.min(nextCursor, next.length)));
+    setCursor(clamped);
     setHighlight(0);
     setSuggestionsDismissed(false);
+  };
+
+  const normalizeNewlines = (text: string) => text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+  // Collapse text into a placeholder when it crosses the paste thresholds,
+  // otherwise insert it at the cursor.
+  const collapseOrInsert = (text: string) => {
+    const currentValue = valueRef.current;
+    const currentCursor = cursorRef.current;
+    const lineCount = text.split("\n").length;
+    if (lineCount >= PASTE_COLLAPSE_MIN_LINES || text.length >= PASTE_COLLAPSE_MIN_CHARS) {
+      const id = ++pasteSeqRef.current;
+      pastesRef.current.set(id, text);
+      const token = pasteToken(id, lineCount);
+      const nextCursor = currentCursor + token.length;
+      edit(
+        currentValue.slice(0, currentCursor) + token + currentValue.slice(currentCursor),
+        nextCursor,
+      );
+      lastPasteRef.current = { id, token, cursor: nextCursor, time: Date.now() };
+      return;
+    }
+    edit(
+      currentValue.slice(0, currentCursor) + text + currentValue.slice(currentCursor),
+      currentCursor + text.length,
+    );
+  };
+
+  const insertPlainText = (rawText: string) => {
+    const text = normalizeNewlines(rawText);
+    const currentValue = valueRef.current;
+    const currentCursor = cursorRef.current;
+    // Chunked paste without bracket markers: the first chunk collapsed and
+    // the terminal keeps feeding the rest. Fold follow-up chunks into the
+    // same paste entry (and refresh the placeholder's line count) instead
+    // of leaking them into the editable text.
+    const last = lastPasteRef.current;
+    if (
+      last &&
+      Date.now() - last.time <= PASTE_MERGE_WINDOW_MS &&
+      currentCursor === last.cursor &&
+      currentValue.endsWith(last.token, currentCursor) &&
+      (text.includes("\n") || text.length >= PASTE_MERGE_MIN_CHARS)
+    ) {
+      const merged = (pastesRef.current.get(last.id) ?? "") + text;
+      pastesRef.current.set(last.id, merged);
+      const token = pasteToken(last.id, merged.split("\n").length);
+      const start = currentCursor - last.token.length;
+      const nextCursor = start + token.length;
+      edit(currentValue.slice(0, start) + token + currentValue.slice(currentCursor), nextCursor);
+      lastPasteRef.current = { id: last.id, token, cursor: nextCursor, time: Date.now() };
+      return;
+    }
+    collapseOrInsert(text);
+  };
+
+  // End the bracket early (a key arrived mid-paste, or the terminal never
+  // sent the end marker): collapse whatever was buffered.
+  const flushBracketPaste = () => {
+    const bracket = bracketRef.current;
+    const content = bracket.buffer;
+    bracket.active = false;
+    bracket.buffer = "";
+    bracket.pending = "";
+    if (content.length > 0) collapseOrInsert(normalizeNewlines(content));
+  };
+
+  const applyPasteSegments = (segments: PasteSegment[]) => {
+    if (search) {
+      // A paste landing during reverse search extends the query.
+      const query = search.query + normalizeNewlines(segments.map((seg) => seg.text).join(""));
+      setSearch({ query, match: findHistoryMatch(history, query, history.length - 1, -1) });
+      return;
+    }
+    for (const seg of segments) {
+      if (seg.type === "paste") {
+        collapseOrInsert(normalizeNewlines(seg.text));
+      } else {
+        insertPlainText(seg.text);
+      }
+    }
   };
 
   useEffect(() => {
@@ -186,6 +382,31 @@ export function InputBox({
   };
 
   useInput((input, key) => {
+    // Bracketed-paste state machine, before every other key handling so a
+    // paste split across several input events is reassembled first and no
+    // key (Enter included) fires mid-paste.
+    if (!disabled) {
+      const bracket = bracketRef.current;
+      const feedable = input.length > 0 && !key.ctrl && !key.meta;
+      if (bracket.active && (!feedable || input === "\r")) {
+        flushBracketPaste();
+        // A bare \r mid-paste is swallowed, never a half-paste submit; any
+        // other key falls through and is handled normally below.
+        if (feedable) return;
+      }
+      if (feedable) {
+        const segments = feedBracketedPaste(bracket, input);
+        if (segments === null) return;
+        const only = segments.length === 1 ? segments[0] : undefined;
+        if (!only || only.type !== "text" || only.text !== input) {
+          applyPasteSegments(segments);
+          return;
+        }
+        // Untouched plain text: fall through to the normal handling.
+      } else {
+        bracket.pending = "";
+      }
+    }
     // Ctrl+R: bash-style reverse history search. Entering remembers the
     // current input so cancel (Esc/Ctrl+C/Ctrl+G) can restore it.
     if (key.ctrl && input === "r") {
@@ -278,11 +499,16 @@ export function InputBox({
     if (key.return) {
       // Backslash immediately before the cursor + Enter: universal manual
       // newline (works on every terminal, Claude-Code style).
-      if (value[cursor - 1] === "\\") {
-        edit(`${value.slice(0, cursor - 1)}\n${value.slice(cursor)}`, cursor);
+      const currentValue = valueRef.current;
+      const currentCursor = cursorRef.current;
+      if (currentValue[currentCursor - 1] === "\\") {
+        edit(
+          `${currentValue.slice(0, currentCursor - 1)}\n${currentValue.slice(currentCursor)}`,
+          currentCursor,
+        );
         return;
       }
-      const text = expandPastes(value).trim();
+      const text = expandPastes(currentValue).trim();
       if (text.length > 0) {
         // Slash commands are ephemeral; keep them out of the history.
         if (!text.startsWith("/")) setHistory((prev) => [...prev, text]);
@@ -397,7 +623,9 @@ export function InputBox({
       for (const match of value.matchAll(PASTE_TOKEN_RE)) {
         if (match.index + match[0].length === cursor) {
           remove = match[0].length;
-          pastesRef.current.delete(Number(match[1]));
+          const id = Number(match[1]);
+          pastesRef.current.delete(id);
+          if (lastPasteRef.current?.id === id) lastPasteRef.current = null;
           break;
         }
       }
@@ -405,23 +633,7 @@ export function InputBox({
       return;
     }
     if (input && !key.ctrl && !key.meta) {
-      // Pasted text may carry CRLF line endings; normalize so the value only
-      // ever holds \n and rendering stays consistent. Bracketed-paste markers
-      // are stripped when the terminal passes them through verbatim.
-      let text = input.replace(/^\[200~/, "");
-      if (text.endsWith(BRACKETED_PASTE_END)) {
-        text = text.slice(0, -BRACKETED_PASTE_END.length);
-      }
-      text = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-      const lineCount = text.split("\n").length;
-      if (lineCount >= PASTE_COLLAPSE_MIN_LINES || text.length >= PASTE_COLLAPSE_MIN_CHARS) {
-        const id = ++pasteSeqRef.current;
-        pastesRef.current.set(id, text);
-        const token = pasteToken(id, lineCount);
-        edit(value.slice(0, cursor) + token + value.slice(cursor), cursor + token.length);
-        return;
-      }
-      edit(value.slice(0, cursor) + text + value.slice(cursor), cursor + text.length);
+      insertPlainText(input);
     }
   });
 

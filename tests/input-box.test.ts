@@ -4,7 +4,7 @@ import { renderApp, stripAnsi, tick, typeText } from "./ink-harness";
 
 // FORCE_COLOR is set by ./ink-harness before ink is loaded (static import above),
 // so this dynamic import of InputBox (which imports ink) sees colored output.
-const { InputBox } = await import("../src/cli/components/InputBox");
+const { InputBox, PASTE_MERGE_WINDOW_MS } = await import("../src/cli/components/InputBox");
 
 function setup() {
   const onSubmit = vi.fn();
@@ -371,6 +371,135 @@ describe("InputBox", () => {
     await submitted(onSubmit, pasteLines(15));
     await type(app.stdin, pasteLines(11));
     expect(stripAnsi(app.lastFrame() ?? "")).toContain("[pasted #1: 11 lines]");
+    app.unmount();
+  });
+
+  const PASTE_START = "\u001B[200~";
+  const PASTE_END = "\u001B[201~";
+
+  it("merges a paste split across input events into one placeholder", async () => {
+    const { app, onSubmit } = setup();
+    const chunk1 = `${pasteLines(12, "chunk a")}\n`;
+    const chunk2 = `${pasteLines(6, "chunk b")}\n`;
+    const chunk3 = pasteLines(4, "chunk c");
+    await type(app.stdin, chunk1);
+    await type(app.stdin, chunk2);
+    await type(app.stdin, chunk3);
+    const merged = chunk1 + chunk2 + chunk3;
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain(`[pasted #1: ${merged.split("\n").length} lines]`);
+    expect(frame).not.toContain("[pasted #2");
+    expect(frame).not.toContain("chunk c 4");
+    await type(app.stdin, ENTER);
+    await submitted(onSubmit, merged);
+    app.unmount();
+  });
+
+  it("merges paste chunks delivered in a single stdin drain", async () => {
+    const { app, onSubmit } = setup();
+    const chunk1 = `${pasteLines(12, "drain a")}\n`;
+    const chunk2 = `${pasteLines(6, "drain b")}\n`;
+    const chunk3 = pasteLines(4, "drain c");
+    app.stdin.write(chunk1);
+    app.stdin.write(chunk2);
+    app.stdin.write(chunk3);
+    await tick();
+    await tick();
+    const merged = chunk1 + chunk2 + chunk3;
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("[pasted #1:");
+    expect(frame).not.toContain("[pasted #2");
+    expect(frame).not.toContain("drain c 4");
+    await type(app.stdin, ENTER);
+    await submitted(onSubmit, merged);
+    app.unmount();
+  });
+
+  it("collapses a bracketed paste that arrives in one event", async () => {
+    const { app, onSubmit } = setup();
+    const big = pasteLines(20);
+    await type(app.stdin, `${PASTE_START}${big}${PASTE_END}`);
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("[pasted #1: 20 lines]");
+    expect(frame).not.toContain("log line 20");
+    await type(app.stdin, ENTER);
+    await submitted(onSubmit, big);
+    app.unmount();
+  });
+
+  it("buffers a bracketed paste split across events and keeps trailing typed text", async () => {
+    const { app, onSubmit } = setup();
+    const big = pasteLines(30);
+    const cut = 100;
+    await type(app.stdin, PASTE_START);
+    await type(app.stdin, big.slice(0, cut));
+    await type(app.stdin, `${big.slice(cut)}${PASTE_END}`);
+    await type(app.stdin, "tail");
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("[pasted #1: 30 lines]");
+    expect(frame).toContain("tail");
+    await type(app.stdin, ENTER);
+    await submitted(onSubmit, `${big}tail`);
+    app.unmount();
+  });
+
+  it("recognizes a bracket end marker split across two events", async () => {
+    const { app, onSubmit } = setup();
+    const big = pasteLines(15);
+    await type(app.stdin, `${PASTE_START}${big}\u001B[20`);
+    await type(app.stdin, "1~");
+    await type(app.stdin, ENTER);
+    await submitted(onSubmit, big);
+    app.unmount();
+  });
+
+  it("flushes the buffered paste when a key arrives before the end marker", async () => {
+    const { app } = setup();
+    const big = pasteLines(15);
+    await type(app.stdin, `${PASTE_START}${big}`);
+    await type(app.stdin, LEFT);
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("[pasted #1: 15 lines]");
+    app.unmount();
+  });
+
+  it("inserts a small bracketed paste verbatim and normalizes CRLF", async () => {
+    const { app, onSubmit } = setup();
+    await type(app.stdin, `${PASTE_START}line1\r\nline2${PASTE_END}`);
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("line1");
+    expect(frame).toContain("line2");
+    expect(frame).not.toContain("[pasted");
+    await type(app.stdin, ENTER);
+    await submitted(onSubmit, "line1\nline2");
+    app.unmount();
+  });
+
+  it("does not swallow text typed right after a collapsed paste", async () => {
+    const { app, onSubmit } = setup();
+    const big = pasteLines(12);
+    await type(app.stdin, big);
+    await type(app.stdin, "note");
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("[pasted #1: 12 lines]");
+    expect(frame).toContain("note");
+    await type(app.stdin, ENTER);
+    await submitted(onSubmit, `${big}note`);
+    app.unmount();
+  });
+
+  it("does not merge a paste-like input after the merge window", async () => {
+    const { app, onSubmit } = setup();
+    const first = pasteLines(12);
+    const later = pasteLines(6, "later");
+    await type(app.stdin, first);
+    await new Promise((resolve) => setTimeout(resolve, PASTE_MERGE_WINDOW_MS + 100));
+    await type(app.stdin, later);
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("[pasted #1: 12 lines]");
+    expect(frame).toContain("later 6");
+    await type(app.stdin, ENTER);
+    await submitted(onSubmit, `${first}${later}`);
     app.unmount();
   });
 
