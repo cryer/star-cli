@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { parse } from "smol-toml";
+import { loadEnvFile } from "./env";
 import { globalConfigPath, projectConfigPath } from "./paths";
 import { type CliOverrides, ConfigSchema, type StarConfig } from "./schema";
 
@@ -52,6 +53,7 @@ function readTomlFileSync(filePath: string): PartialConfig {
 }
 
 export async function loadConfig(cwd: string, overrides?: CliOverrides): Promise<StarConfig> {
+  loadEnvFile();
   const global = await readTomlFile(globalConfigPath());
   const project = await readTomlFile(projectConfigPath(cwd));
   const merged = applyOverrides(mergeConfig(global, project), overrides);
@@ -59,6 +61,7 @@ export async function loadConfig(cwd: string, overrides?: CliOverrides): Promise
 }
 
 export function loadConfigSync(cwd: string, overrides?: CliOverrides): StarConfig {
+  loadEnvFile();
   const global = readTomlFileSync(globalConfigPath());
   const project = readTomlFileSync(projectConfigPath(cwd));
   const merged = applyOverrides(mergeConfig(global, project), overrides);

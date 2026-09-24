@@ -313,6 +313,21 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
   });
 
   register({
+    name: "connect",
+    description:
+      "Interactive wizard: add an LLM provider + model, store the key safely, and save to config",
+    usage: "/connect",
+    category: "Settings",
+    async run(_args, ctx) {
+      if (!ctx.connect) {
+        ctx.addSystemMessage("/connect: this context cannot run the interactive wizard.");
+        return;
+      }
+      ctx.addSystemMessage(await ctx.connect());
+    },
+  });
+
+  register({
     name: "init",
     description: "Generate an AGENTS.md for the current project",
     usage: "/init [force]",

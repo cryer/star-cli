@@ -31,6 +31,8 @@ export interface CommandContext {
   submitPrompt?(text: string): void | Promise<void>;
   // Starts a fresh session with a clean context (REPL-only).
   newSession?(): Promise<string>;
+  // Runs the interactive provider-onboarding wizard (REPL-only).
+  connect?(): Promise<string>;
   // Deletes stored sessions: current directory by default, every directory
   // when all is true. The live session is kept.
   clearSessions?(all: boolean): Promise<string>;

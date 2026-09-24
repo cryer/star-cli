@@ -17,6 +17,12 @@ export function userMemoryPath(): string {
   return path.join(starHome(), "MEMORY.md");
 }
 
+// dotenv-style API key store written by /connect; config.toml only references
+// the variable names (apiKeyEnv), never the keys themselves.
+export function envFilePath(): string {
+  return path.join(starHome(), ".env");
+}
+
 export function projectConfigPath(cwd: string): string {
   return path.join(cwd, ".star", "config.toml");
 }

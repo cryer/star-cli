@@ -2,6 +2,7 @@ import { Box, Text, render, useApp, useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type AgentTaskSnapshot, defaultAgentTasks } from "../agent/agent-tasks";
 import { AgentLoop } from "../agent/loop";
+import { globalConfigPath } from "../config/paths";
 import { addAllowRule, savePermissionMode } from "../config/save";
 import { type StarConfig, contextWindowTokens } from "../config/schema";
 import { estimateTokens } from "../context/tokens";
@@ -48,6 +49,12 @@ import {
 import { copyText, readClipboardImage } from "./clipboard";
 import { compactSession, exportSession } from "./commands/actions";
 import { registerBuiltinCommands } from "./commands/builtin";
+import {
+  type ConnectAnswers,
+  openConfigFile,
+  saveConnection,
+  saveDefaultModel,
+} from "./commands/connect";
 import { registerCustomCommands } from "./commands/custom";
 import { formatDoctorReport, runDoctor } from "./commands/doctor";
 import { initProject } from "./commands/init-project";
@@ -55,6 +62,7 @@ import { type CommandContext, CommandRegistry, parseSlashCommand } from "./comma
 import { formatCheckpointList, planRewind } from "./commands/rewind";
 import { didYouMeanSuffix } from "./commands/suggest";
 import { buildUndoDiffs } from "./commands/undo";
+import { ConnectWizard } from "./components/ConnectWizard";
 import { type ExitPlanDecision, ExitPlanPrompt } from "./components/ExitPlanPrompt";
 import { InputBox } from "./components/InputBox";
 import { type DisplayMessage, MessageList } from "./components/MessageList";
@@ -149,6 +157,10 @@ interface PendingPicker {
   resolve: (value: string | null) => void;
 }
 
+interface PendingConnect {
+  resolve: (message: string) => void;
+}
+
 const SESSION_PICKER_CAP = 20;
 
 // First user message of a stored session, collapsed to a single ~60-char
@@ -206,6 +218,7 @@ export function Repl({
   const [planApproval, setPlanApprovalState] = useState(false);
   const [pendingRewind, setPendingRewindState] = useState<PendingRewind | null>(null);
   const [picker, setPickerState] = useState<PendingPicker | null>(null);
+  const [pendingConnect, setPendingConnectState] = useState<PendingConnect | null>(null);
 
   const backendRef = useRef<ChatBackend>(backend);
   const nextIdRef = useRef(initialDisplay.length);
@@ -224,6 +237,7 @@ export function Repl({
   const planApprovalRef = useRef(false);
   const pendingRewindRef = useRef<PendingRewind | null>(null);
   const pickerRef = useRef<PendingPicker | null>(null);
+  const pendingConnectRef = useRef<PendingConnect | null>(null);
   const modelNameRef = useRef(model);
   // Live session store: /new swaps it mid-session, so callbacks must go
   // through the ref rather than the prop captured at mount.
@@ -327,6 +341,11 @@ export function Repl({
     setPickerState(p);
   }, []);
 
+  const setPendingConnect = useCallback((p: PendingConnect | null) => {
+    pendingConnectRef.current = p;
+    setPendingConnectState(p);
+  }, []);
+
   // One picker at a time; a second request while one is open resolves null
   // immediately so callers never hang.
   const showPicker = useCallback(
@@ -402,6 +421,39 @@ export function Repl({
     },
     [setPendingRewind],
   );
+
+  // Persists the wizard result: key into ~/.star-cli/.env (exported into this
+  // process so the model works without a restart), provider/model appended to
+  // config.toml, and both pushed into the live config so /model sees them.
+  const handleConnectSave = useCallback(
+    async (answers: ConnectAnswers): Promise<string> => {
+      const result = saveConnection(answers);
+      config.providers.push(result.provider);
+      config.models.push(result.model);
+      return `Saved provider "${result.provider.name}" and model "${result.model.name}" to ${result.configPath}; the key is stored as ${result.provider.apiKeyEnv} in ${result.envPath}.`;
+    },
+    [config],
+  );
+
+  const handleConnectOpenConfig = useCallback((): string => {
+    const file = globalConfigPath();
+    openConfigFile(file);
+    return `Opening ${file} with the system default app (open it manually if nothing showed up).`;
+  }, []);
+
+  const finishConnect = useCallback(
+    (message: string) => {
+      const p = pendingConnectRef.current;
+      if (!p) return;
+      setPendingConnect(null);
+      p.resolve(message);
+    },
+    [setPendingConnect],
+  );
+
+  const cancelConnect = useCallback(() => {
+    finishConnect("Connect cancelled — nothing was saved.");
+  }, [finishConnect]);
 
   // Session-scoped mode switch: mutates the shared config object the AgentLoop
   // reads on every tool call. Entering plan mode remembers the previous mode
@@ -559,6 +611,7 @@ export function Repl({
         pendingRef.current !== null ||
         planApprovalRef.current ||
         pendingRewindRef.current !== null ||
+        pendingConnectRef.current !== null ||
         pickerRef.current !== null;
       if (busy) {
         lastEscRef.current = null;
@@ -582,6 +635,7 @@ export function Repl({
         pendingRef.current ||
         planApprovalRef.current ||
         pendingRewindRef.current ||
+        pendingConnectRef.current ||
         pickerRef.current
       )
         return;
@@ -644,6 +698,16 @@ export function Repl({
       }
     },
     [config, cwd, attachConfirmHandler],
+  );
+
+  const handleConnectSetDefault = useCallback(
+    async (modelName: string): Promise<string> => {
+      saveDefaultModel(modelName);
+      config.defaultModel = modelName;
+      const switched = await switchModel(modelName);
+      return `Default model set to "${modelName}" (saved to config). ${switched}`;
+    },
+    [config, switchModel],
   );
 
   const resume = useCallback(
@@ -1104,6 +1168,12 @@ export function Repl({
         setUsageVersion((v) => v + 1);
         return `Started a new session (${store.id}) with a clean context.`;
       },
+      connect: async () => {
+        if (pendingConnectRef.current) return "The connect wizard is already open.";
+        return new Promise<string>((resolve) => {
+          setPendingConnect({ resolve });
+        });
+      },
       clearSessions: async (all) => {
         const currentId = sessionStoreRef.current?.id;
         const removed = await clearSessions(all ? undefined : cwd, currentId);
@@ -1329,6 +1399,7 @@ export function Repl({
     redrawMessages,
     applySessionMode,
     setPendingRewind,
+    setPendingConnect,
     showPicker,
   ]);
 
@@ -1489,6 +1560,17 @@ export function Repl({
           onCancel={handlePickerCancel}
         />
       )}
+      {pendingConnect && (
+        <ConnectWizard
+          existingProviderNames={config.providers.map((p) => p.name)}
+          existingModelNames={config.models.map((m) => m.name)}
+          onSave={handleConnectSave}
+          onSetDefault={handleConnectSetDefault}
+          onOpenConfig={handleConnectOpenConfig}
+          onFinish={finishConnect}
+          onCancel={cancelConnect}
+        />
+      )}
       {queueItems.map((item) => (
         <Text key={item.id} dimColor>
           queued: {item.text.length > 80 ? `${item.text.slice(0, 80)}…` : item.text}
@@ -1502,7 +1584,13 @@ export function Repl({
       <TodoPanel todos={todos} />
       <InputBox
         isStreaming={isStreaming}
-        disabled={pending !== null || planApproval || pendingRewind !== null || picker !== null}
+        disabled={
+          pending !== null ||
+          planApproval ||
+          pendingRewind !== null ||
+          pendingConnect !== null ||
+          picker !== null
+        }
         commands={commandHints}
         cwd={cwd}
         refill={inputRefill}

@@ -15,7 +15,7 @@ Multi-model LLM access · streaming terminal UI · tool calling · permission co
 
 </div>
 
-Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers · built-in fs / bash / web tools with a permission gate · git integration (`/commit` drafts Conventional Commits messages, `/diff` shows a colored working-tree diff, repo status injected into the system prompt) · plan mode with read-only research and plan approval · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume with auto-generated titles (`/resume`, `star -r`) · subagent delegation for focused subtasks · lifecycle hooks (`PreToolUse`/`PostToolUse`/`Stop` shell commands from config) · file-write snapshots with `/undo` and checkpoint rollback with `/rewind` · TODO task tracking · background shell tasks with status-bar visibility (`/tasks`) · terminal bell on long turns and background-task completion · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
+Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers with an interactive `/connect` onboarding wizard · built-in fs / bash / web tools with a permission gate · git integration (`/commit` drafts Conventional Commits messages, `/diff` shows a colored working-tree diff, repo status injected into the system prompt) · plan mode with read-only research and plan approval · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume with auto-generated titles (`/resume`, `star -r`) · subagent delegation for focused subtasks · lifecycle hooks (`PreToolUse`/`PostToolUse`/`Stop` shell commands from config) · file-write snapshots with `/undo` and checkpoint rollback with `/rewind` · TODO task tracking · background shell tasks with status-bar visibility (`/tasks`) · terminal bell on long turns and background-task completion · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
 
 ## Requirements
 
@@ -105,7 +105,10 @@ command = "biome check --write ."
 # timeoutSec = 30                      # optional per-hook timeout
 ```
 
-API keys resolve from the environment variable first (`apiKeyEnv`), then the `apiKey` field in the config file.
+API keys resolve from the environment variable first (`apiKeyEnv`), then the `apiKey` field in the config file. On startup Star CLI also loads `~/.star-cli/.env` (dotenv-style `KEY=VALUE` lines) into the environment without overwriting variables that are already set — this is where `/connect` stores the keys it collects, so `config.toml` only ever references the variable name, never the key itself.
+
+The fastest way to set up a provider is the `/connect` wizard inside the REPL: pick a preset (OpenAI, Anthropic, Kimi/Moonshot, DeepSeek) or a custom endpoint, paste the API key (masked while typing), name a model, and it appends the `[[providers]]`/`[[models]]` blocks to `config.toml` (existing content and comments preserved), writes the key to `~/.star-cli/.env` (as `STAR_API_KEY_<NAME>`, file mode 600 where the platform honors it), and optionally makes the new model the default — all without restarting.
+
 
 ## CLI flags
 
@@ -140,6 +143,7 @@ star --clear-sessions all     delete every stored session
 | `/usage` | token usage dashboard across all sessions: totals, per-day bar chart, per-model breakdown with $ estimate |
 | `/config` | show resolved config |
 | `/permission [mode]` | set the permission mode — no argument opens an interactive picker; `ask` / `auto` / `readonly` / `yolo` are saved to config, `plan` stays session-only |
+| `/connect` | interactive provider onboarding wizard: pick a preset or custom endpoint, paste the API key (masked), name a model — appends `[[providers]]`/`[[models]]` to the config, stores the key in `~/.star-cli/.env` (never in `config.toml`), and can set the new model as default + switch to it immediately |
 | `/plan` | toggle plan mode: read-only research, then approve the generated plan before it executes (session-only) |
 | `/memory [add <text>]` | show the long-term memory file (`~/.star-cli/MEMORY.md`, injected into every session's system prompt), or append a line to it — see [Long-term memory](#long-term-memory) |
 | `/compact` | compact conversation history to free up context |
