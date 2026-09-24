@@ -308,6 +308,50 @@ export class AgentLoop {
     scheduleSessionTitle(store, input, this.opts.model);
   }
 
+  // A user interrupt (Esc) ends the turn mid-stream, before the normal
+  // assistant-message persistence runs. Whatever text and tool calls already
+  // arrived are still persisted — the text marked with "[interrupted]" so the
+  // cut-off stays visible after a resume and the model can tell its reply was
+  // cut short — and streamed tool calls are closed with synthetic results so
+  // the stored history stays valid for the API.
+  private async *persistInterrupted(
+    text: string,
+    toolCalls: PendingToolCall[],
+  ): AsyncGenerator<StreamEvent> {
+    if (text.length === 0 && toolCalls.length === 0) return;
+    const assistantMessage: CoreMessage = {
+      role: "assistant",
+      content: [
+        ...(text ? [{ type: "text" as const, text: `${text} [interrupted]` }] : []),
+        ...toolCalls.map((call) => ({
+          type: "tool-call" as const,
+          toolCallId: call.id,
+          toolName: call.name,
+          args: call.args,
+        })),
+      ],
+    };
+    this.messages.push(assistantMessage);
+    await this.persist(assistantMessage);
+    for (const call of toolCalls) {
+      const content = "Tool execution interrupted by user.";
+      const synthetic: CoreMessage = {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result" as const,
+            toolCallId: call.id,
+            toolName: call.name,
+            result: content,
+          },
+        ],
+      };
+      this.messages.push(synthetic);
+      await this.persist(synthetic).catch(() => {});
+      yield { type: "tool-result", id: call.id, name: call.name, content, isError: true };
+    }
+  }
+
   async *stream(
     input: ChatInput,
     signal: AbortSignal,
@@ -415,11 +459,15 @@ export class AgentLoop {
           }
         } catch (error) {
           // A user-initiated abort is a normal end of the turn, not an error.
-          if (signal.aborted) return;
-          failure = error instanceof Error ? error : new Error(String(error));
+          if (!signal.aborted) {
+            failure = error instanceof Error ? error : new Error(String(error));
+          }
         }
 
-        if (signal.aborted) return;
+        if (signal.aborted) {
+          yield* this.persistInterrupted(text, toolCalls);
+          return;
+        }
         if (!failure && (text.length > 0 || toolCalls.length > 0)) break;
         if (failure && !isRetryableStreamError(failure)) break;
         if (attempt >= maxRetries) break;

@@ -252,9 +252,15 @@ export function Repl({
   );
 
   const pushMessage = useCallback(
-    (role: DisplayMessage["role"], text: string, note?: string, tight?: boolean) => {
+    (
+      role: DisplayMessage["role"],
+      text: string,
+      note?: string,
+      tight?: boolean,
+      interrupted?: boolean,
+    ) => {
       setMessages((prev) => {
-        const next = [...prev, { id: nextIdRef.current++, role, text, note, tight }];
+        const next = [...prev, { id: nextIdRef.current++, role, text, note, tight, interrupted }];
         messagesRef.current = next;
         return next;
       });
@@ -283,11 +289,11 @@ export function Repl({
   );
 
   const pushAssistantChunk = useCallback(
-    (text: string, tight: boolean) => {
+    (text: string, tight: boolean, interrupted = false) => {
       const role: DisplayMessage["role"] =
         turnChunksRef.current === 0 ? "assistant" : "assistant-cont";
       turnChunksRef.current += 1;
-      pushMessage(role, text, undefined, tight);
+      pushMessage(role, text, undefined, tight, interrupted);
     },
     [pushMessage],
   );
@@ -823,9 +829,11 @@ export function Repl({
           elapsedMs: Date.now() - turnStartedAt,
         });
         if (finalText.length > 0) {
-          pushAssistantChunk(`${finalText}${interrupted ? " [interrupted]" : ""}`, false);
+          pushAssistantChunk(finalText, false, interrupted);
         } else if (interrupted && turnChunksRef.current > 0) {
-          pushAssistantChunk("[interrupted]", false);
+          // The partial reply was already committed to history in pieces, so
+          // the marker lands as its own trailing chunk instead.
+          pushAssistantChunk("", false, true);
         }
         // Cards whose result event never arrived (e.g. hard abort) still get
         // flushed so no call vanishes from the transcript.

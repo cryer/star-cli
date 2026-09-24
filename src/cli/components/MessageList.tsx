@@ -14,6 +14,10 @@ export interface DisplayMessage {
   // tight = no bottom margin; used for mid-turn continuation chunks so a
   // long streamed answer committed in pieces still reads as one block.
   tight?: boolean;
+  // Set on the last chunk of a turn cut short with Esc: renders a dim
+  // "[interrupted]" marker after the text. Display-only — the session store
+  // carries its own marker (see AgentLoop.persistInterrupted).
+  interrupted?: boolean;
 }
 
 const roleStyles: Record<
@@ -26,6 +30,10 @@ const roleStyles: Record<
   tool: { label: "tool", color: "magenta" },
 };
 
+const interruptedMarker = (text: string) => (
+  <Text dimColor>{text.length > 0 ? " [interrupted]" : "[interrupted]"}</Text>
+);
+
 export const MessageList = memo(function MessageList({ messages }: { messages: DisplayMessage[] }) {
   return (
     <Static items={messages}>
@@ -34,7 +42,10 @@ export const MessageList = memo(function MessageList({ messages }: { messages: D
         if (message.role === "assistant-cont") {
           return (
             <Box key={message.id} flexDirection="column" marginBottom={marginBottom}>
-              <Text color="green">{message.text}</Text>
+              <Text color="green">
+                {message.text}
+                {message.interrupted && interruptedMarker(message.text)}
+              </Text>
             </Box>
           );
         }
@@ -44,7 +55,10 @@ export const MessageList = memo(function MessageList({ messages }: { messages: D
             <Text bold color={style.color}>
               {style.label}
             </Text>
-            <Text color={style.color}>{message.text}</Text>
+            <Text color={style.color}>
+              {message.text}
+              {message.interrupted && interruptedMarker(message.text)}
+            </Text>
             {message.diff && <DiffLines lines={message.diff} />}
             {message.note && <Text dimColor>{message.note}</Text>}
           </Box>
