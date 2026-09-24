@@ -2,10 +2,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { buildUndoDiffs } from "../src/cli/commands/undo";
 import { editFileTool } from "../src/tools/fs/edit";
 import {
   beginTurn,
   clearSnapshots,
+  listTurnSnapshots,
   snapshotCount,
   undoLastSnapshot,
   undoTurnSnapshots,
@@ -122,5 +124,87 @@ describe("turn-scoped snapshots", () => {
   it("returns an empty list when the turn made no file changes", async () => {
     const turn = beginTurn();
     expect(await undoTurnSnapshots(turn)).toEqual([]);
+  });
+});
+
+describe("undo preview (read-only)", () => {
+  it("listTurnSnapshots lists a turn's snapshots newest-first without mutating the stack", async () => {
+    writeFileSync(path.join(dir, "p.txt"), "v0");
+    const turnOne = beginTurn();
+    await writeFileTool.execute({ path: "p.txt", content: "v1" }, ctx());
+    const turnTwo = beginTurn();
+    await writeFileTool.execute({ path: "p.txt", content: "v2" }, ctx());
+    await writeFileTool.execute({ path: "q.txt", content: "new" }, ctx());
+
+    const listed = listTurnSnapshots(turnTwo);
+    expect(listed.map((s) => path.basename(s.path))).toEqual(["q.txt", "p.txt"]);
+    // read-only: the stack still holds every snapshot afterwards
+    expect(snapshotCount()).toBe(3);
+    expect(listTurnSnapshots(turnOne)).toHaveLength(1);
+    expect(listTurnSnapshots(9999)).toEqual([]);
+    expect(snapshotCount()).toBe(3);
+  });
+
+  it("buildUndoDiffs shows current content reverting to the pre-change content", async () => {
+    writeFileSync(path.join(dir, "d.txt"), "line one\nline two\n");
+    const turn = beginTurn();
+    await editFileTool.execute(
+      { path: "d.txt", old_string: "line two", new_string: "line 2" },
+      ctx(),
+    );
+
+    const diffs = await buildUndoDiffs(listTurnSnapshots(turn), dir);
+
+    expect(diffs).toHaveLength(1);
+    expect(diffs[0]?.label).toBe("d.txt");
+    const del = diffs[0]?.lines.filter((l) => l.kind === "del").map((l) => l.text);
+    const add = diffs[0]?.lines.filter((l) => l.kind === "add").map((l) => l.text);
+    expect(del).toContain("line 2");
+    expect(add).toContain("line two");
+    // still read-only: the file and the snapshot stack are untouched
+    expect(readFileSync(path.join(dir, "d.txt"), "utf8")).toBe("line one\nline 2\n");
+    expect(snapshotCount()).toBe(1);
+  });
+
+  it("buildUndoDiffs renders a turn-created file as all deletions", async () => {
+    const turn = beginTurn();
+    await writeFileTool.execute({ path: "fresh.txt", content: "alpha\nbeta\n" }, ctx());
+
+    const diffs = await buildUndoDiffs(listTurnSnapshots(turn), dir);
+
+    expect(diffs).toHaveLength(1);
+    const lines = diffs[0]?.lines ?? [];
+    expect(lines.every((l) => l.kind !== "add")).toBe(true);
+    expect(lines.filter((l) => l.kind === "del").map((l) => l.text)).toEqual(["alpha", "beta"]);
+    expect(existsSync(path.join(dir, "fresh.txt"))).toBe(true);
+  });
+
+  it("buildUndoDiffs renders a since-deleted file as all additions", async () => {
+    writeFileSync(path.join(dir, "gone.txt"), "old content\n");
+    const turn = beginTurn();
+    await editFileTool.execute(
+      { path: "gone.txt", old_string: "old content", new_string: "new content" },
+      ctx(),
+    );
+    rmSync(path.join(dir, "gone.txt"));
+
+    const diffs = await buildUndoDiffs(listTurnSnapshots(turn), dir);
+
+    const lines = diffs[0]?.lines ?? [];
+    expect(lines.every((l) => l.kind !== "del")).toBe(true);
+    expect(lines.filter((l) => l.kind === "add").map((l) => l.text)).toEqual(["old content"]);
+  });
+
+  it("buildUndoDiffs uses the tool label for files outside the cwd", async () => {
+    const outside = mkdtempSync(path.join(os.tmpdir(), "star-undo-outside-"));
+    try {
+      writeFileSync(path.join(outside, "x.txt"), "out0");
+      const turn = beginTurn();
+      await writeFileTool.execute({ path: path.join(outside, "x.txt"), content: "out1" }, ctx());
+      const diffs = await buildUndoDiffs(listTurnSnapshots(turn), dir);
+      expect(diffs[0]?.label).toBe(path.join(outside, "x.txt"));
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });

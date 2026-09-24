@@ -225,6 +225,19 @@ export class AgentLoop {
     this.turnMarkers = [];
   }
 
+  // Read-only counterpart of retractLastTurn: how many messages /undo would
+  // drop and which snapshot turn's file changes it would revert (undefined =
+  // no verified turn, so no file snapshots may be reverted). Mutates nothing,
+  // so the REPL can show the preview before the user confirms.
+  previewLastTurnRetraction(): { removed: number; turn?: number } {
+    const result = retractLastTurn([...this.messages]);
+    if (result.removed === 0) return { removed: 0 };
+    const userIndex = result.messages.length;
+    const last = this.turnMarkers[this.turnMarkers.length - 1];
+    const turn = last && last.userIndex === userIndex ? last.seq : undefined;
+    return { removed: result.removed, turn };
+  }
+
   // Drops the final user message and everything after it, and persists the
   // trimmed history so a later /resume does not bring the turn back.
   // `turn` is the retracted turn's snapshot seq when it could be verified

@@ -4,6 +4,7 @@ import { renderApp, stripAnsi, tick } from "./ink-harness";
 
 // Dynamic imports so ./ink-harness sets FORCE_COLOR before ink is loaded.
 const { MessageList } = await import("../src/cli/components/MessageList");
+const { RewindConfirmPrompt } = await import("../src/cli/components/RewindConfirmPrompt");
 const { StatusBar } = await import("../src/cli/components/StatusBar");
 const { StreamingMessage } = await import("../src/cli/components/StreamingMessage");
 const { ThinkingIndicator } = await import("../src/cli/components/ThinkingIndicator");
@@ -102,6 +103,69 @@ describe("StatusBar background tasks", () => {
     const frame = stripAnsi(app.lastFrame() ?? "");
     expect(frame).toContain("…");
     expect(frame).not.toContain(long);
+    app.unmount();
+  });
+});
+
+describe("RewindConfirmPrompt", () => {
+  const diff = {
+    label: "f.txt",
+    lines: [
+      { kind: "del" as const, text: "new line" },
+      { kind: "add" as const, text: "old line" },
+    ],
+  };
+
+  it("renders a custom title, summary, and diff preview", async () => {
+    const app = renderApp(
+      createElement(RewindConfirmPrompt, {
+        title: "Undo last turn",
+        confirmLabel: "undo",
+        summary: "2 message(s) will be retracted, 1 file change(s) reverted.",
+        diffs: [diff],
+        onDecision: () => {},
+      }),
+    );
+    await tick();
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("Undo last turn");
+    expect(frame).toContain("2 message(s) will be retracted");
+    expect(frame).toContain("f.txt");
+    expect(frame).toContain("new line");
+    expect(frame).toContain("old line");
+    expect(frame).toContain("[y] undo [n] cancel");
+    app.unmount();
+  });
+
+  it("keeps the rewind defaults", async () => {
+    const app = renderApp(
+      createElement(RewindConfirmPrompt, { summary: "s", onDecision: () => {} }),
+    );
+    await tick();
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("Rewind checkpoints");
+    expect(frame).toContain("[y] rewind [n] cancel");
+    app.unmount();
+  });
+
+  it("resolves no on n/Esc and yes on y", async () => {
+    const decisions: string[] = [];
+    const app = renderApp(
+      createElement(RewindConfirmPrompt, {
+        summary: "s",
+        onDecision: (d: string) => decisions.push(d),
+      }),
+    );
+    await tick();
+    app.stdin.write("n");
+    await tick();
+    expect(decisions).toEqual(["no"]);
+    app.stdin.write("y");
+    await tick();
+    expect(decisions).toEqual(["no", "yes"]);
+    app.stdin.write("\u001b");
+    await tick();
+    expect(decisions).toEqual(["no", "yes", "no"]);
     app.unmount();
   });
 });

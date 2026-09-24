@@ -195,6 +195,70 @@ describe("AgentLoop.retractLastTurn", () => {
   });
 });
 
+describe("AgentLoop.previewLastTurnRetraction", () => {
+  let cwd: string;
+
+  beforeEach(() => {
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), "star-undo-preview-"));
+    clearSnapshots();
+  });
+
+  afterEach(() => {
+    clearSnapshots();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("matches retractLastTurn without mutating messages or turn markers", async () => {
+    const loop = new AgentLoop({
+      model: mockModel([textRound("one"), textRound("two")]),
+      registry: createDefaultRegistry(),
+      config: makeConfig(),
+      cwd,
+      sessionStore: null,
+    });
+    await collect(loop.stream("first", new AbortController().signal));
+    await collect(loop.stream("second", new AbortController().signal));
+    const before = loop.getMessages();
+
+    const preview = loop.previewLastTurnRetraction();
+
+    expect(preview.removed).toBe(2);
+    expect(preview.turn).toBeDefined();
+    // Read-only: messages unchanged, and a repeated preview is identical.
+    expect(loop.getMessages()).toEqual(before);
+    expect(loop.previewLastTurnRetraction()).toEqual(preview);
+    // The real retraction agrees with the preview.
+    expect(await loop.retractLastTurn()).toEqual(preview);
+  });
+
+  it("reports no verified turn for wholesale-loaded history", async () => {
+    const loop = new AgentLoop({
+      model: null as never,
+      registry: null as never,
+      config: makeConfig(),
+      cwd,
+      sessionStore: null,
+    });
+    await loop.loadMessages([
+      { role: "user", content: "first" },
+      { role: "assistant", content: "one" },
+    ]);
+    expect(loop.previewLastTurnRetraction()).toEqual({ removed: 2, turn: undefined });
+    expect(loop.getMessages()).toHaveLength(2);
+  });
+
+  it("returns removed: 0 when there is nothing to retract", () => {
+    const loop = new AgentLoop({
+      model: null as never,
+      registry: null as never,
+      config: makeConfig(),
+      cwd,
+      sessionStore: null,
+    });
+    expect(loop.previewLastTurnRetraction()).toEqual({ removed: 0 });
+  });
+});
+
 describe("turn-scoped undo (end to end)", () => {
   let cwd: string;
 

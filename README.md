@@ -144,7 +144,7 @@ star --clear-sessions all     delete every stored session
 | `/memory [add <text>]` | show the long-term memory file (`~/.star-cli/MEMORY.md`, injected into every session's system prompt), or append a line to it — see [Long-term memory](#long-term-memory) |
 | `/compact` | compact conversation history to free up context |
 | `/export [path]` | export the current session to a Markdown file |
-| `/undo` | undo the last conversation turn: revert its file changes (write_file/edit_file) and retract its messages — earlier turns are never touched |
+| `/undo` | undo the last conversation turn: revert its file changes (write_file/edit_file) and retract its messages — earlier turns are never touched (previews the message count and per-file revert diffs, then asks for confirmation) |
 | `/rewind [n]` | list file-change checkpoints, or rewind to just before checkpoint `n`: restore every file changed since then and retract the matching conversation messages (asks for confirmation first) |
 | `/init [force]` | scan the project and generate an AGENTS.md (LLM-polished when a model is available) |
 | `/doctor` | environment self-check (Node, shell, config, API key status, sessions dir writability) |
@@ -280,7 +280,7 @@ The `subagent` tool (`exec` level, so it is hidden in plan mode and denied in re
 
 Permission modes: `ask` (reads allowed, writes/exec ask) · `auto` (everything allowed except the hard-denied rules above) · `readonly` (read-only) · `yolo` (allow everything, never ask — **all safety checks disabled**, use at your own risk) · `plan` (read-only research with a plan-approval flow, see above — session-only). Switch at runtime with `/permission` (persisted to the config file), per session with `/plan` or `Shift+Tab`, or at startup with `--permission-mode`. On top of the modes, the `[permissions]` config block holds persistent `allow` and `deny` rule lists (same `bash(npm test *)` syntax); deny rules are evaluated right after the hard safety rules and beat both `auto` mode and allow-rules, while `yolo` bypasses everything.
 
-Every successful `write_file` / `edit_file` first snapshots the file's previous content (in-memory, last 50 writes per session); `/undo` restores the most recent snapshot, deleting the file if it didn't exist before.
+Every successful `write_file` / `edit_file` first snapshots the file's previous content (in-memory, last 50 writes per session); `/undo` reverts the last turn's snapshots — restoring old content, or deleting files the turn created — but only after showing a preview of the retraction and per-file revert diffs and getting a `y`/`n` confirmation.
 
 ## Checkpoints and /rewind
 

@@ -154,6 +154,19 @@ export async function undoLastSnapshot(): Promise<string> {
   return revert(snapshot);
 }
 
+// Read-only view of the snapshots a turn-scoped /undo would revert, in the
+// same newest-first order undoTurnSnapshots applies them.
+export function listTurnSnapshots(turn: number): FileSnapshot[] {
+  return stack.filter((snapshot) => snapshot.turn === turn).reverse();
+}
+
+// Old content of a snapshot, reading the persisted content file when the
+// snapshot was hydrated from a resumed session. Exported for the read-only
+// /undo preview; revert() uses the same path.
+export function resolveSnapshotContent(snapshot: FileSnapshot): Promise<string | null> {
+  return resolveContent(snapshot);
+}
+
 // Reverts every snapshot created by the given turn, newest first, and leaves
 // snapshots from other turns untouched. Returns one message per reverted file.
 export async function undoTurnSnapshots(turn: number): Promise<string[]> {

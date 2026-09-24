@@ -30,6 +30,7 @@ import {
   clearSnapshots,
   hydrateSnapshots,
   listSnapshots,
+  listTurnSnapshots,
   rewindToSnapshot,
   undoTurnSnapshots,
 } from "../tools/fs/snapshots";
@@ -46,11 +47,16 @@ import { initProject } from "./commands/init-project";
 import { type CommandContext, CommandRegistry, parseSlashCommand } from "./commands/registry";
 import { formatCheckpointList, planRewind } from "./commands/rewind";
 import { didYouMeanSuffix } from "./commands/suggest";
+import { buildUndoDiffs } from "./commands/undo";
 import { type ExitPlanDecision, ExitPlanPrompt } from "./components/ExitPlanPrompt";
 import { InputBox } from "./components/InputBox";
 import { type DisplayMessage, MessageList } from "./components/MessageList";
 import { type PermissionDecision, PermissionPrompt } from "./components/PermissionPrompt";
-import { RewindConfirmPrompt, type RewindDecision } from "./components/RewindConfirmPrompt";
+import {
+  type ConfirmDiff,
+  RewindConfirmPrompt,
+  type RewindDecision,
+} from "./components/RewindConfirmPrompt";
 import { type SelectOption, SelectPrompt } from "./components/SelectPrompt";
 import { StatusBar } from "./components/StatusBar";
 import { StreamingMessage } from "./components/StreamingMessage";
@@ -122,6 +128,9 @@ interface PendingPermission {
 
 interface PendingRewind {
   summary: string;
+  title?: string;
+  confirmLabel?: string;
+  diffs?: ConfirmDiff[];
   resolve: (confirmed: boolean) => void;
 }
 
@@ -1120,6 +1129,30 @@ export function Repl({
         if (!(current instanceof AgentLoop)) {
           return "Nothing to undo.";
         }
+        // Read-only preview first: how many messages the retraction drops and
+        // which file reverts the turn's snapshots imply. Nothing is touched
+        // until the user confirms.
+        const preview = current.previewLastTurnRetraction();
+        if (preview.removed === 0) {
+          return "Nothing to undo (no conversation turn to retract).";
+        }
+        const diffs = await buildUndoDiffs(
+          preview.turn !== undefined ? listTurnSnapshots(preview.turn) : [],
+          cwd,
+        );
+        // Undo is destructive: confirm before touching files or history.
+        const confirmed = await new Promise<boolean>((resolve) => {
+          setPendingRewind({
+            title: "Undo last turn",
+            confirmLabel: "undo",
+            summary: `${preview.removed} message(s) will be retracted, ${diffs.length} file change(s) reverted.`,
+            diffs,
+            resolve,
+          });
+        });
+        if (!confirmed) {
+          return "Undo cancelled.";
+        }
         // Turn-scoped undo: retract the last turn's messages, and revert file
         // changes only when they provably belong to that same turn.
         const { removed, turn } = await current.retractLastTurn();
@@ -1412,7 +1445,13 @@ export function Repl({
       )}
       {planApproval && <ExitPlanPrompt onDecision={handlePlanDecision} />}
       {pendingRewind && (
-        <RewindConfirmPrompt summary={pendingRewind.summary} onDecision={handleRewindDecision} />
+        <RewindConfirmPrompt
+          summary={pendingRewind.summary}
+          title={pendingRewind.title}
+          confirmLabel={pendingRewind.confirmLabel}
+          diffs={pendingRewind.diffs}
+          onDecision={handleRewindDecision}
+        />
       )}
       {picker && (
         <SelectPrompt
