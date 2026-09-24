@@ -28,6 +28,27 @@ export function moveCursorLines(value: string, cursor: number, delta: -1 | 1): n
   return nextStart + Math.min(col, nextEnd - nextStart);
 }
 
+// Case-insensitive substring scan for reverse history search: step -1 walks
+// from `from` toward older entries, step 1 toward newer ones. Null on no match.
+export function findHistoryMatch(
+  history: string[],
+  query: string,
+  from: number,
+  step: -1 | 1,
+): number | null {
+  const needle = query.toLowerCase();
+  for (let i = from; i >= 0 && i < history.length; i += step) {
+    if ((history[i] ?? "").toLowerCase().includes(needle)) return i;
+  }
+  return null;
+}
+
+interface ReverseSearch {
+  query: string;
+  // Index into history of the currently shown match; null when nothing matches.
+  match: number | null;
+}
+
 interface InputBoxProps {
   isStreaming: boolean;
   disabled?: boolean;
@@ -65,6 +86,8 @@ export function InputBox({
   const historyIndexRef = useRef<number | null>(null);
   const draftRef = useRef("");
   const refillSeqRef = useRef(0);
+  const [search, setSearch] = useState<ReverseSearch | null>(null);
+  const searchSavedRef = useRef<{ value: string; cursor: number } | null>(null);
 
   const edit = (next: string, nextCursor: number) => {
     // Editing a recalled history entry (or typing anything else) ends the
@@ -85,7 +108,7 @@ export function InputBox({
     }
   });
 
-  const suggestionsEnabled = !isStreaming && !disabled && !suggestionsDismissed;
+  const suggestionsEnabled = !isStreaming && !disabled && !suggestionsDismissed && !search;
   const suggestions = suggestionsEnabled && commands ? filterCommands(value, commands) : [];
 
   useEffect(() => {
@@ -130,6 +153,68 @@ export function InputBox({
   };
 
   useInput((input, key) => {
+    // Ctrl+R: bash-style reverse history search. Entering remembers the
+    // current input so cancel (Esc/Ctrl+C/Ctrl+G) can restore it.
+    if (key.ctrl && input === "r") {
+      if (isStreaming || disabled) return;
+      if (search) {
+        // Already searching: jump to the next older match (stops at the end).
+        const from = (search.match ?? history.length) - 1;
+        const older = findHistoryMatch(history, search.query, from, -1);
+        if (older !== null) setSearch({ ...search, match: older });
+      } else {
+        searchSavedRef.current = { value, cursor };
+        setSearch({ query: "", match: history.length > 0 ? history.length - 1 : null });
+      }
+      return;
+    }
+    if (search) {
+      const exitSearch = (accept: boolean) => {
+        const saved = searchSavedRef.current;
+        setSearch(null);
+        searchSavedRef.current = null;
+        const match = accept && search.match !== null ? history[search.match] : undefined;
+        if (match !== undefined) {
+          edit(match, match.length);
+        } else if (saved) {
+          edit(saved.value, saved.cursor);
+        }
+      };
+      if (key.escape || (key.ctrl && (input === "c" || input === "g"))) {
+        exitSearch(false);
+        return;
+      }
+      if (key.return) {
+        exitSearch(true);
+        return;
+      }
+      // A query change always re-searches from the newest entry backwards.
+      const requery = (query: string) =>
+        setSearch({ query, match: findHistoryMatch(history, query, history.length - 1, -1) });
+      if (key.backspace || key.delete) {
+        requery(search.query.slice(0, -1));
+        return;
+      }
+      if (key.upArrow) {
+        const from = (search.match ?? history.length) - 1;
+        const older = findHistoryMatch(history, search.query, from, -1);
+        if (older !== null) setSearch({ ...search, match: older });
+        return;
+      }
+      if (key.downArrow) {
+        if (search.match !== null) {
+          const newer = findHistoryMatch(history, search.query, search.match + 1, 1);
+          if (newer !== null) setSearch({ ...search, match: newer });
+        }
+        return;
+      }
+      if (input && !key.ctrl && !key.meta) {
+        const text = input.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+        requery(search.query + text);
+      }
+      // Every other key (Tab, arrows, ctrl editing keys, ...) is ignored.
+      return;
+    }
     if (key.ctrl && input === "c") {
       if (isStreaming || disabled) {
         onInterrupt();
@@ -296,7 +381,13 @@ export function InputBox({
   // (ink's insertBeforeNode early-return), leaving the node measured at a
   // stale width so text spills over the border. A lone string child only
   // ever updates nodeValue, which always re-measures.
-  const styled = `\u001B[36m> \u001B[39m${before}\u001B[7m${cursorChar}\u001B[27m${tail}`;
+  const styled = search
+    ? `\u001B[36m(reverse-search) \u001B[39m'${search.query}': ${
+        search.match === null
+          ? "\u001B[2mno match\u001B[22m\u001B[7m \u001B[27m"
+          : `${history[search.match]}\u001B[7m \u001B[27m`
+      }`
+    : `\u001B[36m> \u001B[39m${before}\u001B[7m${cursorChar}\u001B[27m${tail}`;
 
   return (
     <Box flexDirection="column">

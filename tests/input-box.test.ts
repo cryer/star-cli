@@ -26,6 +26,9 @@ const BACKSPACE = "\b";
 const DELETE = "\x7f";
 const CTRL_A = "\x01";
 const CTRL_C = "\x03";
+const CTRL_G = "\x07";
+const CTRL_R = "\x12";
+const ESC = "\u001B";
 const CTRL_E = "\x05";
 const CTRL_K = "\x0b";
 const CTRL_U = "\x15";
@@ -313,6 +316,101 @@ describe("InputBox", () => {
     // The inverse cursor must directly follow the final typed character —
     // not stranded on its own line by independently-wrapping Text nodes.
     expect(frame).toContain("a\u001B[7m \u001B[27m");
+    app.unmount();
+  });
+
+  const setupSearch = (initialHistory: string[]) => {
+    const onSubmit = vi.fn();
+    const app = renderApp(
+      createElement(InputBox, {
+        isStreaming: false,
+        initialHistory,
+        onSubmit,
+        onInterrupt: () => {},
+        onExit: () => {},
+      }),
+    );
+    return { app, onSubmit };
+  };
+
+  it("ctrl+r enters reverse search and shows the newest match for the query", async () => {
+    const { app } = setupSearch(["git status", "npm test", "git commit"]);
+    await type(app.stdin, CTRL_R, "git");
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("(reverse-search) 'git': git commit");
+    app.unmount();
+  });
+
+  it("ctrl+r again jumps to the next older match, down returns to the newer one", async () => {
+    const { app } = setupSearch(["git status", "npm test", "git commit"]);
+    await type(app.stdin, CTRL_R, "git", CTRL_R);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("(reverse-search) 'git': git status");
+    await type(app.stdin, DOWN);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("(reverse-search) 'git': git commit");
+    app.unmount();
+  });
+
+  it("matching is case-insensitive and stops at the oldest match", async () => {
+    const { app } = setupSearch(["GIT status", "git commit"]);
+    await type(app.stdin, CTRL_R, "git", UP, UP);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("(reverse-search) 'git': GIT status");
+    app.unmount();
+  });
+
+  it("enter accepts the match into the input for editing and submitting", async () => {
+    const { app, onSubmit } = setupSearch(["git status", "git commit"]);
+    await type(app.stdin, CTRL_R, "git", ENTER);
+    expect(stripAnsi(app.lastFrame() ?? "")).not.toContain("(reverse-search)");
+    await type(app.stdin, "!", ENTER);
+    await submitted(onSubmit, "git commit!");
+    app.unmount();
+  });
+
+  it("shows 'no match' and enter with no match restores the original input", async () => {
+    const { app } = setupSearch(["one", "two"]);
+    await type(app.stdin, "keep", CTRL_R, "zzz");
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("no match");
+    await type(app.stdin, ENTER);
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).not.toContain("(reverse-search)");
+    expect(frame).toContain("keep");
+    app.unmount();
+  });
+
+  it("esc cancels the search and restores the original input and cursor", async () => {
+    const { app, onSubmit } = setupSearch(["one", "two"]);
+    await type(app.stdin, "draft", LEFT, LEFT, CTRL_R, "o", ESC);
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).not.toContain("(reverse-search)");
+    expect(frame).toContain("draft");
+    // Cursor was two from the end before the search; typing lands there.
+    await type(app.stdin, "X", ENTER);
+    await submitted(onSubmit, "draXft");
+    app.unmount();
+  });
+
+  it("ctrl+g also cancels the search", async () => {
+    const { app } = setupSearch(["one", "two"]);
+    await type(app.stdin, "draft", CTRL_R, "o", CTRL_G);
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).not.toContain("(reverse-search)");
+    expect(frame).toContain("draft");
+    app.unmount();
+  });
+
+  it("ctrl+r does not enter search mode while streaming", async () => {
+    const onSubmit = vi.fn();
+    const app = renderApp(
+      createElement(InputBox, {
+        isStreaming: true,
+        initialHistory: ["one"],
+        onSubmit,
+        onInterrupt: () => {},
+        onExit: () => {},
+      }),
+    );
+    await type(app.stdin, CTRL_R);
+    expect(stripAnsi(app.lastFrame() ?? "")).not.toContain("(reverse-search)");
     app.unmount();
   });
 });
