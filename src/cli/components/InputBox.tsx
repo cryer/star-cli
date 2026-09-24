@@ -49,6 +49,28 @@ interface ReverseSearch {
   match: number | null;
 }
 
+// A single input event inserting at least this many lines or characters is
+// treated as a paste and collapsed into a placeholder instead of expanding
+// into the editable text.
+export const PASTE_COLLAPSE_MIN_LINES = 10;
+export const PASTE_COLLAPSE_MIN_CHARS = 500;
+
+// Zero-width spaces delimit the placeholder token so the visible label
+// "[pasted #1: 12 lines]" typed by hand never collides with a real one.
+const PASTE_DELIM = "\u200B";
+const PASTE_TOKEN_RE = /\u200B\[pasted #(\d+): \d+ lines?\]\u200B/g;
+// Trailing bracketed-paste marker (the leading ESC is already stripped by Ink).
+const BRACKETED_PASTE_END = "\u001B[201~";
+
+function pasteToken(id: number, lineCount: number): string {
+  const label = `[pasted #${id}: ${lineCount} ${lineCount === 1 ? "line" : "lines"}]`;
+  return `${PASTE_DELIM}${label}${PASTE_DELIM}`;
+}
+
+function stylePasteTokens(segment: string): string {
+  return segment.replace(PASTE_TOKEN_RE, (match) => `\u001B[2m${match}\u001B[22m`);
+}
+
 interface InputBoxProps {
   isStreaming: boolean;
   disabled?: boolean;
@@ -88,6 +110,17 @@ export function InputBox({
   const refillSeqRef = useRef(0);
   const [search, setSearch] = useState<ReverseSearch | null>(null);
   const searchSavedRef = useRef<{ value: string; cursor: number } | null>(null);
+  // Collapsed paste contents by placeholder id; expanded back on submit.
+  const pastesRef = useRef(new Map<number, string>());
+  const pasteSeqRef = useRef(0);
+
+  const expandPastes = (raw: string) =>
+    raw.replace(PASTE_TOKEN_RE, (match, id) => pastesRef.current.get(Number(id)) ?? match);
+
+  const clearPastes = () => {
+    pastesRef.current.clear();
+    pasteSeqRef.current = 0;
+  };
 
   const edit = (next: string, nextCursor: number) => {
     // Editing a recalled history entry (or typing anything else) ends the
@@ -220,6 +253,7 @@ export function InputBox({
         onInterrupt();
       } else {
         edit("", 0);
+        clearPastes();
         historyIndexRef.current = null;
       }
       return;
@@ -248,13 +282,14 @@ export function InputBox({
         edit(`${value.slice(0, cursor - 1)}\n${value.slice(cursor)}`, cursor);
         return;
       }
-      const text = value.trim();
+      const text = expandPastes(value).trim();
       if (text.length > 0) {
         // Slash commands are ephemeral; keep them out of the history.
         if (!text.startsWith("/")) setHistory((prev) => [...prev, text]);
         onSubmit(text);
       }
       edit("", 0);
+      clearPastes();
       historyIndexRef.current = null;
       draftRef.current = "";
       return;
@@ -356,13 +391,36 @@ export function InputBox({
     // \x7f for Backspace, so both act as delete-before-cursor here.
     if (key.backspace || key.delete) {
       if (cursor === 0) return;
-      edit(value.slice(0, cursor - 1) + value.slice(cursor), cursor - 1);
+      // A placeholder immediately before the cursor is deleted as a unit so
+      // it can never be half-removed (which would break expansion).
+      let remove = 1;
+      for (const match of value.matchAll(PASTE_TOKEN_RE)) {
+        if (match.index + match[0].length === cursor) {
+          remove = match[0].length;
+          pastesRef.current.delete(Number(match[1]));
+          break;
+        }
+      }
+      edit(value.slice(0, cursor - remove) + value.slice(cursor), cursor - remove);
       return;
     }
     if (input && !key.ctrl && !key.meta) {
       // Pasted text may carry CRLF line endings; normalize so the value only
-      // ever holds \n and rendering stays consistent.
-      const text = input.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      // ever holds \n and rendering stays consistent. Bracketed-paste markers
+      // are stripped when the terminal passes them through verbatim.
+      let text = input.replace(/^\[200~/, "");
+      if (text.endsWith(BRACKETED_PASTE_END)) {
+        text = text.slice(0, -BRACKETED_PASTE_END.length);
+      }
+      text = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      const lineCount = text.split("\n").length;
+      if (lineCount >= PASTE_COLLAPSE_MIN_LINES || text.length >= PASTE_COLLAPSE_MIN_CHARS) {
+        const id = ++pasteSeqRef.current;
+        pastesRef.current.set(id, text);
+        const token = pasteToken(id, lineCount);
+        edit(value.slice(0, cursor) + token + value.slice(cursor), cursor + token.length);
+        return;
+      }
       edit(value.slice(0, cursor) + text + value.slice(cursor), cursor + text.length);
     }
   });
@@ -371,9 +429,10 @@ export function InputBox({
   const at = value[cursor];
   const after = value.slice(cursor + 1);
   // A newline under the cursor is shown as an inverse space at the line end,
-  // with the newline itself rendered after it.
-  const cursorChar = at === "\n" || at === undefined ? " " : at;
-  const tail = (at === "\n" ? "\n" : "") + after;
+  // with the newline itself rendered after it. The (invisible) paste-token
+  // delimiter also yields an inverse space so the cursor stays visible.
+  const cursorChar = at === "\n" || at === undefined || at === PASTE_DELIM ? " " : at;
+  const tail = (at === "\n" ? "\n" : "") + stylePasteTokens(after);
 
   // One pre-styled string in a single Text node. Sibling Text nodes wrap
   // independently (stranding the cursor on its own line on soft-wrap), and
@@ -387,7 +446,7 @@ export function InputBox({
           ? "\u001B[2mno match\u001B[22m\u001B[7m \u001B[27m"
           : `${history[search.match]}\u001B[7m \u001B[27m`
       }`
-    : `\u001B[36m> \u001B[39m${before}\u001B[7m${cursorChar}\u001B[27m${tail}`;
+    : `\u001B[36m> \u001B[39m${stylePasteTokens(before)}\u001B[7m${cursorChar}\u001B[27m${tail}`;
 
   return (
     <Box flexDirection="column">

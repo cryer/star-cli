@@ -299,6 +299,81 @@ describe("InputBox", () => {
     app.unmount();
   });
 
+  const pasteLines = (count: number, prefix = "log line") =>
+    Array.from({ length: count }, (_, i) => `${prefix} ${i + 1}`).join("\n");
+
+  it("collapses a large multi-line paste into a placeholder", async () => {
+    const { app } = setup();
+    await type(app.stdin, pasteLines(20));
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("[pasted #1: 20 lines]");
+    expect(frame).not.toContain("log line 20");
+    app.unmount();
+  });
+
+  it("expands the placeholder back to the full text on submit", async () => {
+    const { app, onSubmit } = setup();
+    const big = pasteLines(20);
+    await type(app.stdin, big, ENTER);
+    await submitted(onSubmit, big);
+    app.unmount();
+  });
+
+  it("collapses a long single-line paste by character count", async () => {
+    const { app, onSubmit } = setup();
+    const big = "x".repeat(600);
+    await type(app.stdin, big);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("[pasted #1: 1 line]");
+    await type(app.stdin, ENTER);
+    await submitted(onSubmit, big);
+    app.unmount();
+  });
+
+  it("inserts a small multi-line paste directly without a placeholder", async () => {
+    const { app, onSubmit } = setup();
+    await type(app.stdin, "line1\nline2");
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("line1");
+    expect(frame).toContain("line2");
+    expect(frame).not.toContain("[pasted");
+    await type(app.stdin, ENTER);
+    await submitted(onSubmit, "line1\nline2");
+    app.unmount();
+  });
+
+  it("backspace deletes a placeholder as a unit", async () => {
+    const { app, onSubmit } = setup();
+    await type(app.stdin, "x", pasteLines(20));
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("[pasted #1: 20 lines]");
+    await type(app.stdin, BACKSPACE);
+    expect(stripAnsi(app.lastFrame() ?? "")).not.toContain("[pasted");
+    await type(app.stdin, ENTER);
+    await submitted(onSubmit, "x");
+    app.unmount();
+  });
+
+  it("collapses multiple pastes and expands each on submit", async () => {
+    const { app, onSubmit } = setup();
+    const a = pasteLines(12, "alpha");
+    const b = pasteLines(12, "beta");
+    await type(app.stdin, a, " mid ", b);
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("[pasted #1: 12 lines]");
+    expect(frame).toContain("[pasted #2: 12 lines]");
+    await type(app.stdin, ENTER);
+    await submitted(onSubmit, `${a} mid ${b}`);
+    app.unmount();
+  });
+
+  it("resets placeholder numbering after a submit", async () => {
+    const { app, onSubmit } = setup();
+    await type(app.stdin, pasteLines(15), ENTER);
+    await submitted(onSubmit, pasteLines(15));
+    await type(app.stdin, pasteLines(11));
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("[pasted #1: 11 lines]");
+    app.unmount();
+  });
+
   it("renders multi-line input with the cursor after the last char", async () => {
     const { app } = setup();
     await type(app.stdin, "first", "\n", "sec");
