@@ -1,6 +1,8 @@
 import { type LanguageModel, type ToolSet, streamText } from "ai";
 import type { StreamEvent, TokenUsage } from "../core/events";
 import type { CoreMessage } from "../core/messages";
+import { debugStreamLog } from "./debug";
+import { summarizeStreamError } from "./retry";
 
 export interface StreamChatOptions {
   model: LanguageModel;
@@ -63,34 +65,70 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
     tools: opts.tools as ToolSet | undefined,
     abortSignal: controller.signal,
     maxTokens: opts.maxTokens,
+    experimental_providerMetadata: {
+      // Only the openai provider (our responses-protocol path) reads these;
+      // other providers ignore unknown metadata. The SDK's responses provider
+      // sends every tool with strict:true by default (strictSchemas), and
+      // strict mode requires every schema property to be required — our
+      // classic function-calling schemas use optional properties, which
+      // relays then reject. store:false matches how codex and opencode talk
+      // to relays (no server-side response storage).
+      openai: { strictSchemas: false, store: false },
+    },
   });
   const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
   const firstPartTimeoutMs = opts.firstPartTimeoutMs ?? DEFAULT_FIRST_PART_TIMEOUT_MS;
   const iterator = result.fullStream[Symbol.asyncIterator]();
   let seenPart = false;
+  let deltas = 0;
+  debugStreamLog("request", {
+    messages: opts.messages.length,
+    idleTimeoutMs,
+    firstPartTimeoutMs,
+  });
   try {
     for (;;) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const idle = new Promise<null>((resolve) => {
         timer = setTimeout(() => resolve(null), seenPart ? idleTimeoutMs : firstPartTimeoutMs);
       });
-      const next = await Promise.race([iterator.next(), idle]);
+      let next: Awaited<ReturnType<typeof iterator.next>> | null;
+      try {
+        next = await Promise.race([iterator.next(), idle]);
+      } catch (error) {
+        debugStreamLog("stream-throw", {
+          seenPart,
+          deltas,
+          error: error instanceof Error ? summarizeStreamError(error) : String(error),
+        });
+        throw error;
+      }
       if (timer) clearTimeout(timer);
       if (next === null) {
         // Note: the AI SDK holds the model's finish part until the source
         // stream closes, so a relay that stops sending without closing can
         // only be detected by this watchdog.
+        debugStreamLog("idle-timeout", {
+          seenPart,
+          deltas,
+          waitedMs: seenPart ? idleTimeoutMs : firstPartTimeoutMs,
+        });
         yield { type: "finish", finishReason: "idle-timeout", usage: undefined };
         return;
       }
-      if (next.done) return;
+      if (next.done) {
+        debugStreamLog("end", { seenPart, deltas });
+        return;
+      }
       seenPart = true;
       const part = next.value;
       switch (part.type) {
         case "text-delta":
+          deltas++;
           yield { type: "text-delta", text: part.textDelta };
           break;
         case "reasoning":
+          deltas++;
           yield { type: "reasoning", text: part.textDelta };
           break;
         case "tool-call":
@@ -106,6 +144,11 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
           const cache = extractCacheUsage(
             part.providerMetadata ?? part.experimental_providerMetadata,
           );
+          debugStreamLog("finish", {
+            finishReason: part.finishReason,
+            usage: part.usage,
+            deltas,
+          });
           yield {
             type: "finish",
             finishReason: part.finishReason,
@@ -120,14 +163,14 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
           };
           return;
         }
-        case "error":
+        case "error": {
           // A user-initiated abort surfacing as a stream error is not a failure.
           if (opts.abortSignal?.aborted) return;
-          yield {
-            type: "error",
-            error: part.error instanceof Error ? part.error : new Error(String(part.error)),
-          };
+          const error = part.error instanceof Error ? part.error : new Error(String(part.error));
+          debugStreamLog("error-part", { seenPart, deltas, error: summarizeStreamError(error) });
+          yield { type: "error", error };
           break;
+        }
       }
     }
   } finally {

@@ -23,7 +23,7 @@ type Chunk =
     }
   | {
       type: "finish";
-      finishReason: "stop" | "tool-calls";
+      finishReason: "stop" | "tool-calls" | "content-filter";
       usage: { promptTokens: number; completionTokens: number };
     };
 
@@ -689,7 +689,43 @@ describe("AgentLoop", () => {
     }
   });
 
-  it("steers an empty stop reply with a nudge instead of burning the retry budget", async () => {
+  it("steers an empty stop reply with a nudge after the retry budget is spent", async () => {
+    const emptyStop: Chunk[] = [
+      {
+        type: "finish",
+        finishReason: "stop",
+        usage: { promptTokens: 5, completionTokens: 0 },
+      },
+    ];
+    const loop = makeLoop(
+      mockModel([
+        emptyStop,
+        emptyStop,
+        toolCallRound("call-1", "todo_read", {}),
+        textRound("全部完成。"),
+      ]),
+      { streamMaxRetries: 1 },
+    );
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    // An empty stop is indistinguishable from a relay hiccup, so the full
+    // retry budget is spent on identical resends before steering takes over.
+    expect(events.filter((e) => e.type === "retry")).toHaveLength(1);
+    expect(events.some((e) => e.type === "notice" && e.message.includes("empty reply"))).toBe(true);
+    expect(events.some((e) => e.type === "error")).toBe(false);
+    const nudge = loop
+      .getMessages()
+      .find(
+        (m) =>
+          m.role === "user" &&
+          typeof m.content === "string" &&
+          m.content.includes("previous reply was empty"),
+      );
+    expect(nudge).toBeDefined();
+  });
+
+  it("recovers from an empty stop reply within the retry budget", async () => {
     const emptyStop: Chunk[] = [
       {
         type: "finish",
@@ -708,19 +744,109 @@ describe("AgentLoop", () => {
 
     const events = await collect(loop.stream("hi", new AbortController().signal));
 
-    // One identical resend covers flaky backends, then steering takes over.
-    expect(events.filter((e) => e.type === "retry")).toHaveLength(1);
-    expect(events.some((e) => e.type === "notice" && e.message.includes("empty reply"))).toBe(true);
+    // Both empty replies are resent (default budget of 3), the third attempt
+    // succeeds, and no nudge is ever injected into the history.
+    expect(events.filter((e) => e.type === "retry")).toHaveLength(2);
+    expect(events.some((e) => e.type === "notice" && e.message.includes("empty reply"))).toBe(
+      false,
+    );
     expect(events.some((e) => e.type === "error")).toBe(false);
-    const nudge = loop
-      .getMessages()
-      .find(
-        (m) =>
-          m.role === "user" &&
-          typeof m.content === "string" &&
-          m.content.includes("previous reply was empty"),
-      );
-    expect(nudge).toBeDefined();
+    expect(
+      loop
+        .getMessages()
+        .some(
+          (m) =>
+            m.role === "user" &&
+            typeof m.content === "string" &&
+            m.content.includes("previous reply was empty"),
+        ),
+    ).toBe(false);
+  });
+
+  it("steers a content-filtered empty reply after a single resend", async () => {
+    let calls = 0;
+    const filtered: Chunk[] = [
+      {
+        type: "finish",
+        finishReason: "content-filter",
+        usage: { promptTokens: 5, completionTokens: 0 },
+      },
+    ];
+    const model = new MockLanguageModelV1({
+      doStream: async () => {
+        calls++;
+        return {
+          stream: convertArrayToReadableStream(filtered),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const loop = makeLoop(model, { streamMaxRetries: 3, maxAutoContinues: 0 });
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    // The filter judged the request itself, so an identical resend reproduces
+    // the block deterministically: one confirmation resend, then stop.
+    expect(calls).toBe(2);
+    expect(events.filter((e) => e.type === "retry")).toHaveLength(1);
+    expect(events[events.length - 1]?.type).toBe("error");
+  });
+
+  it("steers an empty reply that billed completion tokens after a single resend", async () => {
+    let calls = 0;
+    // Reasoning-model relay signature: the model generated (reasoning)
+    // tokens — billed as completion tokens — but nothing visible arrived.
+    const reasoningOnly: Chunk[] = [
+      {
+        type: "finish",
+        finishReason: "stop",
+        usage: { promptTokens: 100, completionTokens: 240 },
+      },
+    ];
+    const model = new MockLanguageModelV1({
+      doStream: async () => {
+        calls++;
+        return {
+          stream: convertArrayToReadableStream(reasoningOnly),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const loop = makeLoop(model, { streamMaxRetries: 3, maxAutoContinues: 0 });
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    expect(calls).toBe(2);
+    expect(events.filter((e) => e.type === "retry")).toHaveLength(1);
+    expect(events[events.length - 1]?.type).toBe("error");
+  });
+
+  it("steers a reply with reasoning but no visible output after a single resend", async () => {
+    let calls = 0;
+    const reasoningOnly: Chunk[] = [
+      { type: "reasoning", textDelta: "thinking…" },
+      {
+        type: "finish",
+        finishReason: "stop",
+        usage: { promptTokens: 100, completionTokens: 240 },
+      },
+    ];
+    const model = new MockLanguageModelV1({
+      doStream: async () => {
+        calls++;
+        return {
+          stream: convertArrayToReadableStream(reasoningOnly),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const loop = makeLoop(model, { streamMaxRetries: 3, maxAutoContinues: 0 });
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    expect(calls).toBe(2);
+    expect(events.filter((e) => e.type === "retry")).toHaveLength(1);
+    expect(events[events.length - 1]?.type).toBe("error");
   });
 
   it("still errors on deliberate empty replies when nudging is disabled", async () => {
@@ -744,7 +870,7 @@ describe("AgentLoop", () => {
     }
   });
 
-  it("stops resending a deliberate empty reply even when the nudge budget is exhausted", async () => {
+  it("stops resending an endlessly empty reply once the retry budget is spent", async () => {
     let calls = 0;
     const emptyStop: Chunk[] = [
       {
@@ -766,11 +892,10 @@ describe("AgentLoop", () => {
 
     const events = await collect(loop.stream("hi", new AbortController().signal));
 
-    // A deterministic empty stop fails again identically, so after one
-    // resend the loop stops — each further attempt would re-bill the full
-    // prompt without changing the outcome.
-    expect(calls).toBe(2);
-    expect(events.filter((e) => e.type === "retry")).toHaveLength(1);
+    // Every attempt comes back empty, so the loop spends the whole retry
+    // budget (initial + 3 resends) and then errors out instead of nudging.
+    expect(calls).toBe(4);
+    expect(events.filter((e) => e.type === "retry")).toHaveLength(3);
     expect(events[events.length - 1]?.type).toBe("error");
   });
 

@@ -2,6 +2,10 @@ import { z } from "zod";
 
 export const ProviderConfigSchema = z.object({
   name: z.string(),
+  // openai-responses talks to the Responses API (/responses) instead of chat
+  // completions — the wire format codex uses, and the native API of
+  // reasoning-model relays that otherwise hide reasoning behind empty chat
+  // completions. streamChat sends strictSchemas:false + store:false with it.
   protocol: z
     .enum(["openai-compatible", "anthropic", "openai-responses"])
     .default("openai-compatible"),
@@ -67,14 +71,16 @@ export const ConfigSchema = z.object({
   // Extra attempts per model request when a stream fails transiently
   // (network error, 429/5xx, idle watchdog cutoff) or comes back empty, so a
   // relay hiccup does not silently end a half-finished turn. 0 disables.
-  // Retries after a timeout/empty failure scale both stream timeouts up
-  // (attempt number ×, capped at 3x) since the relay is likely overloaded.
+  // The wait between attempts honors Retry-After headers and otherwise backs
+  // off exponentially with jitter (llm/retry.ts); retries after a
+  // timeout/empty failure also scale both stream timeouts up (attempt number
+  // ×, capped at 3x) since the relay is likely overloaded.
   streamMaxRetries: z.number().int().min(0).default(3),
   // How many consecutive unproductive replies may be nudged before the turn
   // is handed back: a text-only reply that announces pending work ("我将…",
-  // "I will…") or answers a nudge with more words, or an empty reply the
-  // model finished deliberately (steered with a nudge after one identical
-  // resend instead of burning the stream retry budget). Tool calls reset the
+  // "I will…") or answers a nudge with more words, or an empty reply that
+  // survived the stream retry budget (steered with a nudge — a changed
+  // request — since identical resends already failed). Tool calls reset the
   // count, so a productive task keeps going; exhaustion surfaces a notice
   // instead of stopping silently. Never fires in plan mode. 0 disables.
   maxAutoContinues: z.number().int().min(0).default(2),

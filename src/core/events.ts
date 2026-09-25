@@ -17,8 +17,10 @@ export type StreamEvent =
   | { type: "tool-result"; id: string; name: string; content: string; isError?: boolean }
   | { type: "finish"; finishReason: string; usage?: TokenUsage }
   // A model request failed (or came back empty) and is about to be retried;
-  // `attempt`/`maxAttempts` are 1-based counts of the upcoming attempt.
-  | { type: "retry"; attempt: number; maxAttempts: number; reason: string }
+  // `attempt`/`maxAttempts` are 1-based counts of the upcoming attempt, and
+  // `delayMs` is how long the loop waits before it (Retry-After hints or
+  // jittered backoff).
+  | { type: "retry"; attempt: number; maxAttempts: number; delayMs?: number; reason: string }
   // Informational note worth surfacing in the UI (e.g. an auto-continue
   // nudge was injected because the model stopped with work announced).
   | { type: "notice"; message: string }

@@ -126,12 +126,18 @@ async function printMode(
         case "finish":
           usage.add(event.usage);
           break;
-        case "retry":
-          if (!json)
+        case "retry": {
+          if (!json) {
+            const wait =
+              event.delayMs !== undefined && event.delayMs >= 1000
+                ? ` in ${Math.round(event.delayMs / 1000)}s`
+                : "";
             process.stderr.write(
-              `\n[retry ${event.attempt}/${event.maxAttempts}] ${event.reason}\n`,
+              `\n[retry ${event.attempt}/${event.maxAttempts}${wait}] ${event.reason}\n`,
             );
+          }
           break;
+        }
         case "notice":
           if (!json) process.stderr.write(`\n[notice] ${event.message}\n`);
           break;

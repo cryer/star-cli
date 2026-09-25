@@ -4,6 +4,7 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModel } from "ai";
 import type { ProviderConfig, StarConfig } from "../config/schema";
 import { resolveModelConfig } from "./registry";
+import { createSseNormalizingFetch } from "./sse-normalize";
 
 function resolveApiKey(provider: ProviderConfig): string {
   const fromEnv = provider.apiKeyEnv ? process.env[provider.apiKeyEnv] : undefined;
@@ -46,6 +47,10 @@ export function createModel(config: StarConfig, modelName?: string): LanguageMod
         baseURL: provider.baseURL,
         apiKey,
         headers: provider.headers,
+        // Relays fronting the Responses API sometimes batch several JSON
+        // events into one SSE data payload, which the SDK's parser cannot
+        // read; normalize the wire format back to one event per data line.
+        fetch: createSseNormalizingFetch(),
       }).responses(modelConfig.model);
   }
 }

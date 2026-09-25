@@ -11,6 +11,7 @@ import {
   retractLastTurn,
 } from "../core/messages";
 import { type HookEvent, type HookRunResult, runHooks } from "../hooks/runner";
+import { computeRetryDelayMs, isRetryableStreamError, summarizeStreamError } from "../llm/retry";
 import { checkPermission } from "../permissions/gate";
 import type { PermissionRequest } from "../permissions/types";
 import type { SessionStore } from "../session/store";
@@ -66,10 +67,18 @@ const AUTO_CONTINUE_NUDGE =
 const EMPTY_REPLY_NUDGE =
   "[auto-continue] Your previous reply was empty — no text and no tool calls. If the task is fully complete, reply with one short confirmation; otherwise continue NOW by calling tools.";
 
-// An empty reply the model finished deliberately (stop/content-filter) is not
-// a sick stream: resending the identical request mostly reproduces it, so
-// after one identical resend it is steered with a nudge (a changed request)
-// instead of burning the rest of the retry budget.
+// An empty reply the model finished with a content filter reproduces on every
+// identical resend (the filter judged the request itself), so it gets one
+// confirmation resend before steering changes the input. Any other empty
+// finish — stop with no content, or no finish at all — is indistinguishable
+// from a relay hiccup and gets the full retry budget first.
+function isFilteredEmptyFinish(finishReason: string | undefined): boolean {
+  return finishReason === "content-filter";
+}
+
+// After the retry budget is spent, an empty reply finished deliberately
+// (stop/content-filter) is steered with a nudge; an empty finish of any other
+// kind (idle-timeout, none) means the stream stayed sick and errors out.
 function isSteerableEmptyFinish(finishReason: string | undefined): boolean {
   return finishReason === "stop" || finishReason === "content-filter";
 }
@@ -127,26 +136,6 @@ async function checkTaskComplete(
 }
 
 const STREAM_RETRY_BASE_DELAY_MS = 1000;
-
-// Client/validation failures will fail again identically, so only transient
-// conditions merit another attempt: rate limits, server errors, and
-// network/parse failures without a status.
-const NON_RETRYABLE_ERROR_NAMES = new Set([
-  "AI_NoSuchToolError",
-  "AI_InvalidToolArgumentsError",
-  "AI_InvalidPromptError",
-  "AI_NoSuchModelError",
-  "AI_LoadAPIKeyError",
-]);
-
-function isRetryableStreamError(error: Error): boolean {
-  if (NON_RETRYABLE_ERROR_NAMES.has(error.name)) return false;
-  const status = (error as { statusCode?: unknown }).statusCode;
-  if (typeof status === "number") {
-    return status === 408 || status === 429 || status >= 500;
-  }
-  return true;
-}
 
 // Resolves true after `ms`, or false immediately when the signal aborts.
 function sleep(ms: number, signal: AbortSignal): Promise<boolean> {
@@ -451,7 +440,9 @@ export class AgentLoop {
       // One model step, with retries: a transient stream failure (network
       // error, 429/5xx, idle watchdog cutoff) or an empty response must not
       // silently end a half-finished turn. Partial output from a failed
-      // attempt is discarded — only a clean attempt is persisted.
+      // attempt is discarded — only a clean attempt is persisted. The wait
+      // between attempts honors the server's Retry-After hint and otherwise
+      // backs off exponentially with jitter (see llm/retry.ts).
       const maxRetries = Math.max(0, config.streamMaxRetries);
       const baseDelay = this.opts.retryDelayMs ?? STREAM_RETRY_BASE_DELAY_MS;
       let text = "";
@@ -462,6 +453,15 @@ export class AgentLoop {
       // tends to fail again) from a stream that died empty (idle-timeout,
       // network — worth resending as-is).
       let lastFinishReason: string | undefined;
+      // Token usage of the latest attempt, and whether it streamed any
+      // reasoning: both mark an empty reply as *deliberate* generation
+      // rather than a relay hiccup. Reasoning-model relays that hide
+      // reasoning content return turns where the model thought but produced
+      // no visible output as an empty stop that still bills completion
+      // tokens — resending the identical request reproduces them, so they
+      // are steered early instead of spending the full retry budget.
+      let lastUsage: { completionTokens: number } | undefined;
+      let sawReasoning = false;
       // One free retry per step, outside the transient-retry budget: when the
       // provider rejects the request for an oversized image (a 4xx), the
       // offending images are stripped from the history and the request resent.
@@ -472,6 +472,8 @@ export class AgentLoop {
         toolCalls.length = 0;
         failure = null;
         lastFinishReason = undefined;
+        lastUsage = undefined;
+        sawReasoning = false;
         // Retried attempts get more patient stream timeouts (1x, 2x, 3x): a
         // relay that just timed out is overloaded, so re-asking with the same
         // deadline would hit the same wall.
@@ -483,12 +485,14 @@ export class AgentLoop {
               text += event.text;
               yield event;
             } else if (event.type === "reasoning") {
+              sawReasoning = true;
               yield event;
             } else if (event.type === "tool-call") {
               toolCalls.push({ id: event.id, name: event.name, args: event.args });
               yield event;
             } else if (event.type === "finish") {
               lastFinishReason = event.finishReason;
+              lastUsage = event.usage;
               yield event;
             } else if (event.type === "error") {
               // Held back until retries are exhausted, so the UI shows retry
@@ -523,29 +527,39 @@ export class AgentLoop {
         }
         if (failure && !isRetryableStreamError(failure)) break;
         if (attempt >= maxRetries) break;
-        // One identical resend covers flaky backends; when an empty reply was
-        // finished deliberately (stop/content-filter), the same request tends
-        // to fail again — break out and let the steering logic below change
-        // the model's input instead of burning the rest of the retry budget
-        // on identical re-sends, each of which bills the full prompt again.
+        // Deterministic-empty replies reproduce on identical resends, so
+        // after one confirmation resend break out and let the steering logic
+        // below change the model's input: a content filter judged the
+        // request itself; reasoning arrived but no visible output; or the
+        // finish billed completion tokens while nothing was delivered (the
+        // signature of a reasoning-only turn on a relay that hides
+        // reasoning). Any other empty reply — stop with no content and no
+        // tokens — is indistinguishable from a relay hiccup (an overloaded
+        // relay answers with an empty stub) and gets the full retry budget:
+        // a resend bills the same prompt a nudge would, without polluting
+        // the history.
         if (
           !failure &&
           text.length === 0 &&
           toolCalls.length === 0 &&
           attempt >= 1 &&
-          isSteerableEmptyFinish(lastFinishReason)
+          (isFilteredEmptyFinish(lastFinishReason) ||
+            sawReasoning ||
+            (lastUsage !== undefined && lastUsage.completionTokens > 0))
         )
           break;
 
+        const delayMs = computeRetryDelayMs(attempt, baseDelay, failure);
         yield {
           type: "retry",
           attempt: attempt + 2,
           maxAttempts: maxRetries + 1,
+          delayMs,
           reason: failure
-            ? failure.message
+            ? summarizeStreamError(failure)
             : `empty response (finish: ${lastFinishReason ?? "none"})`,
         };
-        if (!(await sleep(baseDelay * 2 ** attempt, signal))) return;
+        if (!(await sleep(delayMs, signal))) return;
       }
 
       if (failure) {

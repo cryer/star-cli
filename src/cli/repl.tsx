@@ -877,9 +877,13 @@ export function Repl({
               sessionStoreRef.current?.addUsage(event.usage).catch(() => {});
             }
           } else if (event.type === "retry") {
+            const wait =
+              event.delayMs !== undefined && event.delayMs >= 1000
+                ? ` in ${Math.round(event.delayMs / 1000)}s`
+                : "";
             pushMessage(
               "system",
-              `Request failed, retrying (${event.attempt}/${event.maxAttempts}): ${event.reason}`,
+              `Request failed, retrying (${event.attempt}/${event.maxAttempts})${wait}: ${event.reason}`,
             );
           } else if (event.type === "notice") {
             pushMessage("system", event.message);
