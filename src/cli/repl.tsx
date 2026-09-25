@@ -97,6 +97,7 @@ import { resolveMentions } from "./mentions";
 import { notifyBell } from "./notify";
 import { PromptQueue, type QueuedPrompt } from "./queue";
 import { executeShellBang } from "./shell-bang";
+import { toTerminalSafe } from "./terminal-text";
 import { type FlushState, nextFlush, startTicker } from "./ticker";
 import { checkForUpdate } from "./update-check";
 
@@ -162,6 +163,10 @@ interface PendingConnect {
 }
 
 const SESSION_PICKER_CAP = 20;
+
+// Queued typeahead entries rendered in the live region: a bounded count so
+// the live region can never grow to terminal height (see TodoPanel).
+const MAX_VISIBLE_QUEUED = 5;
 
 // First user message of a stored session, collapsed to a single ~60-char
 // line for the resume picker. null when there is nothing usable.
@@ -823,9 +828,9 @@ export function Repl({
                 );
               }
             }
-            streamedRef.current += event.text;
+            streamedRef.current += toTerminalSafe(event.text);
           } else if (event.type === "reasoning") {
-            reasoningRef.current += event.text;
+            reasoningRef.current += toTerminalSafe(event.text);
           } else if (event.type === "tool-call") {
             // Flush the text spoken before this call into history first, so the
             // card lands in chronological order instead of after the whole turn.
@@ -1585,11 +1590,14 @@ export function Repl({
           onCancel={cancelConnect}
         />
       )}
-      {queueItems.map((item) => (
+      {queueItems.slice(0, MAX_VISIBLE_QUEUED).map((item) => (
         <Text key={item.id} dimColor>
           queued: {item.text.length > 80 ? `${item.text.slice(0, 80)}…` : item.text}
         </Text>
       ))}
+      {queueItems.length > MAX_VISIBLE_QUEUED && (
+        <Text dimColor>… {queueItems.length - MAX_VISIBLE_QUEUED} more queued</Text>
+      )}
       {pendingImages.map((staged) => (
         <Text key={staged.id} dimColor>
           [image attached: {staged.image.path}]
