@@ -13,6 +13,8 @@ Multi-model LLM access · streaming terminal UI · tool calling · permission co
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](#requirements)
 
+**English** | [简体中文](README.zh-CN.md)
+
 </div>
 
 Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers with an interactive `/connect` onboarding wizard · built-in fs / bash / web tools with a permission gate · git integration (`/commit` drafts Conventional Commits messages, `/diff` shows a colored working-tree diff, repo status injected into the system prompt) · plan mode with read-only research and plan approval · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume with auto-generated titles (`/resume`, `star -r`) · subagent delegation for focused subtasks · lifecycle hooks (`PreToolUse`/`PostToolUse`/`Stop` shell commands from config) · file-write snapshots with `/undo` and checkpoint rollback with `/rewind` · TODO task tracking · background shell tasks with status-bar visibility (`/tasks`) · terminal bell on long turns and background-task completion · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
