@@ -55,6 +55,8 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     notifyBellThresholdSec: 10,
     permissions: { allow: [], deny: [] },
     hooks: [],
+    doomLoopThreshold: 3,
+    gitSnapshots: true,
     ...overrides,
   };
 }
@@ -103,6 +105,48 @@ describe("summarizeMessages", () => {
     });
 
     await expect(summarizeMessages([user("hi")], model)).rejects.toThrow("boom");
+  });
+
+  it("passes an abort signal to the model, with and without a caller signal", async () => {
+    const signals: (AbortSignal | undefined)[] = [];
+    const model = new MockLanguageModelV1({
+      doGenerate: async (options) => {
+        signals.push(options.abortSignal);
+        return generateRound("ok")(options);
+      },
+    });
+
+    await summarizeMessages([user("hi")], model, new AbortController().signal);
+    await summarizeMessages([user("hi")], model);
+
+    expect(signals[0]).toBeDefined();
+    expect(signals[0]?.aborted).toBe(false);
+    expect(signals[1]).toBeDefined();
+  });
+
+  it("rejects promptly when the caller aborts the summary", async () => {
+    const model = new MockLanguageModelV1({
+      doGenerate: async (options) => {
+        // Simulates a hung relay: only the abort signal resolves the call.
+        // The abort may have landed before this listener is registered.
+        await new Promise((_, reject) => {
+          if (options.abortSignal?.aborted) {
+            reject(new Error("aborted"));
+            return;
+          }
+          options.abortSignal?.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          });
+        });
+        return generateRound("unreachable")(options);
+      },
+    });
+    const controller = new AbortController();
+
+    const promise = summarizeMessages([user("hi")], model, controller.signal);
+    controller.abort();
+
+    await expect(promise).rejects.toThrow();
   });
 });
 

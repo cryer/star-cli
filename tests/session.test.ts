@@ -157,12 +157,18 @@ describe("SessionStore", () => {
     expect(meta?.id).toBe(store.id);
     expect(meta?.title).toBe("");
 
-    // messages remain resumable and appends heal the corrupt meta file
+    // messages remain resumable, and appends must never write the fallback
+    // meta back over the damaged file — that would wipe the real
+    // model/cwd/usage fields still sitting in it for good.
     expect(await reopened?.messages()).toEqual([{ role: "user", content: "hi" }]);
     await reopened?.append({ role: "assistant", content: "there" });
-    expect(JSON.parse(fs.readFileSync(path.join(store.dir, "meta.json"), "utf8")).id).toBe(
-      store.id,
-    );
+    await reopened?.setTitle("new title");
+    await reopened?.addUsage({ promptTokens: 1, completionTokens: 1, totalTokens: 2 });
+    expect(fs.readFileSync(path.join(store.dir, "meta.json"), "utf8")).toBe("{not json");
+    expect((await reopened?.messages())?.at(-1)).toEqual({
+      role: "assistant",
+      content: "there",
+    });
   });
 
   it("open still returns null when meta.json is missing entirely", async () => {
@@ -249,6 +255,45 @@ describe("SessionStore", () => {
       totalTokens: 15,
     });
     expect(await store.messages()).toHaveLength(2);
+  });
+  it("sweeps orphaned meta tmp files on open", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "user", content: "hi" });
+    const orphan = path.join(store.dir, "meta.json.tmp-99999-0");
+    fs.writeFileSync(orphan, "partial");
+
+    const reopened = await SessionStore.open(store.id);
+
+    expect(reopened).not.toBeNull();
+    expect(fs.existsSync(orphan)).toBe(false);
+  });
+
+  it("serializes concurrent checkpoint appends without losing records", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "user", content: "hi" });
+
+    await Promise.all(
+      Array.from({ length: 10 }, (_, i) =>
+        store.appendCheckpoint(
+          {
+            id: i + 1,
+            timestamp: Date.now(),
+            path: `f${i}.txt`,
+            existed: true,
+            toolName: "write_file",
+            turn: 1,
+            messageIndex: 0,
+          },
+          `content ${i}`,
+        ),
+      ),
+    );
+
+    const records = await store.listCheckpoints();
+    expect(records).toHaveLength(10);
+    expect(records.map((record) => record.id).sort((a, b) => a - b)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+    ]);
   });
 });
 

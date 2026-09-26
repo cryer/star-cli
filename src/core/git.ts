@@ -43,6 +43,29 @@ export function getGitSummary(cwd: string): GitSummary | null {
   return { branch, dirtyCount, recentCommits: log === "" ? [] : log.split("\n") };
 }
 
+const GIT_SUMMARY_CACHE_TTL_MS = 15_000;
+
+const gitSummaryCache = new Map<string, { at: number; summary: GitSummary | null }>();
+
+// System-prompt sync calls getGitSummary every turn — in every loop, including
+// each subagent's — and the underlying sync git calls block the event loop for
+// up to the 2s timeout, so summaries are cached per cwd for a short TTL.
+// Failures (null) are cached too: a plain directory rarely turns into a repo
+// within 15s, and re-probing one every turn is the common case outside repos.
+export function getGitSummaryCached(cwd: string): GitSummary | null {
+  const now = Date.now();
+  const hit = gitSummaryCache.get(cwd);
+  if (hit && now - hit.at < GIT_SUMMARY_CACHE_TTL_MS) return hit.summary;
+  const summary = getGitSummary(cwd);
+  gitSummaryCache.set(cwd, { at: now, summary });
+  return summary;
+}
+
+// Test hook: drop all cached summaries so the next call shells out to git.
+export function resetGitSummaryCache(): void {
+  gitSummaryCache.clear();
+}
+
 export function formatGitSummary(summary: GitSummary): string {
   const lines = [
     "Git context for the working directory (refreshed each turn):",

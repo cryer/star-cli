@@ -2,13 +2,14 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { defaultAgentTasks } from "../src/agent/agent-tasks";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AgentTaskManager, defaultAgentTasks } from "../src/agent/agent-tasks";
 import { AgentLoop, type AgentLoopOptions } from "../src/agent/loop";
 import type { StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
 import { createDefaultRegistry } from "../src/tools";
 import type { ToolRegistry } from "../src/tools";
+import { createTodoTools, resetTodos } from "../src/tools/todo";
 
 type Chunk =
   | { type: "text-delta"; textDelta: string }
@@ -84,6 +85,8 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     notifyBellThresholdSec: 10,
     permissions: { allow: [], deny: [] },
     hooks: [],
+    doomLoopThreshold: 3,
+    gitSnapshots: true,
     ...overrides,
   };
 }
@@ -183,6 +186,32 @@ describe("subagent tool", () => {
   it("does not register the subagent tool at max depth", () => {
     const { registry } = makeLoop(mockModel([textRound("hi")]), {}, { subagentDepth: 1 });
     expect(registry.get("subagent")).toBeUndefined();
+  });
+
+  it("gives a subagent loop an isolated in-memory todo store", async () => {
+    resetTodos();
+    try {
+      const { loop } = makeLoop(
+        mockModel([
+          toolCallRound("call-1", "todo_write", {
+            todos: [{ id: 1, title: "child task", status: "pending" }],
+          }),
+          textRound("done"),
+        ]),
+        {},
+        { subagentDepth: 1 },
+      );
+
+      await collect(loop.stream("work", new AbortController().signal));
+
+      // The write went to the child's own store: the process-wide default
+      // store behind the parent's todo tools stays empty.
+      const todoRead = createTodoTools().find((tool) => tool.name === "todo_read");
+      const result = await todoRead?.execute({}, { cwd });
+      expect(result?.content).toBe("No todos.");
+    } finally {
+      resetTodos();
+    }
   });
 
   it("surfaces a subagent failure as an error tool result", async () => {
@@ -292,5 +321,102 @@ describe("subagent tool", () => {
       expect(note.content).toContain('"file count"');
       expect(note.content).toContain("completed");
     }
+  });
+
+  it("reports an aborted synchronous subagent as an interrupted tool result", async () => {
+    let call = 0;
+    const model = new MockLanguageModelV1({
+      doStream: async (options) => {
+        call += 1;
+        if (call === 1) {
+          return {
+            stream: convertArrayToReadableStream(
+              toolCallRound("call-1", "subagent", { prompt: "do slow work" }),
+            ),
+            rawCall: { rawPrompt: null, rawSettings: {} },
+          };
+        }
+        // The child loop streams one partial chunk, then hangs until aborted.
+        return {
+          stream: new ReadableStream({
+            start(controller) {
+              controller.enqueue({ type: "text-delta", textDelta: "child partial" });
+              const cut = () => {
+                try {
+                  controller.enqueue({
+                    type: "error",
+                    error: new Error("This operation was aborted"),
+                  });
+                  controller.close();
+                } catch {
+                  // already closed
+                }
+              };
+              if (options.abortSignal?.aborted) cut();
+              else options.abortSignal?.addEventListener("abort", cut, { once: true });
+            },
+          }),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const { loop } = makeLoop(model);
+
+    const controller = new AbortController();
+    const events: StreamEvent[] = [];
+    for await (const event of loop.stream("run subtask", controller.signal)) {
+      events.push(event);
+      if (event.type === "tool-call") setTimeout(() => controller.abort(), 20);
+    }
+
+    const toolResult = events.find((e) => e.type === "tool-result" && e.name === "subagent");
+    expect(toolResult).toMatchObject({ isError: true });
+    if (toolResult?.type === "tool-result") {
+      expect(toolResult.content).toBe("Tool execution aborted.");
+    }
+  });
+});
+
+describe("AgentTaskManager record pruning", () => {
+  it("keeps only the 50 most recent notified finished records", async () => {
+    const manager = new AgentTaskManager();
+    for (let i = 0; i < 60; i++) {
+      manager.start(() => Promise.resolve(`result ${i}`), { prompt: `task ${i}` });
+    }
+    await vi.waitFor(() => {
+      expect(manager.runningCount()).toBe(0);
+    });
+    expect(manager.list()).toHaveLength(60);
+
+    const drained = manager.drainNotifications();
+    expect(drained).toHaveLength(60);
+
+    expect(manager.list()).toHaveLength(50);
+    expect(manager.get("agent-1")).toBeUndefined();
+    expect(manager.get("agent-11")).toBeDefined();
+    expect(manager.get("agent-60")?.result).toBe("result 59");
+  });
+
+  it("prefers dropping notified records when pruning", async () => {
+    const manager = new AgentTaskManager();
+    for (let i = 0; i < 60; i++) {
+      manager.start(() => Promise.resolve(`result ${i}`), { prompt: `task ${i}` });
+    }
+    await vi.waitFor(() => {
+      expect(manager.runningCount()).toBe(0);
+    });
+    manager.drainNotifications();
+
+    for (let i = 60; i < 70; i++) {
+      manager.start(() => Promise.resolve(`result ${i}`), { prompt: `task ${i}` });
+    }
+    await vi.waitFor(() => {
+      expect(manager.runningCount()).toBe(0);
+    });
+    manager.drainNotifications();
+
+    expect(manager.list()).toHaveLength(50);
+    expect(manager.get("agent-11")).toBeUndefined();
+    expect(manager.get("agent-61")).toBeDefined();
   });
 });

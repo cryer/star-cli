@@ -24,6 +24,11 @@ interface AgentTaskRecord {
   notified: boolean;
 }
 
+// Finished records are kept only so task_output can still answer for recent
+// tasks; once the parent has been notified they are dropped oldest-first
+// beyond this cap, so a long session cannot accumulate them without bound.
+const MAX_FINISHED_RECORDS = 50;
+
 // Background subagent runs, mirroring src/tasks/manager.ts for shell tasks.
 // The payload is a promise-producing closure (a child AgentLoop) instead of
 // a child process; finished results are drained into the parent loop's
@@ -104,7 +109,27 @@ export class AgentTaskManager extends EventEmitter {
         drained.push(this.snapshot(rec));
       }
     }
+    this.pruneFinished();
     return drained;
+  }
+
+  // Map iteration is insertion-ordered, so the first finished records met are
+  // the oldest. Never drop an un-notified record: the parent has not seen its
+  // result yet. Running records are untouched.
+  private pruneFinished(): void {
+    let finished = 0;
+    for (const rec of this.records.values()) {
+      if (rec.status !== "running") finished += 1;
+    }
+    let excess = finished - MAX_FINISHED_RECORDS;
+    if (excess <= 0) return;
+    for (const rec of this.records.values()) {
+      if (excess <= 0) return;
+      if (rec.status !== "running" && rec.notified) {
+        this.records.delete(rec.id);
+        excess -= 1;
+      }
+    }
   }
 
   private finish(rec: AgentTaskRecord, status: AgentTaskStatus, result: string): void {

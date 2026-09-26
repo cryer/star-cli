@@ -15,6 +15,9 @@ export const stripAnsi = (s: string) => s.replace(/\u001B\[[0-9;]*[a-zA-Z]/g, ""
 export interface InkApp {
   stdin: { write(s: string): void };
   lastFrame(): string | undefined;
+  // Every frame ever written, concatenated — for output that a later frame
+  // (e.g. the unmount repaint after exit()) overwrites in lastFrame().
+  allOutput(): string;
   unmount(): void;
 }
 
@@ -22,12 +25,14 @@ export interface InkApp {
 // its CJS entry does require("ink") and ink 5 is ESM with top-level await.
 export function renderApp(node: ReactElement): InkApp {
   let lastFrame: string | undefined;
+  let output = "";
   const stdout = new EventEmitter() as EventEmitter & {
     write(frame: string): void;
     columns: number;
   };
   stdout.write = (frame: string) => {
     lastFrame = frame;
+    output += frame;
   };
   stdout.columns = 100;
   const stdin = new Readable({ read() {} }) as Readable & {
@@ -47,6 +52,7 @@ export function renderApp(node: ReactElement): InkApp {
   return {
     stdin: { write: (s: string) => stdin.push(s) },
     lastFrame: () => lastFrame,
+    allOutput: () => output,
     unmount: () => instance.unmount(),
   };
 }

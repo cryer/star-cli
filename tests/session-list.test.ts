@@ -8,6 +8,7 @@ import {
   formatSessionEntries,
   listSessionEntries,
   resolveSessionId,
+  sessionPreview,
   shortSessionId,
 } from "../src/session/list";
 import { SessionStore } from "../src/session/store";
@@ -166,6 +167,50 @@ describe("resolveSessionId", () => {
     }
 
     expect(await resolveSessionId("abc123")).toBeNull();
+  });
+});
+
+describe("sessionPreview", () => {
+  it("returns the first user message text, whitespace-collapsed", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "system", content: "sys" });
+    await store.append({ role: "user", content: "  first\n  message\n\nwith lines  " });
+    await store.append({ role: "user", content: "second" });
+
+    expect(await sessionPreview(store.id)).toBe("first message with lines");
+  });
+
+  it("joins the text parts of a multipart user message", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({
+      role: "user",
+      content: [
+        { type: "text", text: "part one" },
+        { type: "text", text: "part two" },
+      ],
+    });
+
+    expect(await sessionPreview(store.id)).toBe("part one part two");
+  });
+
+  it("returns null when the session is missing or has no user text", async () => {
+    expect(await sessionPreview("no-such-session")).toBeNull();
+
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "assistant", content: "only assistant" });
+    expect(await sessionPreview(store.id)).toBeNull();
+  });
+
+  it("skips a first line cut off at the read boundary", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "user", content: "x".repeat(3000) });
+    await store.append({ role: "assistant", content: "reply" });
+
+    // A tiny budget cuts the huge first line mid-way; the partial line is
+    // skipped and no other user text follows within the budget.
+    expect(await sessionPreview(store.id, 128)).toBeNull();
+    const preview = await sessionPreview(store.id, 8192);
+    expect(preview).toHaveLength(3000);
   });
 });
 

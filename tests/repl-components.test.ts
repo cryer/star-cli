@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import { renderApp, stripAnsi, tick } from "./ink-harness";
 
 // Dynamic imports so ./ink-harness sets FORCE_COLOR before ink is loaded.
+const { DiffLines } = await import("../src/cli/components/DiffLines");
 const { MessageList } = await import("../src/cli/components/MessageList");
+const { PermissionPrompt } = await import("../src/cli/components/PermissionPrompt");
 const { RewindConfirmPrompt } = await import("../src/cli/components/RewindConfirmPrompt");
 const { StatusBar } = await import("../src/cli/components/StatusBar");
 const { StreamingMessage } = await import("../src/cli/components/StreamingMessage");
@@ -137,6 +139,97 @@ describe("StatusBar cache field", () => {
     const frame = stripAnsi(app.lastFrame() ?? "");
     expect(frame).toContain("cache: 42%");
     expect(frame).not.toContain("Not provided");
+    app.unmount();
+  });
+});
+
+describe("PermissionPrompt bash display", () => {
+  it("shows long bash commands in full instead of truncating the tail", async () => {
+    const command = `echo start && ${"x".repeat(200)} && echo tail-marker`;
+    const app = renderApp(
+      createElement(PermissionPrompt, {
+        request: { toolName: "bash", args: { command }, level: "exec" as const },
+        onDecision: () => {},
+      }),
+    );
+    await tick();
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("echo start");
+    expect(frame).toContain("tail-marker");
+    expect(frame).not.toContain("…");
+    app.unmount();
+  });
+
+  it("middle-truncates absurdly long commands, keeping both ends", async () => {
+    const command = `head-${"y".repeat(2000)}-tail`;
+    const app = renderApp(
+      createElement(PermissionPrompt, {
+        request: { toolName: "bash", args: { command }, level: "exec" as const },
+        onDecision: () => {},
+      }),
+    );
+    await tick();
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("head-");
+    expect(frame).toContain("-tail");
+    expect(frame).toContain("…");
+    expect(frame).not.toContain("y".repeat(2000));
+    app.unmount();
+  });
+
+  it("escapes control characters in the command", async () => {
+    const app = renderApp(
+      createElement(PermissionPrompt, {
+        request: { toolName: "bash", args: { command: "printf 'a\tb'" }, level: "exec" as const },
+        onDecision: () => {},
+      }),
+    );
+    await tick();
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("a  b");
+    app.unmount();
+  });
+
+  it("keeps the summarized args display for non-bash tools", async () => {
+    const app = renderApp(
+      createElement(PermissionPrompt, {
+        request: { toolName: "read_file", args: { path: "src/x.ts" }, level: "read" as const },
+        onDecision: () => {},
+      }),
+    );
+    await tick();
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain('{"path":"src/x.ts"}');
+    app.unmount();
+  });
+});
+
+describe("DiffLines terminal escaping", () => {
+  it("normalizes tabs and control bytes in diff content", async () => {
+    const app = renderApp(
+      createElement(DiffLines, {
+        lines: [{ kind: "add" as const, text: "col1\tcol2\u0007" }],
+      }),
+    );
+    await tick();
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("col1  col2");
+    expect(frame).not.toContain("\u0007");
+    app.unmount();
+  });
+});
+
+describe("StatusBar background task escaping", () => {
+  it("normalizes control characters in task labels", async () => {
+    const app = renderApp(
+      createElement(StatusBar, {
+        cwd: "/tmp/project",
+        model: "gpt6",
+        permissionMode: "auto",
+        tokens: 0,
+        backgroundTasks: ["run\tthis"],
+      }),
+    );
+    await tick();
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("run  this");
     app.unmount();
   });
 });

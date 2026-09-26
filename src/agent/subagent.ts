@@ -64,6 +64,13 @@ async function runSubagent(
     error = e instanceof Error ? e.message : String(e);
   }
 
+  // A user abort ends the child loop without an error event; surface it
+  // through the same interrupted path as any other aborted tool instead of
+  // returning a "successful" report that gets persisted as a normal result.
+  if (signal.aborted) {
+    throw new Error("Tool execution aborted.");
+  }
+
   let report = "";
   const messages = child.getMessages();
   for (let i = messages.length - 1; i >= 0; i--) {

@@ -2,7 +2,7 @@ import { type LanguageModel, tool as aiTool, generateText } from "ai";
 import type { StarConfig } from "../config/schema";
 import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
 import type { StreamEvent } from "../core/events";
-import { formatGitSummary, getGitSummary } from "../core/git";
+import { formatGitSummary, getGitSummaryCached } from "../core/git";
 import { isOversizedImageError, stripOversizedImages } from "../core/image";
 import {
   type ChatInput,
@@ -17,8 +17,8 @@ import type { PermissionRequest } from "../permissions/types";
 import type { SessionStore } from "../session/store";
 import { scheduleSessionTitle } from "../session/title";
 import { beginTurn, currentTurnSeq, setSnapshotHooks } from "../tools/fs/snapshots";
-import type { ToolRegistry } from "../tools/registry";
-import { pendingTodoTitles } from "../tools/todo";
+import { ToolRegistry } from "../tools/registry";
+import { TodoStore, pendingTodoTitles, setTodoPersistGuard } from "../tools/todo";
 import type { ToolResult } from "../tools/types";
 import { defaultAgentTasks } from "./agent-tasks";
 import { readProjectMemory } from "./project-memory";
@@ -137,6 +137,19 @@ async function checkTaskComplete(
 
 const STREAM_RETRY_BASE_DELAY_MS = 1000;
 
+// Stable JSON for doom-loop signatures: object keys sort recursively so the
+// same arguments serialize identically regardless of key order.
+function stableStringify(value: unknown): string {
+  if (value === undefined) return "undefined";
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  const entries = Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`);
+  return `{${entries.join(",")}}`;
+}
+
 // Resolves true after `ms`, or false immediately when the signal aborts.
 function sleep(ms: number, signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) return Promise.resolve(false);
@@ -161,6 +174,15 @@ export class AgentLoop {
   // history is replaced wholesale (resume/compact), because indices no longer
   // line up — in that case /undo only retracts messages, never wrong files.
   private turnMarkers: { seq: number; userIndex: number }[] = [];
+  // Doom-loop guard: signature of the most recent tool call and how many
+  // times in a row it has repeated. Any different call resets the count.
+  private lastToolSignature: string | null = null;
+  private repeatedToolCalls = 0;
+  // Turn context of the in-flight stream() turn, stamped onto every tool
+  // execution so file snapshots attribute root changes to a turn and mark
+  // subagent changes as excluded from turn-level retraction.
+  private activeTurnSeq = 0;
+  private activeTurnUserIndex = -1;
   private titleScheduled = false;
   private titleInput?: string;
   confirmHandler?: (req: PermissionRequest) => Promise<boolean>;
@@ -171,6 +193,24 @@ export class AgentLoop {
 
   constructor(opts: AgentLoopOptions) {
     this.opts = opts;
+    const depth = opts.subagentDepth ?? 0;
+    if (depth > 0) {
+      // Subagent todo isolation: the default registry wires the todo tools to
+      // a process-wide store, so a child's todo_write would clobber the root
+      // session's list (and the REPL panel mirroring it). The child gets a
+      // fresh registry backed by its own store — the registry a caller hands
+      // to a subagent loop is always a freshly created default one (see
+      // runSubagent), so replacing it loses nothing.
+      opts.registry = new ToolRegistry(new TodoStore());
+    } else {
+      // Root only: todo persistence follows the permission mode, so
+      // readonly/plan sessions never touch .star/todos.json. The mode can
+      // change at runtime, so the guard reads the live config object.
+      setTodoPersistGuard(() => {
+        const mode = this.opts.config.permissionMode;
+        return mode !== "readonly" && mode !== "plan";
+      });
+    }
     if (opts.system) {
       this.messages.push({ role: "system", content: opts.system });
     }
@@ -184,7 +224,6 @@ export class AgentLoop {
     // Write-level like the fs write tools, so the permission gate still
     // applies in ask mode; available at every subagent depth.
     opts.registry?.register(createRememberTool());
-    const depth = opts.subagentDepth ?? 0;
     if (opts.registry && depth < MAX_SUBAGENT_DEPTH) {
       opts.registry.register(
         createSubagentTool({
@@ -225,6 +264,8 @@ export class AgentLoop {
             toolName: snapshot.toolName,
             turn: snapshot.turn,
             messageIndex: snapshot.messageIndex,
+            owner: snapshot.owner,
+            contentTooLarge: snapshot.contentTooLarge,
           },
           snapshot.content,
         ),
@@ -413,6 +454,8 @@ export class AgentLoop {
     const seq =
       (this.opts.subagentDepth ?? 0) === 0 ? beginTurn(this.messages.length - 1) : currentTurnSeq();
     this.turnMarkers.push({ seq, userIndex: this.messages.length - 1 });
+    this.activeTurnSeq = seq;
+    this.activeTurnUserIndex = this.messages.length - 1;
     await this.persist(
       opts?.persistAs !== undefined ? { role: "user", content: opts.persistAs } : userMessage,
     );
@@ -445,7 +488,12 @@ export class AgentLoop {
       const maxTokens = this.opts.contextMaxTokens ?? config.contextMaxTokens;
       const compacted = compactMessages([...this.messages], maxTokens);
       if (compacted.compacted) {
-        this.messages = await this.applyCompactionSummary(compacted);
+        this.messages = await this.applyCompactionSummary(compacted, signal);
+        // Compaction rewrote the history wholesale, so recorded turn indices
+        // no longer line up — drop the markers like loadMessages() does.
+        // /undo then only retracts messages until new turns accumulate,
+        // instead of reverting files against a stale snapshot turn.
+        this.turnMarkers = [];
       }
 
       // One model step, with retries: a transient stream failure (network
@@ -570,7 +618,13 @@ export class AgentLoop {
             ? summarizeStreamError(failure)
             : `empty response (finish: ${lastFinishReason ?? "none"})`,
         };
-        if (!(await sleep(delayMs, signal))) return;
+        if (!(await sleep(delayMs, signal))) {
+          // An abort that lands during the retry wait is the same user
+          // interrupt as Esc mid-stream: keep whatever this attempt already
+          // produced instead of dropping it silently.
+          yield* this.persistInterrupted(text, toolCalls);
+          return;
+        }
       }
 
       if (failure) {
@@ -690,7 +744,18 @@ export class AgentLoop {
       try {
         for (const call of toolCalls) {
           if (signal.aborted) break;
-          const result = await this.executeTool(call, signal);
+          // Doom-loop guard: the same tool called with identical arguments
+          // over and over is a model stuck retrying, so past the threshold
+          // the repeat is refused without executing. The refusal is persisted
+          // as the call's result like any other, keeping history replayable.
+          const refusal = this.doomLoopRefusal(call);
+          if (refusal !== null) {
+            yield { type: "notice", message: refusal };
+          }
+          const result =
+            refusal !== null
+              ? { content: refusal, isError: true }
+              : await this.executeTool(call, signal);
           const toolMessage: CoreMessage = {
             role: "tool",
             content: [
@@ -775,7 +840,7 @@ export class AgentLoop {
     if (userMemory) parts.push(userMemory);
     const skills = discoverSkills(this.opts.cwd);
     if (skills.length > 0) parts.push(formatSkillsBlock(skills));
-    const git = getGitSummary(this.opts.cwd);
+    const git = getGitSummaryCached(this.opts.cwd);
     if (git) parts.push(formatGitSummary(git));
     if (parts.length === 0) return;
     const content = parts.join("\n\n");
@@ -787,7 +852,10 @@ export class AgentLoop {
     }
   }
 
-  private async applyCompactionSummary(compacted: CompactionResult): Promise<CoreMessage[]> {
+  private async applyCompactionSummary(
+    compacted: CompactionResult,
+    signal?: AbortSignal,
+  ): Promise<CoreMessage[]> {
     const { config, model } = this.opts;
     if (config.contextCompaction !== "summary" || !model) {
       return compacted.messages;
@@ -795,7 +863,7 @@ export class AgentLoop {
     const headCount = compacted.messages[0]?.role === "system" ? 1 : 0;
     const dropped = this.messages.slice(headCount, headCount + compacted.droppedCount);
     try {
-      const summary = await summarizeMessages(dropped, model);
+      const summary = await summarizeMessages(dropped, model, signal);
       const messages = compacted.messages.slice();
       messages[headCount] = {
         role: "user",
@@ -813,14 +881,26 @@ export class AgentLoop {
     timeoutScale = 1,
   ): AsyncGenerator<StreamEvent> {
     const { streamChat } = await import("../llm/stream");
-    yield* streamChat({
+    for await (const event of streamChat({
       model: this.opts.model,
       messages: this.messages,
       tools: aiTools,
       abortSignal: signal,
       idleTimeoutMs: this.opts.config.streamIdleTimeoutSec * 1000 * timeoutScale,
       firstPartTimeoutMs: this.opts.config.streamFirstChunkTimeoutSec * 1000 * timeoutScale,
-    });
+    })) {
+      // The idle watchdog can end a stream gracefully after content already
+      // arrived; surface the cut-off instead of letting a half sentence pass
+      // for a complete reply.
+      if (event.type === "finish" && event.truncated) {
+        yield {
+          type: "notice",
+          message:
+            "Response was cut short by the stream idle timeout — the reply may be incomplete.",
+        };
+      }
+      yield event;
+    }
   }
 
   private buildAiTools(): Record<string, unknown> {
@@ -858,6 +938,24 @@ export class AgentLoop {
       // Hooks are best-effort by design: a broken hook must never crash a turn.
       return empty;
     }
+  }
+
+  // opencode's doom_loop guard: returns a refusal once the identical tool
+  // call (name + stable-serialized args) has repeated config.doomLoopThreshold
+  // times in a row; 0 disables. Any different signature resets the streak.
+  // Subagents are separate loop instances, so each counts its own streak.
+  private doomLoopRefusal(call: PendingToolCall): string | null {
+    const threshold = this.opts.config.doomLoopThreshold;
+    if (threshold <= 0) return null;
+    const signature = `${call.name} ${stableStringify(call.args)}`;
+    if (signature === this.lastToolSignature) {
+      this.repeatedToolCalls += 1;
+    } else {
+      this.lastToolSignature = signature;
+      this.repeatedToolCalls = 1;
+    }
+    if (this.repeatedToolCalls < threshold) return null;
+    return `Refused: tool "${call.name}" was called ${this.repeatedToolCalls} times in a row with identical arguments. Stop retrying it — change your approach or report that you are blocked.`;
   }
 
   private async executeTool(call: PendingToolCall, signal: AbortSignal): Promise<ToolResult> {
@@ -911,7 +1009,15 @@ export class AgentLoop {
 
     let result: ToolResult;
     try {
-      result = await tool.execute(parsed.data, { cwd, abortSignal: signal });
+      result = await tool.execute(parsed.data, {
+        cwd,
+        abortSignal: signal,
+        snapshotContext: {
+          owner: (this.opts.subagentDepth ?? 0) > 0 ? "subagent" : "root",
+          turn: this.activeTurnSeq,
+          messageIndex: this.activeTurnUserIndex,
+        },
+      });
     } catch (error) {
       if (signal.aborted) {
         return { content: "Tool execution aborted.", isError: true };

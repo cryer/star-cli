@@ -4,11 +4,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { AgentLoop } from "../src/agent/loop";
 import { PROJECT_MEMORY_MAX_CHARS } from "../src/agent/project-memory";
 import type { StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
 import { createDefaultRegistry } from "../src/tools";
+import type { Tool, ToolContext } from "../src/tools/types";
 
 type Chunk =
   | { type: "text-delta"; textDelta: string }
@@ -109,6 +111,8 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     notifyBellThresholdSec: 10,
     permissions: { allow: [], deny: [] },
     hooks: [],
+    doomLoopThreshold: 3,
+    gitSnapshots: true,
     ...overrides,
   };
 }
@@ -1120,5 +1124,147 @@ describe("AgentLoop", () => {
 
     expect(events.some((e) => e.type === "notice")).toBe(false);
     expect(loop.getMessages().filter((m) => m.role === "user")).toHaveLength(1);
+  });
+
+  it("refuses the third identical tool call in a row (doom loop)", async () => {
+    const loop = makeLoop(
+      mockModel([
+        toolCallRound("c1", "read_file", { path: "missing.txt" }),
+        toolCallRound("c2", "read_file", { path: "missing.txt" }),
+        toolCallRound("c3", "read_file", { path: "missing.txt" }),
+        textRound("I am blocked"),
+      ]),
+    );
+
+    const events = await collect(loop.stream("keep reading", new AbortController().signal));
+
+    const results = events.filter((e) => e.type === "tool-result");
+    expect(results).toHaveLength(3);
+    if (results[0]?.type === "tool-result") {
+      expect(results[0].content).not.toContain("Refused");
+    }
+    expect(results[2]).toMatchObject({ isError: true });
+    if (results[2]?.type === "tool-result") {
+      expect(results[2].content).toContain(
+        'Refused: tool "read_file" was called 3 times in a row with identical arguments',
+      );
+    }
+    const notice = events.find((e) => e.type === "notice");
+    expect(notice?.type === "notice" && notice.message.includes("Refused")).toBe(true);
+    // The refused call is persisted like any other tool result, so the
+    // history stays replayable.
+    const lastToolMessage = loop
+      .getMessages()
+      .filter((m) => m.role === "tool")
+      .at(-1);
+    expect(JSON.stringify(lastToolMessage)).toContain("Refused");
+  });
+
+  it("does not refuse repeats when doomLoopThreshold is 0", async () => {
+    const loop = makeLoop(
+      mockModel([
+        toolCallRound("c1", "read_file", { path: "missing.txt" }),
+        toolCallRound("c2", "read_file", { path: "missing.txt" }),
+        toolCallRound("c3", "read_file", { path: "missing.txt" }),
+        textRound("done"),
+      ]),
+      { doomLoopThreshold: 0 },
+    );
+
+    const events = await collect(loop.stream("keep reading", new AbortController().signal));
+
+    expect(events.filter((e) => e.type === "tool-result")).toHaveLength(3);
+    expect(events.some((e) => e.type === "notice" && e.message.includes("Refused"))).toBe(false);
+  });
+
+  it("resets the doom-loop streak when the arguments change", async () => {
+    const loop = makeLoop(
+      mockModel([
+        toolCallRound("c1", "read_file", { path: "a.txt" }),
+        toolCallRound("c2", "read_file", { path: "a.txt" }),
+        toolCallRound("c3", "read_file", { path: "b.txt" }),
+        toolCallRound("c4", "read_file", { path: "b.txt" }),
+        textRound("done"),
+      ]),
+    );
+
+    const events = await collect(loop.stream("read files", new AbortController().signal));
+
+    expect(events.filter((e) => e.type === "tool-result")).toHaveLength(4);
+    expect(events.some((e) => e.type === "notice" && e.message.includes("Refused"))).toBe(false);
+  });
+
+  it("treats reordered argument keys as the same call", async () => {
+    const loop = makeLoop(
+      mockModel([
+        toolCallRound("c1", "write_file", { path: "f.txt", content: "x" }),
+        toolCallRound("c2", "write_file", { content: "x", path: "f.txt" }),
+        toolCallRound("c3", "write_file", { path: "f.txt", content: "x" }),
+        textRound("done"),
+      ]),
+    );
+
+    const events = await collect(loop.stream("write", new AbortController().signal));
+
+    const results = events.filter((e) => e.type === "tool-result");
+    expect(results).toHaveLength(3);
+    if (results[2]?.type === "tool-result") {
+      expect(results[2].content).toContain(
+        'Refused: tool "write_file" was called 3 times in a row',
+      );
+    }
+  });
+
+  it("drops turn markers when compaction rewrites the history", async () => {
+    const loop = makeLoop(mockModel([textRound("ok")]), {
+      contextMaxTokens: 90,
+      contextCompaction: "truncate",
+    });
+    await loop.loadMessages([
+      { role: "user", content: "x".repeat(400) },
+      { role: "user", content: "u2" },
+      { role: "assistant", content: "a2" },
+      { role: "user", content: "u3" },
+      { role: "assistant", content: "a3" },
+    ]);
+
+    await collect(loop.stream("hi", new AbortController().signal));
+
+    // Compaction dropped exactly one message, so the retracted length would
+    // collide with the stale marker's userIndex — a stale marker would
+    // attribute /undo to the wrong snapshot turn. Cleared markers give none.
+    const preview = loop.previewLastTurnRetraction();
+    expect(preview.removed).toBeGreaterThan(0);
+    expect(preview.turn).toBeUndefined();
+  });
+
+  it("passes turn-scoped snapshot context to tool execution", async () => {
+    let seen: ToolContext["snapshotContext"];
+    const spyTool: Tool = {
+      name: "spy_tool",
+      description: "captures the tool context",
+      parameters: z.object({}),
+      permission: "read",
+      execute: async (_args, ctx) => {
+        seen = ctx.snapshotContext;
+        return { content: "ok" };
+      },
+    };
+    const registry = createDefaultRegistry();
+    registry.register(spyTool);
+    const loop = new AgentLoop({
+      model: mockModel([toolCallRound("c1", "spy_tool", {}), textRound("done")]),
+      registry,
+      config: makeConfig(),
+      cwd,
+    });
+
+    await collect(loop.stream("hi", new AbortController().signal));
+
+    // The turn seq comes from a process-wide counter shared with every other
+    // loop in this test file, so only its presence is asserted.
+    expect(seen?.owner).toBe("root");
+    expect(seen?.messageIndex).toBe(0);
+    expect(seen?.turn).toBeGreaterThan(0);
   });
 });

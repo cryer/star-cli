@@ -14,6 +14,9 @@ export interface SessionUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  // Prompt-cache totals; present only after a provider reports cache fields.
+  cachedPromptTokens?: number;
+  cacheReadInputTokens?: number;
 }
 
 export interface DayUsageBucket {
@@ -47,6 +50,15 @@ function generateId(now: Date): string {
 
 function debugWarn(message: string): void {
   if (process.env.STAR_DEBUG === "1") process.stderr.write(`[star-cli] ${message}\n`);
+}
+
+// Brands the fallback meta returned for a corrupt/unreadable meta.json so
+// writeMeta can refuse to persist it: writing the empty defaults back would
+// wipe the real model/cwd/usage fields still sitting in the damaged file.
+const FALLBACK_META: unique symbol = Symbol("star.fallbackMeta");
+
+function isFallbackMeta(meta: SessionMeta): boolean {
+  return (meta as unknown as Record<symbol, unknown>)[FALLBACK_META] === true;
 }
 
 export function dayKey(date: Date): string {
@@ -99,6 +111,7 @@ export class SessionStore {
       // meta() fall back to defaults so messages stay resumable.
       debugWarn(`session ${id}: corrupt meta.json, using defaults`);
     }
+    await store.sweepTmpFiles();
     store.initialized = true;
     return store;
   }
@@ -110,24 +123,30 @@ export class SessionStore {
     } catch {
       return [];
     }
-    const metas: SessionMeta[] = [];
-    for (const entry of entries) {
-      try {
-        const raw = await fs.readFile(path.join(sessionsDir(), entry, "meta.json"), "utf8");
-        const meta = JSON.parse(raw) as SessionMeta;
-        if (meta.id === entry && (cwd === undefined || meta.cwd === cwd)) metas.push(meta);
-      } catch {
-        // 跳过损坏的会话目录
-      }
-    }
-    return metas.sort((a, b) => b.updatedAt - a.updatedAt);
+    const metas = await Promise.all(
+      entries.map(async (entry) => {
+        try {
+          const raw = await fs.readFile(path.join(sessionsDir(), entry, "meta.json"), "utf8");
+          const meta = JSON.parse(raw) as SessionMeta;
+          if (meta.id === entry && (cwd === undefined || meta.cwd === cwd)) return meta;
+        } catch {
+          // 跳过损坏的会话目录
+        }
+        return null;
+      }),
+    );
+    return metas
+      .filter((meta): meta is SessionMeta => meta !== null)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   // Meta writes are serialized per instance and land atomically (tmp file +
   // rename) over a cached in-memory meta: the fire-and-forget title/usage
   // writers race the loop's own appends, and a truncated read once turned
   // fallbackMeta's empty defaults into a persisted wipe of model/cwd/usage.
+  // A branded fallback meta is never written back for the same reason.
   private writeMeta(meta: SessionMeta): Promise<void> {
+    if (isFallbackMeta(meta)) return Promise.resolve();
     const tmp = `${this.metaPath()}.tmp-${process.pid}-${this.metaTmpSeq++}`;
     const run = this.metaWriteQueue.then(async () => {
       try {
@@ -149,7 +168,10 @@ export class SessionStore {
       this.initialized = true;
       return;
     }
-    await fs.mkdir(this.dir, { recursive: true });
+    // Session directories hold file contents (checkpoints); keep them private
+    // on shared machines. The mode is a no-op on Windows.
+    await fs.mkdir(this.dir, { recursive: true, mode: 0o700 });
+    await this.sweepTmpFiles();
     const meta: SessionMeta = {
       id: this.id,
       title: "",
@@ -161,6 +183,22 @@ export class SessionStore {
     await this.writeMeta(meta);
     this.cachedMeta = meta;
     this.initialized = true;
+  }
+
+  // Removes meta.json.tmp-* orphans left behind by a crashed meta write
+  // (tmp file + rename); best-effort, the directory may not even exist yet.
+  private async sweepTmpFiles(): Promise<void> {
+    let entries: string[];
+    try {
+      entries = await fs.readdir(this.dir);
+    } catch {
+      return;
+    }
+    await Promise.all(
+      entries
+        .filter((entry) => entry.startsWith("meta.json.tmp-"))
+        .map((entry) => fs.unlink(path.join(this.dir, entry)).catch(() => {})),
+    );
   }
 
   async append(message: CoreMessage): Promise<void> {
@@ -202,7 +240,17 @@ export class SessionStore {
 
   private fallbackMeta(): SessionMeta {
     const now = Date.now();
-    return { id: this.id, title: "", model: "", cwd: "", createdAt: now, updatedAt: now };
+    const meta: SessionMeta = {
+      id: this.id,
+      title: "",
+      model: "",
+      cwd: "",
+      createdAt: now,
+      updatedAt: now,
+    };
+    // Non-enumerable, so it neither shows up in JSON.stringify nor spreads.
+    Object.defineProperty(meta, FALLBACK_META, { value: true, enumerable: false });
+    return meta;
   }
 
   async meta(): Promise<SessionMeta> {
@@ -245,6 +293,8 @@ export class SessionStore {
     promptTokens: number;
     completionTokens: number;
     totalTokens: number;
+    cachedPromptTokens?: number;
+    cacheReadInputTokens?: number;
   }): Promise<void> {
     await this.ensureInitialized();
     const meta = await this.meta();
@@ -258,6 +308,12 @@ export class SessionStore {
     usage.promptTokens += delta.promptTokens;
     usage.completionTokens += delta.completionTokens;
     usage.totalTokens += delta.totalTokens;
+    if (delta.cachedPromptTokens) {
+      usage.cachedPromptTokens = (usage.cachedPromptTokens ?? 0) + delta.cachedPromptTokens;
+    }
+    if (delta.cacheReadInputTokens) {
+      usage.cacheReadInputTokens = (usage.cacheReadInputTokens ?? 0) + delta.cacheReadInputTokens;
+    }
     meta.usage = usage;
     const day = dayKey(new Date());
     const byDay = meta.usageByDay ?? {};

@@ -1,4 +1,4 @@
-import { formatDollars } from "../cli/cost";
+import { computeCostUsd, formatDollars } from "../cli/cost";
 import type { ModelConfig } from "../config/schema";
 import { type SessionMeta, SessionStore } from "./store";
 
@@ -16,6 +16,9 @@ export interface ModelUsage extends UsageBucket {
   model: string;
   sessions: number;
   requests: number;
+  // Prompt-cache totals for cache-aware pricing; absent until reported.
+  cachedPromptTokens?: number;
+  cacheReadInputTokens?: number;
 }
 
 export interface GlobalUsageStats {
@@ -119,6 +122,12 @@ export function aggregateUsage(metas: SessionMeta[]): GlobalUsageStats {
     entry.sessions += 1;
     entry.requests += requestCount;
     addTo(entry, totals);
+    if (hasTotals && meta.usage) {
+      const cached = tokens(meta.usage.cachedPromptTokens);
+      const cacheRead = tokens(meta.usage.cacheReadInputTokens);
+      if (cached > 0) entry.cachedPromptTokens = (entry.cachedPromptTokens ?? 0) + cached;
+      if (cacheRead > 0) entry.cacheReadInputTokens = (entry.cacheReadInputTokens ?? 0) + cacheRead;
+    }
     models.set(name, entry);
   }
 
@@ -195,11 +204,7 @@ export function formatUsageDashboard(
   const configured = new Map(models.map((m) => [m.name, m]));
   const rows = stats.models.map((entry) => {
     const cfg = configured.get(entry.model);
-    const cost =
-      cfg?.promptPrice !== undefined && cfg.completionPrice !== undefined
-        ? (entry.promptTokens * cfg.promptPrice + entry.completionTokens * cfg.completionPrice) /
-          1_000_000
-        : null;
+    const cost = computeCostUsd(entry, cfg);
     return { entry, cost };
   });
   const header = ["model", "requests", "prompt", "completion", "total", "cost"];

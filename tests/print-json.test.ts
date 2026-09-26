@@ -84,6 +84,8 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     notifyBellThresholdSec: 10,
     permissions: { allow: [], deny: [] },
     hooks: [],
+    doomLoopThreshold: 3,
+    gitSnapshots: true,
     ...overrides,
   };
 }

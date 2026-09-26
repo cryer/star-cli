@@ -10,6 +10,10 @@ export interface CheckpointRecord {
   toolName: string;
   turn: number;
   messageIndex: number;
+  owner?: "root" | "subagent";
+  // Set when the original content exceeded the snapshot size cap: no content
+  // file exists and reverts must skip the file.
+  contentTooLarge?: boolean;
 }
 
 function checkpointsDir(sessionDir: string): string {
@@ -18,6 +22,25 @@ function checkpointsDir(sessionDir: string): string {
 
 function indexPath(sessionDir: string): string {
   return path.join(checkpointsDir(sessionDir), "index.json");
+}
+
+// Read-modify-write on index.json is serialized per session directory, the
+// same pattern as SessionStore's metaWriteQueue: the root loop and background
+// subagents append checkpoints concurrently, and unprotected read-then-write
+// loses records.
+const indexWriteQueues = new Map<string, Promise<void>>();
+
+function enqueueIndexWrite<T>(sessionDir: string, op: () => Promise<T>): Promise<T> {
+  const queued = indexWriteQueues.get(sessionDir) ?? Promise.resolve();
+  const run = queued.then(op);
+  indexWriteQueues.set(
+    sessionDir,
+    run.then(
+      () => {},
+      () => {},
+    ),
+  );
+  return run;
 }
 
 export function checkpointContentPath(sessionDir: string, id: number): string {
@@ -47,26 +70,30 @@ export async function appendCheckpointRecord(
   record: CheckpointRecord,
   content: string | null,
 ): Promise<void> {
-  await fs.mkdir(checkpointsDir(sessionDir), { recursive: true });
-  if (record.existed && content !== null) {
-    await fs.writeFile(checkpointContentPath(sessionDir, record.id), content, "utf8");
-  }
-  const records = await listCheckpointRecords(sessionDir);
-  records.push(record);
-  await fs.writeFile(indexPath(sessionDir), JSON.stringify(records, null, 2));
+  await enqueueIndexWrite(sessionDir, async () => {
+    await fs.mkdir(checkpointsDir(sessionDir), { recursive: true, mode: 0o700 });
+    if (record.existed && content !== null) {
+      await fs.writeFile(checkpointContentPath(sessionDir, record.id), content, "utf8");
+    }
+    const records = await listCheckpointRecords(sessionDir);
+    records.push(record);
+    await fs.writeFile(indexPath(sessionDir), JSON.stringify(records, null, 2));
+  });
 }
 
 export async function removeCheckpointRecords(sessionDir: string, ids: number[]): Promise<void> {
   if (ids.length === 0) return;
-  const drop = new Set(ids);
-  const records = await listCheckpointRecords(sessionDir);
-  const kept = records.filter((record) => !drop.has(record.id));
-  if (kept.length === records.length) return;
-  await fs.mkdir(checkpointsDir(sessionDir), { recursive: true });
-  await fs.writeFile(indexPath(sessionDir), JSON.stringify(kept, null, 2));
-  for (const id of ids) {
-    await fs.rm(checkpointContentPath(sessionDir, id), { force: true });
-  }
+  await enqueueIndexWrite(sessionDir, async () => {
+    const drop = new Set(ids);
+    const records = await listCheckpointRecords(sessionDir);
+    const kept = records.filter((record) => !drop.has(record.id));
+    if (kept.length === records.length) return;
+    await fs.mkdir(checkpointsDir(sessionDir), { recursive: true, mode: 0o700 });
+    await fs.writeFile(indexPath(sessionDir), JSON.stringify(kept, null, 2));
+    for (const id of ids) {
+      await fs.rm(checkpointContentPath(sessionDir, id), { force: true });
+    }
+  });
 }
 
 // Maps persisted records back into snapshots whose content is read lazily
@@ -77,6 +104,9 @@ export async function loadSessionSnapshots(sessionDir: string): Promise<FileSnap
   return records.map((record) => ({
     ...record,
     content: null,
-    contentFile: record.existed ? checkpointContentPath(sessionDir, record.id) : undefined,
+    contentFile:
+      record.existed && !record.contentTooLarge
+        ? checkpointContentPath(sessionDir, record.id)
+        : undefined,
   }));
 }

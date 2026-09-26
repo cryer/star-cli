@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { MockLanguageModelV1 } from "ai/test";
+import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
 import { createElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -77,6 +77,8 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     notifyBellThresholdSec: 10,
     permissions: { allow: [], deny: [] },
     hooks: [],
+    doomLoopThreshold: 3,
+    gitSnapshots: true,
     ...overrides,
   };
 }
@@ -243,6 +245,38 @@ describe("AgentLoop interrupt persistence", () => {
       role: "assistant",
       content: [{ type: "tool-call", toolCallId: "c1", toolName: "spy_tool" }],
     });
+  });
+
+  it("keeps the partial attempt when the abort lands during the retry wait", async () => {
+    const store = await SessionStore.create(cwd, "test");
+    const loop = new AgentLoop({
+      model: new MockLanguageModelV1({
+        doStream: async () => ({
+          stream: convertArrayToReadableStream([
+            { type: "text-delta", textDelta: "partial answer" },
+            { type: "error", error: new Error("fetch failed") },
+          ]),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        }),
+      }),
+      registry: createDefaultRegistry(),
+      config: makeConfig(),
+      cwd,
+      sessionStore: store,
+      // A long backoff guarantees the abort lands while the loop sleeps
+      // between retries; the abort itself wakes that sleep immediately.
+      retryDelayMs: 60_000,
+    });
+
+    const events = await collectWithAbort(loop, "hi", "retry");
+
+    expect(events[0]).toEqual({ type: "text-delta", text: "partial answer" });
+    const expected: CoreMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "partial answer [interrupted]" }],
+    };
+    expect(loop.getMessages().at(-1)).toEqual(expected);
+    expect((await store.messages()).at(-1)).toEqual(expected);
   });
 });
 

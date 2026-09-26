@@ -30,7 +30,13 @@ describe("buildDisplayMessages", () => {
     ];
     const display = buildDisplayMessages(messages);
     expect(display.map((m) => m.role)).toEqual(["user", "assistant", "system"]);
-    expect(display[2]?.text).toBe("已恢复 2 条历史消息");
+    expect(display[2]?.text).toBe("Restored 2 history message(s) not shown here.");
+  });
+
+  it("escapes terminal control characters in restored history text", () => {
+    const messages: CoreMessage[] = [{ role: "user", content: "tab\there\r\nnext" }];
+    const display = buildDisplayMessages(messages);
+    expect(display[0]?.text).toBe("tab  here\nnext");
   });
 
   it("returns an empty list for empty input", () => {

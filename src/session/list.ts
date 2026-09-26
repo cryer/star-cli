@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { sessionsDir } from "../config/paths";
+import type { CoreMessage } from "../core/messages";
 import { type SessionMeta, SessionStore } from "./store";
 
 export interface SessionListEntry {
@@ -32,6 +33,45 @@ export async function listSessionEntries(cwd?: string): Promise<SessionListEntry
 export async function findLatestSession(cwd: string): Promise<SessionMeta | null> {
   const [latest] = await SessionStore.list(cwd);
   return latest ?? null;
+}
+
+// Reads only the head of messages.jsonl and extracts the first user message's
+// text, whitespace-collapsed onto one line — the /resume picker needs a
+// preview per session and must not parse every full history for it. The final
+// partial line at the read boundary and any corrupt lines are skipped.
+// Returns null when no user text is found (or the file is unreadable).
+export async function sessionPreview(id: string, maxBytes = 4096): Promise<string | null> {
+  let handle: fs.FileHandle | null = null;
+  try {
+    handle = await fs.open(path.join(sessionsDir(), id, "messages.jsonl"), "r");
+    const buffer = Buffer.alloc(maxBytes);
+    const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+    const head = buffer.toString("utf8", 0, bytesRead);
+    for (const line of head.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const message = JSON.parse(trimmed) as CoreMessage;
+        if (message.role !== "user") continue;
+        const text =
+          typeof message.content === "string"
+            ? message.content
+            : message.content
+                .filter((part) => part.type === "text")
+                .map((part) => (part.type === "text" ? part.text : ""))
+                .join(" ");
+        const collapsed = text.replace(/\s+/g, " ").trim();
+        if (collapsed) return collapsed;
+      } catch {
+        // Half line at the read boundary or a corrupt line — keep looking.
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
 }
 
 export function shortSessionId(id: string): string {

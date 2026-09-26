@@ -46,12 +46,19 @@ function serializeMessage(message: CoreMessage): string {
 export async function summarizeMessages(
   messages: CoreMessage[],
   model: LanguageModelV1,
+  signal?: AbortSignal,
 ): Promise<string> {
   const transcript = messages.map(serializeMessage).join("\n");
   const { text } = await generateText({
     model,
     system: SUMMARY_SYSTEM_PROMPT,
     prompt: `Summarize this conversation so far:\n\n${transcript}`,
+    // A hung relay must not stall the whole turn on the summary: cap it at
+    // 60s and let the caller's abort (Esc) cut it short as well; the caller
+    // falls back to the truncation placeholder on any failure.
+    abortSignal: signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(60_000)])
+      : AbortSignal.timeout(60_000),
   });
   return text.trim();
 }

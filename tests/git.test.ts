@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentLoop } from "../src/agent/loop";
 import type { StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
@@ -13,7 +13,9 @@ import {
   collectWorkingDiff,
   formatGitSummary,
   getGitSummary,
+  getGitSummaryCached,
   isGitRepo,
+  resetGitSummaryCache,
   truncateLines,
 } from "../src/core/git";
 import { createDefaultRegistry } from "../src/tools";
@@ -52,6 +54,8 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     notifyBellThresholdSec: 10,
     permissions: { allow: [], deny: [] },
     hooks: [],
+    doomLoopThreshold: 3,
+    gitSnapshots: true,
     ...overrides,
   };
 }
@@ -117,6 +121,33 @@ describe("git helpers", () => {
     writeFileSync(path.join(dir, "untracked.txt"), "new");
     const dirty = getGitSummary(dir);
     expect(dirty?.dirtyCount).toBe(2);
+  });
+
+  it("getGitSummaryCached serves the cached summary within the TTL", () => {
+    initRepo(dir);
+    commitFile(dir, "a.txt", "one", "chore: initial commit");
+    const first = getGitSummaryCached(dir);
+    expect(first?.branch).toBe("main");
+
+    // Removing .git makes a fresh probe return null, but the cache still hits.
+    rmSync(path.join(dir, ".git"), { recursive: true, force: true });
+    expect(getGitSummary(dir)).toBeNull();
+    expect(getGitSummaryCached(dir)).toEqual(first);
+  });
+
+  it("getGitSummaryCached re-probes after the TTL expires", () => {
+    vi.useFakeTimers();
+    try {
+      initRepo(dir);
+      commitFile(dir, "a.txt", "one", "chore: initial commit");
+      expect(getGitSummaryCached(dir)).not.toBeNull();
+
+      rmSync(path.join(dir, ".git"), { recursive: true, force: true });
+      vi.setSystemTime(Date.now() + 16_000);
+      expect(getGitSummaryCached(dir)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("formatGitSummary renders branch and tree state", () => {
@@ -266,6 +297,9 @@ describe("git context in the system prompt", () => {
     expect(loop.getMessages()[0]?.content).toContain("Working tree: clean");
 
     writeFileSync(path.join(dir, "a.txt"), "changed");
+    // The loop reads git state through the 15s cached summary; tests reset it
+    // to observe a refresh within the same test.
+    resetGitSummaryCache();
     await drain(loop.stream("second", new AbortController().signal));
     expect(loop.getMessages()[0]?.content).toContain("1 file(s) with uncommitted changes");
   });
