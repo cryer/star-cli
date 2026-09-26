@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { diffTreeNames } from "../../snapshot/git-tree";
 import { type FileSnapshot, resolveSnapshotContent } from "../../tools/fs/snapshots";
 import { type DiffLine, buildDiffLines } from "../diff-preview";
 
@@ -37,4 +38,20 @@ export async function buildUndoDiffs(
     diffs.push({ label: displayPath(snapshot.path, cwd), lines });
   }
   return diffs;
+}
+
+// Read-only preview of the git-tree /undo path: the per-file diffs degrade to
+// a flat list of the working-tree files restoring the turn-start tree would
+// touch (tracked files that differ, plus untracked files the clean would
+// remove). Returns [] when the list cannot be produced (git unavailable) —
+// the confirm prompt then shows just its summary line.
+export async function buildUndoTreeDiffs(cwd: string, tree: string): Promise<UndoFileDiff[]> {
+  const names = await diffTreeNames(cwd, tree);
+  if (!names || names.length === 0) return [];
+  return [
+    {
+      label: "Working-tree files restoring the turn's start will touch:",
+      lines: names.map((name) => ({ kind: "marker" as const, text: name })),
+    },
+  ];
 }

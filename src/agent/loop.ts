@@ -16,7 +16,14 @@ import { checkPermission } from "../permissions/gate";
 import type { PermissionRequest } from "../permissions/types";
 import type { SessionStore } from "../session/store";
 import { scheduleSessionTitle } from "../session/title";
-import { beginTurn, currentTurnSeq, setSnapshotHooks } from "../tools/fs/snapshots";
+import { diffTreeNames, restoreTree, trackTree } from "../snapshot/git-tree";
+import {
+  beginTurn,
+  currentTurnSeq,
+  dropTurnSnapshots,
+  setSnapshotHooks,
+  undoTurnSnapshots,
+} from "../tools/fs/snapshots";
 import { ToolRegistry } from "../tools/registry";
 import { TodoStore, pendingTodoTitles, setTodoPersistGuard } from "../tools/todo";
 import type { ToolResult } from "../tools/types";
@@ -137,6 +144,25 @@ async function checkTaskComplete(
 
 const STREAM_RETRY_BASE_DELAY_MS = 1000;
 
+// The redo stack labels each entry with the start of the undone turn's user
+// message, so the /redo prompt can say what restoring brings back.
+const REDO_LABEL_MAX = 40;
+
+// Text of a message for the redo label; mirrors cli/format.ts
+// coreMessageText (kept local — the agent layer must not import from cli).
+function messageText(message: CoreMessage | undefined): string {
+  if (!message) return "";
+  const content = message.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((part) => part.type === "text")
+      .map((part) => ("text" in part ? part.text : ""))
+      .join(" ");
+  }
+  return "";
+}
+
 // Stable JSON for doom-loop signatures: object keys sort recursively so the
 // same arguments serialize identically regardless of key order.
 function stableStringify(value: unknown): string {
@@ -170,10 +196,21 @@ export class AgentLoop {
   private messages: CoreMessage[] = [];
   private readonly opts: AgentLoopOptions;
   // Seq + user-message index of each turn started via stream(); lets /undo
-  // match a retracted turn to the file snapshots it produced. Cleared when
-  // history is replaced wholesale (resume/compact), because indices no longer
-  // line up — in that case /undo only retracts messages, never wrong files.
-  private turnMarkers: { seq: number; userIndex: number }[] = [];
+  // match a retracted turn to the file snapshots it produced. `tree` is the
+  // whole-tree git snapshot captured at the turn's start (root loop only,
+  // config.gitSnapshots) — when present, /undo restores it instead of
+  // replaying per-file snapshots, which also covers bash-made changes.
+  // Cleared when history is replaced wholesale (resume/compact), because
+  // indices no longer line up — in that case /undo only retracts messages,
+  // never wrong files.
+  private turnMarkers: { seq: number; userIndex: number; tree?: string }[] = [];
+  // Pre-undo tree snapshots, latest last: a git-path /undo pushes the
+  // pre-undo working tree here so /redo can restore it exactly. Only the git
+  // path feeds this — per-file snapshot undos stay non-redoable.
+  private redoStack: { tree: string; label: string }[] = [];
+  // Start of the most recently retracted turn's user message; undoLastTurn
+  // consumes it as the redo label right after retractLastTurn sets it.
+  private lastUndoneLabel = "";
   // Doom-loop guard: signature of the most recent tool call and how many
   // times in a row it has repeated. Any different call resets the count.
   private lastToolSignature: string | null = null;
@@ -244,11 +281,14 @@ export class AgentLoop {
 
   // Swaps the persistence target (/new starts a fresh session mid-REPL).
   // Title generation is re-armed so the new session gets one after its first
-  // turn, and snapshot checkpoints now flow to the new store.
+  // turn, and snapshot checkpoints now flow to the new store. The redo stack
+  // dies with the old session context: its trees describe working-tree states
+  // that no longer line up with the new session's conversation.
   setSessionStore(store: SessionStore | null): void {
     this.opts.sessionStore = store;
     this.titleScheduled = false;
     this.titleInput = undefined;
+    this.redoStack = [];
     if (store) this.bindSnapshotHooks(store);
   }
 
@@ -276,39 +316,104 @@ export class AgentLoop {
   async loadMessages(messages: CoreMessage[]): Promise<void> {
     this.messages = reconcileToolCalls(messages);
     this.turnMarkers = [];
+    this.redoStack = [];
   }
 
   // Read-only counterpart of retractLastTurn: how many messages /undo would
-  // drop and which snapshot turn's file changes it would revert (undefined =
-  // no verified turn, so no file snapshots may be reverted). Mutates nothing,
-  // so the REPL can show the preview before the user confirms.
-  previewLastTurnRetraction(): { removed: number; turn?: number } {
+  // drop, which snapshot turn's file changes it would revert (undefined =
+  // no verified turn, so no file snapshots may be reverted), and the turn's
+  // whole-tree snapshot when one was captured. Mutates nothing, so the REPL
+  // can show the preview before the user confirms.
+  previewLastTurnRetraction(): { removed: number; turn?: number; tree?: string } {
     const result = retractLastTurn([...this.messages]);
     if (result.removed === 0) return { removed: 0 };
     const userIndex = result.messages.length;
     const last = this.turnMarkers[this.turnMarkers.length - 1];
-    const turn = last && last.userIndex === userIndex ? last.seq : undefined;
-    return { removed: result.removed, turn };
+    const verified = last && last.userIndex === userIndex;
+    return {
+      removed: result.removed,
+      turn: verified ? last.seq : undefined,
+      tree: verified ? last.tree : undefined,
+    };
   }
 
   // Drops the final user message and everything after it, and persists the
   // trimmed history so a later /resume does not bring the turn back.
   // `turn` is the retracted turn's snapshot seq when it could be verified
   // against the marker recorded at turn start — undefined means the caller
-  // must not revert any file snapshots.
-  async retractLastTurn(): Promise<{ removed: number; turn?: number }> {
+  // must not revert any file snapshots. `tree` is the turn's whole-tree
+  // snapshot when git snapshots tracked it.
+  async retractLastTurn(): Promise<{ removed: number; turn?: number; tree?: string }> {
     const result = retractLastTurn([...this.messages]);
     if (result.removed === 0) return { removed: 0 };
     const userIndex = result.messages.length;
+    this.lastUndoneLabel = messageText(this.messages[userIndex]).slice(0, REDO_LABEL_MAX);
     this.messages = result.messages;
     await this.opts.sessionStore?.replaceMessages([...this.messages]);
     const last = this.turnMarkers[this.turnMarkers.length - 1];
     let turn: number | undefined;
+    let tree: string | undefined;
     if (last && last.userIndex === userIndex) {
       turn = last.seq;
+      tree = last.tree;
       this.turnMarkers.pop();
     }
-    return { removed: result.removed, turn };
+    return { removed: result.removed, turn, tree };
+  }
+
+  // The confirmed /undo: retract the last turn, then revert its file changes.
+  // With a whole-tree snapshot the working tree is restored from git — which
+  // also reverts changes no tool snapshot saw (bash edits, deleted files) —
+  // and the turn's per-file snapshots are dropped instead of replayed (they
+  // would double-restore). The pre-undo tree feeds the redo stack, so /redo
+  // returns to the exact state before the undo. Any git failure falls back
+  // to the per-file snapshot revert, which never pushes the redo stack.
+  async undoLastTurn(): Promise<{ removed: number; reverted: string[]; tree?: string }> {
+    const { removed, turn, tree } = await this.retractLastTurn();
+    if (removed === 0) return { removed, reverted: [] };
+    if (turn !== undefined && tree !== undefined) {
+      const preUndoTree = await trackTree(this.opts.cwd);
+      if (preUndoTree !== null && (await restoreTree(this.opts.cwd, tree))) {
+        this.redoStack.push({ tree: preUndoTree, label: this.lastUndoneLabel });
+        const dropped = await dropTurnSnapshots(turn, true);
+        return {
+          removed,
+          reverted: [
+            `Restored the working tree from the git snapshot taken at the turn's start (${tree.slice(0, 8)}; covers changes from any tool, bash included; ${dropped} per-file snapshot(s) discarded).`,
+          ],
+          tree,
+        };
+      }
+    }
+    const reverted = turn !== undefined ? await undoTurnSnapshots(turn) : [];
+    return { removed, reverted };
+  }
+
+  // The redo entry /redo would restore, without popping it (for the confirm
+  // prompt); null when there is nothing to redo.
+  peekRedo(): { tree: string; label: string } | null {
+    return this.redoStack[this.redoStack.length - 1] ?? null;
+  }
+
+  // Restores the working tree to its state just before the last git-path
+  // /undo. Conversation messages are not re-added — redo is file-level only.
+  // The entry stays on the stack when the restore fails, so it can be retried.
+  async redoLastUndo(): Promise<{
+    ok: boolean;
+    tree: string;
+    label: string;
+    files: number | null;
+  } | null> {
+    const entry = this.redoStack[this.redoStack.length - 1];
+    if (!entry) return null;
+    // Diff before restoring: afterwards the tree matches the work tree and
+    // the changed-file count would read zero.
+    const names = await diffTreeNames(this.opts.cwd, entry.tree);
+    if (!(await restoreTree(this.opts.cwd, entry.tree))) {
+      return { ok: false, tree: entry.tree, label: entry.label, files: null };
+    }
+    this.redoStack.pop();
+    return { ok: true, tree: entry.tree, label: entry.label, files: names?.length ?? null };
   }
 
   // Cut point for a rewind: messages[index] should be the user message that
@@ -447,13 +552,22 @@ export class AgentLoop {
             ],
           }
         : { role: "user", content: inputText };
+    // Root loop only: capture the whole working tree before the turn can
+    // change anything (a subagent shares the parent's cwd, and the parent's
+    // turn-start tree already covers its changes). Silent no-op when git
+    // snapshots are off or git fails — /undo then falls back to per-file
+    // snapshots.
+    const isRoot = (this.opts.subagentDepth ?? 0) === 0;
+    const tree =
+      isRoot && this.opts.config.gitSnapshots
+        ? ((await trackTree(this.opts.cwd)) ?? undefined)
+        : undefined;
     this.messages.push(userMessage);
     // Only the root loop opens a new snapshot turn: a subagent runs inside the
     // parent's turn, and its file changes must keep the parent's turn seq and
     // message index so /undo and /rewind attribute them correctly.
-    const seq =
-      (this.opts.subagentDepth ?? 0) === 0 ? beginTurn(this.messages.length - 1) : currentTurnSeq();
-    this.turnMarkers.push({ seq, userIndex: this.messages.length - 1 });
+    const seq = isRoot ? beginTurn(this.messages.length - 1) : currentTurnSeq();
+    this.turnMarkers.push({ seq, userIndex: this.messages.length - 1, tree });
     this.activeTurnSeq = seq;
     this.activeTurnUserIndex = this.messages.length - 1;
     await this.persist(

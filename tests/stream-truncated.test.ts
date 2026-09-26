@@ -36,7 +36,7 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     permissions: { allow: [], deny: [] },
     hooks: [],
     doomLoopThreshold: 3,
-    gitSnapshots: true,
+    gitSnapshots: false,
     ...overrides,
   };
 }

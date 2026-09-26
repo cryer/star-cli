@@ -35,7 +35,6 @@ import {
   listSnapshots,
   listTurnSnapshots,
   rewindToSnapshot,
-  undoTurnSnapshots,
 } from "../tools/fs/snapshots";
 import { type TodoItem, formatTodos, loadTodos, parseTodoArgs, resetTodos } from "../tools/todo";
 import { VERSION } from "../version";
@@ -59,10 +58,11 @@ import {
 import { registerCustomCommands } from "./commands/custom";
 import { formatDoctorReport, runDoctor } from "./commands/doctor";
 import { initProject } from "./commands/init-project";
+import { formatRedoResult, formatRedoSummary } from "./commands/redo";
 import { type CommandContext, CommandRegistry, parseSlashCommand } from "./commands/registry";
 import { formatCheckpointList, planRewind } from "./commands/rewind";
 import { didYouMeanSuffix } from "./commands/suggest";
-import { buildUndoDiffs } from "./commands/undo";
+import { buildUndoDiffs, buildUndoTreeDiffs } from "./commands/undo";
 import { ConnectWizard } from "./components/ConnectWizard";
 import { type ExitPlanDecision, ExitPlanPrompt } from "./components/ExitPlanPrompt";
 import { InputBox } from "./components/InputBox";
@@ -141,10 +141,12 @@ const SESSION_MODE_CYCLE = ["ask", "auto", "readonly", "plan"] as const;
 // Commands that rewrite the conversation, the persistence target, or files:
 // running them mid-turn would corrupt the session underneath the active loop,
 // so they are refused while a turn streams. Read-only commands are unaffected.
-const BUSY_BLOCKED_COMMANDS = new Set([
+// Exported for tests.
+export const BUSY_BLOCKED_COMMANDS = new Set([
   "new",
   "resume",
   "undo",
+  "redo",
   "rewind",
   "compact",
   "fork",
@@ -1328,22 +1330,28 @@ export function Repl({
           return "Nothing to undo.";
         }
         // Read-only preview first: how many messages the retraction drops and
-        // which file reverts the turn's snapshots imply. Nothing is touched
-        // until the user confirms.
+        // which file reverts the turn implies — the whole-tree file list when
+        // a git snapshot tracked the turn, per-file diffs otherwise. Nothing
+        // is touched until the user confirms.
         const preview = current.previewLastTurnRetraction();
         if (preview.removed === 0) {
           return "Nothing to undo (no conversation turn to retract).";
         }
-        const diffs = await buildUndoDiffs(
-          preview.turn !== undefined ? listTurnSnapshots(preview.turn) : [],
-          cwd,
-        );
+        const diffs = preview.tree
+          ? await buildUndoTreeDiffs(cwd, preview.tree)
+          : await buildUndoDiffs(
+              preview.turn !== undefined ? listTurnSnapshots(preview.turn) : [],
+              cwd,
+            );
+        const summary = preview.tree
+          ? `${preview.removed} message(s) will be retracted, and the working tree restored to the turn's start (git snapshot — covers changes from any tool, bash included).`
+          : `${preview.removed} message(s) will be retracted, ${diffs.length} file change(s) reverted.`;
         // Undo is destructive: confirm before touching files or history.
         const confirmed = await new Promise<boolean>((resolve) => {
           setPendingRewind({
             title: "Undo last turn",
             confirmLabel: "undo",
-            summary: `${preview.removed} message(s) will be retracted, ${diffs.length} file change(s) reverted.`,
+            summary,
             diffs,
             resolve,
           });
@@ -1352,12 +1360,13 @@ export function Repl({
           return "Undo cancelled.";
         }
         // Turn-scoped undo: retract the last turn's messages, and revert file
-        // changes only when they provably belong to that same turn.
-        const { removed, turn } = await current.retractLastTurn();
-        if (removed === 0) {
+        // changes only when they provably belong to that same turn — a git
+        // tree restore when the turn was tracked (feeding the redo stack),
+        // per-file snapshots otherwise.
+        const outcome = await current.undoLastTurn();
+        if (outcome.removed === 0) {
           return "Nothing to undo (no conversation turn to retract).";
         }
-        const reverted = turn !== undefined ? await undoTurnSnapshots(turn) : [];
         // Mirror the retraction on screen: drop the last prompt and everything
         // the turn produced (answer chunks, tool cards, notifications). Static
         // output cannot be edited in place, so the surviving history is
@@ -1371,9 +1380,37 @@ export function Repl({
           }
         }
         redrawMessages(cut >= 0 ? visible.slice(0, cut) : visible);
-        return [...reverted, `Retracted the last conversation turn (${removed} messages).`].join(
-          "\n",
-        );
+        return [
+          ...outcome.reverted,
+          `Retracted the last conversation turn (${outcome.removed} messages).`,
+        ].join("\n");
+      },
+      redo: async () => {
+        const current = backendRef.current;
+        if (!(current instanceof AgentLoop)) {
+          return "Nothing to redo.";
+        }
+        const entry = current.peekRedo();
+        if (!entry) {
+          return "Nothing to redo.";
+        }
+        // Redo rewrites the working tree: confirm first, like /undo.
+        const confirmed = await new Promise<boolean>((resolve) => {
+          setPendingRewind({
+            title: "Redo last undo",
+            confirmLabel: "redo",
+            summary: formatRedoSummary(entry),
+            resolve,
+          });
+        });
+        if (!confirmed) {
+          return "Redo cancelled.";
+        }
+        const result = await current.redoLastUndo();
+        if (!result) {
+          return "Nothing to redo.";
+        }
+        return formatRedoResult(result);
       },
       rewind: async (args) => {
         if (!args) {

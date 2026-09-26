@@ -32,7 +32,7 @@ function makeConfig(): StarConfig {
     permissions: { allow: [], deny: [] },
     hooks: [],
     doomLoopThreshold: 3,
-    gitSnapshots: true,
+    gitSnapshots: false,
   };
 }
 

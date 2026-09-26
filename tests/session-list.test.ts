@@ -244,7 +244,8 @@ describe("formatSessionEntries", () => {
     ];
 
     expect(formatSessionEntries(entries)).toBe(
-      "ab12cd  调试会话  4 messages  updated 1h ago\n" + "ef34gh  (untitled)  0 messages  updated 2d ago",
+      "ab12cd  调试会话  4 messages  updated 1h ago\n" +
+        "ef34gh  (untitled)  0 messages  updated 2d ago",
     );
     vi.useRealTimers();
   });

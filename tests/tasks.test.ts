@@ -146,9 +146,10 @@ describe("TaskManager", () => {
     const manager = new TaskManager();
     const started: TaskSnapshot[] = [];
     for (let i = 0; i < MAX_FINISHED_RECORDS + 3; i++) {
-      started.push(manager.start({ command: 'node -e ""', cwd }));
-    }
-    for (const task of started) {
+      const task = manager.start({ command: 'node -e ""', cwd });
+      started.push(task);
+      // Sequential finishes: pruning orders by endedAt, and concurrent
+      // endings make that order (and which records survive) nondeterministic.
       await waitForTerminal(manager, task.id);
     }
     const listed = manager.list();

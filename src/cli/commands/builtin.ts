@@ -293,11 +293,21 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
   register({
     name: "undo",
     description:
-      "Undo the last conversation turn: revert its file changes (write_file/edit_file) and retract its messages",
+      "Undo the last conversation turn: revert its file changes (any tool, bash included, when git snapshots are on) and retract its messages",
     usage: "/undo",
     category: "Changes",
     async run(_args, ctx) {
       ctx.addSystemMessage(await ctx.undo());
+    },
+  });
+
+  register({
+    name: "redo",
+    description: "Redo the last git-snapshot undo: restore the working tree to its pre-undo state",
+    usage: "/redo",
+    category: "Changes",
+    async run(_args, ctx) {
+      ctx.addSystemMessage(await ctx.redo());
     },
   });
 

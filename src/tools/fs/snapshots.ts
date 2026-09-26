@@ -251,6 +251,23 @@ export async function undoTurnSnapshots(turn: number, includeSubagent = false): 
   return messages;
 }
 
+// Removes a turn's snapshots from the stack and the persisted store WITHOUT
+// reverting them: the git-tree /undo path already restored the whole working
+// tree, so replaying the per-file reverts would double-restore. Returns the
+// number of dropped snapshots.
+export async function dropTurnSnapshots(turn: number, includeSubagent = false): Promise<number> {
+  const dropped: number[] = [];
+  for (let i = stack.length - 1; i >= 0; i--) {
+    const snapshot = stack[i];
+    if (snapshot && snapshot.turn === turn && (includeSubagent || ownerOf(snapshot) === "root")) {
+      dropped.push(snapshot.id);
+      stack.splice(i, 1);
+    }
+  }
+  await removeFromStore(dropped);
+  return dropped.length;
+}
+
 export interface RewindResult {
   reverted: string[];
   // Smallest conversation message index among the reverted snapshots; the

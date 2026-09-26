@@ -17,7 +17,7 @@ import { createDefaultRegistry } from "../src/tools";
 import { renderApp, stripAnsi, tick, typeText } from "./ink-harness";
 
 process.env.STAR_NO_UPDATE_CHECK = "1";
-const { Repl } = await import("../src/cli/repl");
+const { Repl, BUSY_BLOCKED_COMMANDS } = await import("../src/cli/repl");
 
 const ESC = String.fromCharCode(27);
 
@@ -85,6 +85,11 @@ describe("REPL turn guards", () => {
     defaultAgentTasks.cleanup();
     fs.rmSync(cwd, { recursive: true, force: true });
     fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it("lists /redo among the busy-blocked commands", () => {
+    expect(BUSY_BLOCKED_COMMANDS.has("redo")).toBe(true);
+    expect(BUSY_BLOCKED_COMMANDS.has("undo")).toBe(true);
   });
 
   it(

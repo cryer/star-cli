@@ -28,6 +28,7 @@ function makeCtx(overrides: Partial<CommandContext> = {}) {
     compactContext: async () => "compact result",
     exportSession: async (p) => `exported ${p}`,
     undo: async () => "undo result",
+    redo: async () => "redo result",
     rewind: async (args) => (args ? `rewound to ${args}` : "checkpoint list"),
     permissionMode: async (args) => (args ? `mode set ${args}` : "mode list"),
     planMode: async () => "plan toggled",
@@ -83,7 +84,7 @@ describe("CommandRegistry", () => {
   it("complete matches prefix with or without leading slash", () => {
     const registry = makeRegistry();
     expect(registry.complete("/ex").map((c) => c.name)).toEqual(["exit", "export"]);
-    expect(registry.complete("re").map((c) => c.name)).toEqual(["resume", "rewind"]);
+    expect(registry.complete("re").map((c) => c.name)).toEqual(["redo", "resume", "rewind"]);
     expect(registry.complete("").length).toBe(registry.list().length);
     expect(registry.complete("/zzz")).toEqual([]);
   });
@@ -148,6 +149,23 @@ describe("CommandRegistry", () => {
     await registry.get("plan")?.run("", ctx);
 
     expect(calls).toEqual([{ type: "system", text: "plan toggled" }]);
+  });
+
+  it("/undo and /redo dispatch to the context hooks under Changes", async () => {
+    const registry = makeRegistry();
+    const { ctx, calls } = makeCtx();
+
+    const undo = registry.get("undo");
+    const redo = registry.get("redo");
+    expect(undo?.category).toBe("Changes");
+    expect(redo?.category).toBe("Changes");
+    await undo?.run("", ctx);
+    await redo?.run("", ctx);
+
+    expect(calls).toEqual([
+      { type: "system", text: "undo result" },
+      { type: "system", text: "redo result" },
+    ]);
   });
 
   it("/help groups commands under category headers", async () => {

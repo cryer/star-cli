@@ -20,6 +20,7 @@ function makeCtx(overrides: Partial<CommandContext> = {}) {
     compactContext: async () => "compacted",
     exportSession: async () => "exported",
     undo: async () => "undone",
+    redo: async () => "redone",
     rewind: async () => "rewound",
     permissionMode: async () => "mode",
     planMode: async () => "plan",

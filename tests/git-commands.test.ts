@@ -46,6 +46,7 @@ function makeCtx(overrides: Partial<CommandContext> = {}) {
     compactContext: async () => "compact result",
     exportSession: async (p) => `exported ${p}`,
     undo: async () => "undo result",
+    redo: async () => "redo result",
     rewind: async () => "checkpoint list",
     permissionMode: async (args) => (args ? `mode set ${args}` : "mode list"),
     planMode: async () => "plan toggled",
