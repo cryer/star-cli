@@ -1,4 +1,6 @@
+import fs from "node:fs";
 import path from "node:path";
+import { isSensitivePath } from "../core/sensitive";
 import { isAllowedByRules, isDeniedByRules } from "./allow";
 import type {
   PermissionContext,
@@ -7,11 +9,18 @@ import type {
   PermissionRequest,
 } from "./types";
 
-const FILE_TOOLS = new Set(["write_file", "edit_file", "read_file"]);
+const FILE_TOOLS = new Set(["write_file", "edit_file", "read_file", "grep", "glob"]);
 
 const DANGEROUS_COMMAND_PATTERNS = [
   /rm\s+-rf\s+\/(?:\s|$|;|&)/i,
   /rm\s+-rf\s+~(?:\s|\/|$|;|&)/i,
+  /rm\s+-rf\s+\.\/?(?:\s|$|;|&)/i,
+  /rm\s+-rf\s+\*(?:\s|$|;|&)/i,
+  /\bsudo\s+rm\b/i,
+  /\bdel\s+\/s\b/i,
+  /\brd\s+\/s\b/i,
+  /\bformat\s+[a-z]:/i,
+  /\bdiskpart\b/i,
   /:\(\)\s*\{\s*:\|:&\s*\}\s*;:/,
   /\bmkfs\b/i,
   /dd\s+[^|;]*\bif=/i,
@@ -46,12 +55,37 @@ function isOutsideCwd(p: string, cwd: string): boolean {
   return abs !== base && !abs.startsWith(`${base}/`);
 }
 
-function isSensitivePath(p: string): boolean {
-  const base = p.replace(/\\/g, "/").split("/").pop()?.toLowerCase() ?? "";
-  if (base === ".env.example" || base === ".env.sample" || base === ".env.template") {
-    return false;
+// Resolves symlinks for a write target: the file itself when it exists,
+// otherwise the nearest existing ancestor with the missing tail re-attached.
+// Returns null when nothing on the path can be resolved.
+function resolveRealPath(p: string, cwd: string): string | null {
+  let current = path.isAbsolute(p) ? path.normalize(p) : path.resolve(cwd, p);
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(current), ...missing.reverse());
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return null;
+      missing.push(path.basename(current));
+      current = parent;
+    }
   }
-  return base === ".env" || base.startsWith(".env.") || base === "id_rsa" || base.endsWith(".pem");
+}
+
+// Outside-cwd check for write tools that sees through symlinks: a link inside
+// cwd pointing outside must be treated as outside. Falls back to the plain
+// string check when the path (or cwd) cannot be resolved.
+function isOutsideForWrite(p: string, cwd: string): boolean {
+  const resolved = resolveRealPath(p, cwd);
+  if (resolved === null) return isOutsideCwd(p, cwd);
+  let realCwd: string;
+  try {
+    realCwd = fs.realpathSync(cwd);
+  } catch {
+    return isOutsideCwd(p, cwd);
+  }
+  return isOutsideCwd(resolved, realCwd);
 }
 
 export function checkPermission(
@@ -74,13 +108,14 @@ export function checkPermission(
   }
 
   if (FILE_TOOLS.has(req.toolName) && filePath !== undefined) {
-    if (
-      (req.toolName === "write_file" || req.toolName === "edit_file") &&
-      isSensitivePath(filePath)
-    ) {
+    const isWriteTool = req.toolName === "write_file" || req.toolName === "edit_file";
+    if (isWriteTool && isSensitivePath(filePath)) {
       return "deny";
     }
-    if (isOutsideCwd(filePath, ctx.cwd)) {
+    const outside = isWriteTool
+      ? isOutsideForWrite(filePath, ctx.cwd)
+      : isOutsideCwd(filePath, ctx.cwd);
+    if (outside) {
       if (mode === "ask" && req.level === "read") {
         return "ask";
       }
