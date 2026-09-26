@@ -65,6 +65,12 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
     tools: opts.tools as ToolSet | undefined,
     abortSignal: controller.signal,
     maxTokens: opts.maxTokens,
+    // Disable the SDK's own retries (ai@4 defaults to 2 internal attempts with
+    // fixed backoff that ignores Retry-After and the abort signal, and
+    // exhaustion throws an AI_RetryError stripped of status/headers/body) —
+    // the retry policy in agent/loop.ts + llm/retry.ts owns the full budget
+    // and needs the raw error to classify.
+    maxRetries: 0,
     experimental_providerMetadata: {
       // Only the openai provider (our responses-protocol path) reads these;
       // other providers ignore unknown metadata. The SDK's responses provider
@@ -81,6 +87,9 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
   const iterator = result.fullStream[Symbol.asyncIterator]();
   let seenPart = false;
   let deltas = 0;
+  // Any visible content streamed (text, reasoning, or a tool call) — decides
+  // whether an idle-watchdog cutoff marks the finish event as truncated.
+  let hasContent = false;
   debugStreamLog("request", {
     messages: opts.messages.length,
     idleTimeoutMs,
@@ -102,8 +111,12 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
           error: error instanceof Error ? summarizeStreamError(error) : String(error),
         });
         throw error;
+      } finally {
+        // Clear in finally: when iterator.next() rejects, skipping this would
+        // leave the watchdog timer pending for up to the full first-part
+        // allowance.
+        if (timer) clearTimeout(timer);
       }
-      if (timer) clearTimeout(timer);
       if (next === null) {
         // Note: the AI SDK holds the model's finish part until the source
         // stream closes, so a relay that stops sending without closing can
@@ -113,7 +126,14 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
           deltas,
           waitedMs: seenPart ? idleTimeoutMs : firstPartTimeoutMs,
         });
-        yield { type: "finish", finishReason: "idle-timeout", usage: undefined };
+        yield {
+          type: "finish",
+          finishReason: "idle-timeout",
+          usage: undefined,
+          // Content already streamed means the reply may be cut off
+          // mid-thought; the loop surfaces a notice for that.
+          ...(hasContent ? { truncated: true } : {}),
+        };
         return;
       }
       if (next.done) {
@@ -125,13 +145,16 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
       switch (part.type) {
         case "text-delta":
           deltas++;
+          hasContent = true;
           yield { type: "text-delta", text: part.textDelta };
           break;
         case "reasoning":
           deltas++;
+          hasContent = true;
           yield { type: "reasoning", text: part.textDelta };
           break;
         case "tool-call":
+          hasContent = true;
           yield {
             type: "tool-call",
             id: part.toolCallId,

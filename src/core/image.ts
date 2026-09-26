@@ -1,3 +1,4 @@
+import { responseBodyOf } from "./http-error";
 import type { CoreMessage } from "./messages";
 
 // Images with a longer side above this many pixels are downsampled before
@@ -93,17 +94,21 @@ export function probeImageDimensions(buf: Buffer): ImageDimensions | null {
   return probePng(buf) ?? probeJpeg(buf) ?? probeGif(buf) ?? probeWebp(buf);
 }
 
-// A provider rejected the request because of an oversized image: a 4xx whose
-// message names images together with a size/dimension keyword. Plain "request
-// too large" or context-length errors never match — stripping images would
-// not help those.
+// A provider rejected the request because of an oversized image: a 4xx naming
+// images together with a size/dimension keyword. The message and the response
+// body are tested together — relays often answer with a generic message and
+// put the real reason in the body. Plain "request too large" or
+// context-length errors never match — stripping images would not help those.
 const IMAGE_SIZE_KEYWORDS =
   /too[\s-]*(large|big)|exceeds?|dimensions?|resolution|size\s*limit|max(?:imum)?[\s-]*size/i;
 
 export function isOversizedImageError(error: Error): boolean {
   const status = (error as { statusCode?: unknown }).statusCode;
   if (typeof status !== "number" || status < 400 || status >= 500) return false;
-  return /image/i.test(error.message) && IMAGE_SIZE_KEYWORDS.test(error.message);
+  const text = [error.message, responseBodyOf(error)]
+    .filter((part): part is string => typeof part === "string")
+    .join("\n");
+  return /image/i.test(text) && IMAGE_SIZE_KEYWORDS.test(text);
 }
 
 function imagePartBytes(image: unknown): Buffer | null {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { responseBodyOf } from "../src/core/http-error";
 import {
   MAX_RETRY_DELAY_MS,
   computeRetryDelayMs,
@@ -22,6 +23,31 @@ describe("isRetryableStreamError", () => {
     const error = new Error("unknown tool");
     error.name = "AI_NoSuchToolError";
     expect(isRetryableStreamError(error)).toBe(false);
+  });
+
+  it("never retries SDK validation/parse errors, however transient they sound", () => {
+    // A relay answering with a malformed payload fails identically on resend.
+    for (const name of ["AI_TypeValidationError", "AI_JSONParseError"]) {
+      const error = new Error("overloaded: service unavailable");
+      error.name = name;
+      expect(isRetryableStreamError(error)).toBe(false);
+    }
+  });
+
+  it("does not retry 501 Not Implemented", () => {
+    expect(isRetryableStreamError(apiError("Not Implemented", { statusCode: 501 }))).toBe(false);
+  });
+
+  it("still retries a 501 whose body reports a transient upstream failure", () => {
+    // Relays mislabel gateway failures; the body is the only honest signal.
+    expect(
+      isRetryableStreamError(
+        apiError("Not Implemented", {
+          statusCode: 501,
+          responseBody: '{"error":"upstream connect timeout"}',
+        }),
+      ),
+    ).toBe(true);
   });
 
   it("retries rate limits and server errors by status", () => {
@@ -126,6 +152,22 @@ describe("computeRetryDelayMs", () => {
     expect(computeRetryDelayMs(0, 1000, hinted)).toBe(12_000);
     const excessive = apiError("limited", { responseHeaders: { "retry-after": "600" } });
     expect(computeRetryDelayMs(0, 1000, excessive)).toBe(MAX_RETRY_DELAY_MS);
+  });
+});
+
+describe("responseBodyOf", () => {
+  it("returns the response body an API error carries", () => {
+    expect(responseBodyOf(apiError("boom", { responseBody: '{"error":"x"}' }))).toBe(
+      '{"error":"x"}',
+    );
+  });
+
+  it("is undefined without a usable body", () => {
+    expect(responseBodyOf(new Error("boom"))).toBeUndefined();
+    expect(responseBodyOf(apiError("boom", { responseBody: "" }))).toBeUndefined();
+    const nonString = new Error("boom");
+    Object.assign(nonString, { responseBody: 42 });
+    expect(responseBodyOf(nonString)).toBeUndefined();
   });
 });
 

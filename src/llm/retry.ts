@@ -5,15 +5,20 @@
 // dies mid-way — so classification looks past the status code at the error
 // message and response body, and the wait between attempts honors Retry-After
 // headers with jittered exponential backoff as the fallback.
+import { responseBodyOf } from "../core/http-error";
 
 // Client/validation failures will fail again identically, so only transient
-// conditions merit another attempt.
+// conditions merit another attempt. SDK validation errors never retry —
+// TypeValidation/JSONParse mean the relay answered with a malformed payload,
+// which a resend would burn the whole retry budget on.
 const NON_RETRYABLE_ERROR_NAMES = new Set([
   "AI_NoSuchToolError",
   "AI_InvalidToolArgumentsError",
   "AI_InvalidPromptError",
   "AI_NoSuchModelError",
   "AI_LoadAPIKeyError",
+  "AI_TypeValidationError",
+  "AI_JSONParseError",
 ]);
 
 const RETRYABLE_MESSAGE_PATTERNS = [
@@ -30,13 +35,6 @@ function statusCodeOf(error: Error): number | undefined {
   return typeof status === "number" ? status : undefined;
 }
 
-// The AI SDK's APICallError carries the raw response body; relays often put
-// the real failure reason there while the message stays generic.
-function responseBodyOf(error: Error): string | undefined {
-  const body = (error as { responseBody?: unknown }).responseBody;
-  return typeof body === "string" && body.length > 0 ? body : undefined;
-}
-
 function matchesRetryablePattern(text: string | undefined): boolean {
   return typeof text === "string" && RETRYABLE_MESSAGE_PATTERNS.some((p) => p.test(text));
 }
@@ -47,7 +45,10 @@ export function isRetryableStreamError(error: Error): boolean {
   if ((error as { isRetryable?: unknown }).isRetryable === true) return true;
   const status = statusCodeOf(error);
   if (status !== undefined) {
-    if (status === 408 || status === 429 || status >= 500) return true;
+    // 501 Not Implemented is excluded from the 5xx blanket: the endpoint
+    // cannot serve this request shape at all, so it falls through to the
+    // message/body check like any other deterministic status.
+    if (status === 408 || status === 429 || (status >= 500 && status !== 501)) return true;
     // A 4xx is normally deterministic, but gateways and relays surface
     // transient failures under 4xx codes (Cloudflare rate-limit 403s, a 400
     // wrapping an upstream failure), recognizable only by what the error says.

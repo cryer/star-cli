@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { estimateCost } from "../src/cli/cost";
+import { computeCostUsd, estimateCost } from "../src/cli/cost";
 import { ModelConfigSchema } from "../src/config/schema";
 
 describe("ModelConfigSchema pricing", () => {
@@ -19,6 +19,98 @@ describe("ModelConfigSchema pricing", () => {
     const model = ModelConfigSchema.parse({ name: "gpt6", provider: "p", model: "m" });
     expect(model.promptPrice).toBeUndefined();
     expect(model.completionPrice).toBeUndefined();
+  });
+
+  it("accepts an optional cacheReadPrice", () => {
+    const model = ModelConfigSchema.parse({
+      name: "gpt6",
+      provider: "p",
+      model: "m",
+      promptPrice: 0.15,
+      completionPrice: 0.6,
+      cacheReadPrice: 0.015,
+    });
+    expect(model.cacheReadPrice).toBe(0.015);
+    const without = ModelConfigSchema.parse({ name: "gpt6", provider: "p", model: "m" });
+    expect(without.cacheReadPrice).toBeUndefined();
+  });
+});
+
+describe("computeCostUsd cache pricing", () => {
+  const cachePriced = ModelConfigSchema.parse({
+    name: "gpt6",
+    provider: "p",
+    model: "m",
+    promptPrice: 1,
+    completionPrice: 2,
+    cacheReadPrice: 0.1,
+  });
+
+  it("bills OpenAI-style cached tokens at cacheReadPrice, the rest at promptPrice", () => {
+    // (1000 - 400) uncached * $1/M + 400 cached * $0.1/M + 100 completion * $2/M
+    const cost = computeCostUsd(
+      { promptTokens: 1000, completionTokens: 100, cachedPromptTokens: 400 },
+      cachePriced,
+    );
+    expect(cost).toBeCloseTo((600 * 1 + 400 * 0.1 + 100 * 2) / 1_000_000, 12);
+  });
+
+  it("bills OpenAI-style cached tokens at full promptPrice without a cache price", () => {
+    const model = ModelConfigSchema.parse({
+      name: "gpt6",
+      provider: "p",
+      model: "m",
+      promptPrice: 1,
+      completionPrice: 2,
+    });
+    const cost = computeCostUsd(
+      { promptTokens: 1000, completionTokens: 100, cachedPromptTokens: 400 },
+      model,
+    );
+    expect(cost).toBeCloseTo((1000 * 1 + 100 * 2) / 1_000_000, 12);
+  });
+
+  it("bills Anthropic-style cache reads on top of promptTokens at cacheReadPrice", () => {
+    // 1000 prompt * $1/M + 300 cache reads * $0.1/M + 100 completion * $2/M
+    const cost = computeCostUsd(
+      { promptTokens: 1000, completionTokens: 100, cacheReadInputTokens: 300 },
+      cachePriced,
+    );
+    expect(cost).toBeCloseTo((1000 * 1 + 300 * 0.1 + 100 * 2) / 1_000_000, 12);
+  });
+
+  it("leaves Anthropic-style cache reads unbilled without a cache price", () => {
+    const model = ModelConfigSchema.parse({
+      name: "gpt6",
+      provider: "p",
+      model: "m",
+      promptPrice: 1,
+      completionPrice: 2,
+    });
+    const cost = computeCostUsd(
+      { promptTokens: 1000, completionTokens: 100, cacheReadInputTokens: 300 },
+      model,
+    );
+    expect(cost).toBeCloseTo((1000 * 1 + 100 * 2) / 1_000_000, 12);
+  });
+
+  it("never bills negative prompt tokens when cached exceeds prompt", () => {
+    const cost = computeCostUsd(
+      { promptTokens: 100, completionTokens: 0, cachedPromptTokens: 500 },
+      cachePriced,
+    );
+    expect(cost).toBeCloseTo((100 * 0.1) / 1_000_000, 12);
+  });
+
+  it("shows the cache read price in the estimate when configured", () => {
+    const text = estimateCost(
+      { promptTokens: 1000, completionTokens: 100, cachedPromptTokens: 400 },
+      "gpt6",
+      cachePriced,
+    );
+    expect(text).toBe(
+      "Estimated cost: $0.0008 (gpt6 @ $1/M prompt, $2/M completion, $0.1/M cache read)",
+    );
   });
 });
 

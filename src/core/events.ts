@@ -15,7 +15,9 @@ export type StreamEvent =
   | { type: "reasoning"; text: string }
   | { type: "tool-call"; id: string; name: string; args: unknown }
   | { type: "tool-result"; id: string; name: string; content: string; isError?: boolean }
-  | { type: "finish"; finishReason: string; usage?: TokenUsage }
+  // `truncated` marks a stream that the idle watchdog ended gracefully while
+  // it already had content — the reply may be cut off mid-thought.
+  | { type: "finish"; finishReason: string; usage?: TokenUsage; truncated?: boolean }
   // A model request failed (or came back empty) and is about to be retried;
   // `attempt`/`maxAttempts` are 1-based counts of the upcoming attempt, and
   // `delayMs` is how long the loop waits before it (Retry-After hints or

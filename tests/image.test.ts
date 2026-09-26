@@ -102,6 +102,23 @@ describe("isOversizedImageError", () => {
     );
   });
 
+  it("matches when only the response body names the image limit", () => {
+    // Relays often answer with a generic message and keep the detail in the body.
+    const error = apiError("Bad Request", 400);
+    (error as unknown as { responseBody: string }).responseBody =
+      '{"error":{"message":"image dimensions exceed the allowed maximum size"}}';
+    expect(isOversizedImageError(error)).toBe(true);
+  });
+
+  it("does not match a body without the image keyword or without a size keyword", () => {
+    const noImage = apiError("Bad Request", 400);
+    (noImage as unknown as { responseBody: string }).responseBody = "request entity too large";
+    expect(isOversizedImageError(noImage)).toBe(false);
+    const noSize = apiError("Bad Request", 400);
+    (noSize as unknown as { responseBody: string }).responseBody = "unsupported image format";
+    expect(isOversizedImageError(noSize)).toBe(false);
+  });
+
   it("does not match unrelated 4xx errors", () => {
     expect(isOversizedImageError(apiError("Incorrect API key provided", 401))).toBe(false);
     expect(isOversizedImageError(apiError("context length exceeded", 400))).toBe(false);
@@ -213,7 +230,7 @@ describe("resizeImagePlan", () => {
     });
     expect(plan).toEqual({
       command: "convert",
-      args: ["/tmp/in.png", "-resize", "2000x2000>", "/tmp/out.png"],
+      args: ["/tmp/in.png", "-auto-orient", "-resize", "2000x2000>", "/tmp/out.png"],
     });
   });
 

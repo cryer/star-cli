@@ -1,6 +1,6 @@
 import { tool } from "ai";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
@@ -28,6 +28,8 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     notifyBellThresholdSec: 10,
     permissions: { allow: [], deny: [] },
     hooks: [],
+    doomLoopThreshold: 3,
+    gitSnapshots: true,
     ...overrides,
   };
 }
@@ -78,6 +80,39 @@ describe("createModel", () => {
       }),
     );
     expect(model.modelId).toBe("m-fast");
+  });
+
+  it("asks openai-compatible relays for a terminal usage chunk", async () => {
+    let sentBody = "";
+    vi.stubGlobal("fetch", async (_input: unknown, init?: { body?: unknown }) => {
+      sentBody = typeof init?.body === "string" ? init.body : "";
+      return new Response("data: [DONE]\n\n", {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    try {
+      const model = createModel(
+        makeConfig({
+          providers: [
+            {
+              name: "p1",
+              protocol: "openai-compatible",
+              baseURL: "https://relay.example.com/v1",
+              apiKey: "test-key",
+            },
+          ],
+        }),
+      );
+      await model.doStream({
+        inputFormat: "prompt",
+        mode: { type: "regular" },
+        prompt: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      });
+      expect(JSON.parse(sentBody).stream_options).toEqual({ include_usage: true });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
@@ -364,7 +399,7 @@ describe("streamChat", () => {
 
     expect(events).toEqual([
       { type: "text-delta", text: "Hi" },
-      { type: "finish", finishReason: "idle-timeout", usage: undefined },
+      { type: "finish", finishReason: "idle-timeout", usage: undefined, truncated: true },
     ]);
   });
 
@@ -391,7 +426,7 @@ describe("streamChat", () => {
 
     expect(events).toEqual([
       { type: "text-delta", text: "partial" },
-      { type: "finish", finishReason: "idle-timeout", usage: undefined },
+      { type: "finish", finishReason: "idle-timeout", usage: undefined, truncated: true },
     ]);
   });
 
@@ -481,5 +516,30 @@ describe("streamChat", () => {
     );
 
     expect(events).toEqual([{ type: "finish", finishReason: "idle-timeout", usage: undefined }]);
+  });
+
+  it("clears the idle timer when the stream throws", async () => {
+    vi.useFakeTimers();
+    try {
+      const model = new MockLanguageModelV1({
+        doStream: async () => ({
+          stream: new ReadableStream({
+            start(controller) {
+              controller.enqueue({ type: "text-delta", textDelta: "Hi" });
+              controller.error(new Error("source exploded"));
+            },
+          }),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        }),
+      });
+
+      await expect(
+        collect(streamChat({ model, messages: [{ role: "user", content: "hi" }] })),
+      ).rejects.toThrow("source exploded");
+      // Without the finally cleanup the watchdog timer would stay pending.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

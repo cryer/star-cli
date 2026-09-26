@@ -70,6 +70,25 @@ describe("createSseNormalizingFetch", () => {
     expect(await response.text()).toBe('data: {"a":1}\n\ndata: {"b":2}\n\n');
   });
 
+  it("drops content-length and content-encoding from rewritten SSE responses", async () => {
+    // The rewritten body differs in length and encoding from the original;
+    // keeping the old headers would corrupt reads downstream.
+    const base = (async () =>
+      new Response('data: {"a":1}\n{"b":2}\n\n', {
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream",
+          "content-length": "26",
+          "content-encoding": "gzip",
+        },
+      })) as typeof fetch;
+    const wrapped = createSseNormalizingFetch(base);
+    const response = await wrapped("https://example.com/v1/responses", {});
+    expect(response.headers.get("content-length")).toBeNull();
+    expect(response.headers.get("content-encoding")).toBeNull();
+    expect(await response.text()).toBe('data: {"a":1}\n\ndata: {"b":2}\n\n');
+  });
+
   it("leaves non-SSE responses untouched", async () => {
     const wrapped = createSseNormalizingFetch(fakeFetch("application/json", '{"error":"nope"}'));
     const response = await wrapped("https://example.com/v1/responses", {});

@@ -36,12 +36,16 @@ export function createModel(config: StarConfig, modelName?: string): LanguageMod
         headers: provider.headers,
       })(modelConfig.model);
     case "openai-compatible":
+      // The per-model config asks the relay for a terminal usage chunk
+      // (stream_options.include_usage): relays following OpenAI semantics
+      // (DeepSeek, Moonshot) omit usage from streams without it, which left
+      // /cost, /usage and the status bar reading zero.
       return createOpenAICompatible({
         name: provider.name,
         baseURL: provider.baseURL,
         apiKey,
         headers: provider.headers,
-      })(modelConfig.model);
+      })(modelConfig.model, {}, { includeUsage: true });
     case "openai-responses":
       return createOpenAI({
         baseURL: provider.baseURL,

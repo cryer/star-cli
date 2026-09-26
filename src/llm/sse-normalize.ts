@@ -5,9 +5,13 @@
 // "Unexpected non-whitespace character after JSON". Codex and opencode
 // parse events line-by-line and tolerate this. Since we stay on the AI SDK,
 // normalize the wire format at the fetch layer: split every batched data
-// payload back into one event per JSON object, leaving well-formed streams
-// byte-equivalent (events are simply re-emitted with a blank-line
-// separator).
+// payload back into one event per JSON object.
+//
+// The output is NOT byte-equivalent to the input: every event is re-emitted
+// as `data: <payload>` followed by a blank line, so CRLF endings become LF
+// and a `data:{...}` line gains the space after the colon. Lines are split
+// on \n only — a stream using bare \r as its line terminator is not
+// supported.
 
 // Splits SSE text into events at blank lines, then re-emits each data
 // payload that holds multiple JSON objects as separate `data:` events.
@@ -84,10 +88,15 @@ export function createSseNormalizingFetch(baseFetch: typeof fetch = fetch): type
       .pipeThrough(new TextDecoderStream())
       .pipeThrough(new SseNormalizeTransform())
       .pipeThrough(new TextEncoderStream());
+    // The rewritten body no longer matches the original bytes, so the old
+    // content-length/content-encoding would lie about (and corrupt) it.
+    const headers = new Headers(response.headers);
+    headers.delete("content-length");
+    headers.delete("content-encoding");
     return new Response(body, {
       status: response.status,
       statusText: response.statusText,
-      headers: response.headers,
+      headers,
     });
   };
 }
