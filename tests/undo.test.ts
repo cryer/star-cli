@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildUndoDiffs } from "../src/cli/commands/undo";
 import { editFileTool } from "../src/tools/fs/edit";
 import {
+  MAX_SNAPSHOT_CONTENT_BYTES,
   beginTurn,
   clearSnapshots,
+  listSnapshots,
   listTurnSnapshots,
   snapshotCount,
   undoLastSnapshot,
@@ -124,6 +126,49 @@ describe("turn-scoped snapshots", () => {
   it("returns an empty list when the turn made no file changes", async () => {
     const turn = beginTurn();
     expect(await undoTurnSnapshots(turn)).toEqual([]);
+  });
+
+  it("excludes subagent snapshots from turn listings and reverts by default", async () => {
+    writeFileSync(path.join(dir, "root.txt"), "r0");
+    writeFileSync(path.join(dir, "sub.txt"), "s0");
+    const turn = beginTurn();
+    await writeFileTool.execute({ path: "root.txt", content: "r1" }, ctx());
+    await writeFileTool.execute(
+      { path: "sub.txt", content: "s1" },
+      { cwd: dir, snapshotContext: { owner: "subagent", turn, messageIndex: 0 } },
+    );
+
+    expect(listTurnSnapshots(turn).map((s) => path.basename(s.path))).toEqual(["root.txt"]);
+    expect(listTurnSnapshots(turn, true).map((s) => path.basename(s.path))).toEqual([
+      "sub.txt",
+      "root.txt",
+    ]);
+
+    const reverted = await undoTurnSnapshots(turn);
+    expect(reverted).toHaveLength(1);
+    expect(readFileSync(path.join(dir, "root.txt"), "utf8")).toBe("r0");
+    // the subagent's file is untouched and its snapshot survives
+    expect(readFileSync(path.join(dir, "sub.txt"), "utf8")).toBe("s1");
+    expect(snapshotCount()).toBe(1);
+
+    const revertedSub = await undoTurnSnapshots(turn, true);
+    expect(revertedSub).toHaveLength(1);
+    expect(readFileSync(path.join(dir, "sub.txt"), "utf8")).toBe("s0");
+    expect(snapshotCount()).toBe(0);
+  });
+});
+
+describe("oversized snapshots", () => {
+  it("records metadata only past the 5MB cap and skips the file on revert", async () => {
+    writeFileSync(path.join(dir, "big.txt"), "x".repeat(MAX_SNAPSHOT_CONTENT_BYTES + 1));
+    const res = await writeFileTool.execute({ path: "big.txt", content: "small" }, ctx());
+    expect(res.isError).toBeUndefined();
+    const [snapshot] = listSnapshots();
+    expect(snapshot?.content).toBeNull();
+    expect(snapshot?.contentTooLarge).toBe(true);
+    const message = await undoLastSnapshot();
+    expect(message).toContain("content too large, not restored");
+    expect(readFileSync(path.join(dir, "big.txt"), "utf8")).toBe("small");
   });
 });
 

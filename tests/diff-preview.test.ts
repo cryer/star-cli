@@ -126,6 +126,18 @@ describe("generateDiffPreview", () => {
     expect(preview?.lines[10]).toEqual({ kind: "marker", text: "... (10 more lines)" });
   });
 
+  it("treats $ sequences in the replacement literally, matching edit_file", async () => {
+    writeFileSync(path.join(dir, "dollar.txt"), "a=1\n");
+    const replacement = String.raw`sed 's/$&/$$1/g' $1`;
+    const preview = await generateDiffPreview(
+      "edit_file",
+      { path: "dollar.txt", old_string: "a=1", new_string: replacement },
+      dir,
+    );
+    expect(preview).not.toBeNull();
+    expect(preview?.lines).toContainEqual({ kind: "add", text: replacement });
+  });
+
   it("builds a diff for write_file on an existing file", async () => {
     writeFileSync(path.join(dir, "a.txt"), "old content\n");
     const preview = await generateDiffPreview(

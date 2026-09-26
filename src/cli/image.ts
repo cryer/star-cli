@@ -69,7 +69,15 @@ export function resizeImagePlan(
     if (tools.hasConvert) {
       return {
         command: "convert",
-        args: [inputFile, "-resize", `${maxDimension}x${maxDimension}>`, outputFile],
+        // -auto-orient keeps EXIF-rotated photos upright after the resize
+        // strips their orientation metadata.
+        args: [
+          inputFile,
+          "-auto-orient",
+          "-resize",
+          `${maxDimension}x${maxDimension}>`,
+          outputFile,
+        ],
       };
     }
     if (tools.hasFfmpeg) {

@@ -1,13 +1,22 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { ImageInput } from "../core/messages";
-import { type IgnorePredicate, createIgnorePredicate, isSensitivePath } from "../tools/fs/util";
+import {
+  type IgnorePredicate,
+  SKIP_DIRS,
+  createIgnorePredicate,
+  isSensitivePath,
+} from "../tools/fs/util";
 import { downsampleImageIfNeeded } from "./image";
 
 export const MAX_MENTION_BYTES = 100 * 1024;
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 export const MAX_DIR_MENTION_ENTRIES = 200;
 export const MAX_DIR_MENTION_DEPTH = 10;
+// Backstop for the total-entry count: past this the listing reports "many
+// more entries" instead of counting a huge tree (e.g. @. in a repo) to the
+// end.
+export const MAX_DIR_MENTION_TOTAL = 5000;
 
 const IMAGE_MIME_TYPES: Record<string, string> = {
   ".png": "image/png",
@@ -45,7 +54,11 @@ export interface ParsedMentions {
   mentions: string[];
 }
 
-const MENTION_RE = /(?<=^|\s)@([A-Za-z]:[\\/][A-Za-z0-9._\-/\\]*|[A-Za-z0-9._\-/\\]+)/g;
+// CJK ranges cover unified ideographs, Hangul syllables, compatibility
+// ideographs and fullwidth forms so @中文文件名.md mentions parse. Keep in
+// sync with the token charset path-suggest's extractAtToken accepts (\S).
+const MENTION_RE =
+  /(?<=^|\s)@([A-Za-z]:[\\/][A-Za-z0-9._\-/\\\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]*|[A-Za-z0-9._\-/\\\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]+)/g;
 
 export function parseMentions(text: string): ParsedMentions {
   const mentions: string[] = [];
@@ -99,6 +112,7 @@ interface DirListState {
   lines: string[];
   shown: number;
   total: number;
+  capped: boolean;
 }
 
 async function listDirEntries(
@@ -108,10 +122,12 @@ async function listDirEntries(
   state: DirListState,
   ignore: IgnorePredicate | undefined,
 ): Promise<void> {
+  if (state.capped) return;
   const entries = await readdir(dir, { withFileTypes: true }).catch(() => null);
   if (!entries) return;
   const visible = entries
     .filter((entry) => entry.isDirectory() || entry.isFile())
+    .filter((entry) => !(entry.isDirectory() && SKIP_DIRS.has(entry.name)))
     .filter((entry) => !isSensitivePath(entry.name))
     .filter((entry) => !ignore?.(path.join(dir, entry.name), entry.isDirectory()))
     .sort((a, b) => {
@@ -119,6 +135,10 @@ async function listDirEntries(
       return dirDiff !== 0 ? dirDiff : a.name.localeCompare(b.name);
     });
   for (let i = 0; i < visible.length; i++) {
+    if (state.total >= MAX_DIR_MENTION_TOTAL) {
+      state.capped = true;
+      return;
+    }
     const entry = visible[i];
     if (!entry) continue;
     state.total += 1;
@@ -150,11 +170,13 @@ async function directoryBlock(
   ignore: IgnorePredicate | undefined,
 ): Promise<string | null> {
   const display = `${mention.replace(/\\/g, "/").replace(/\/+$/, "")}/`;
-  const state: DirListState = { lines: [`${display}`], shown: 0, total: 0 };
+  const state: DirListState = { lines: [`${display}`], shown: 0, total: 0, capped: false };
   const probe = await readdir(abs).catch(() => null);
   if (!probe) return null;
   await listDirEntries(abs, "", 1, state, ignore);
-  if (state.total > state.shown) {
+  if (state.capped) {
+    state.lines.push("... (truncated, many more entries)");
+  } else if (state.total > state.shown) {
     state.lines.push(
       `... (truncated, ${state.total - state.shown} more entries — use glob/grep tools or mention a subdirectory to see more)`,
     );

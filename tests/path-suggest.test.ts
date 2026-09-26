@@ -42,6 +42,10 @@ describe("extractAtToken", () => {
   it("extracts the token head when the cursor sits mid-token", () => {
     expect(extractAtToken("@src x", 4)).toEqual({ token: "src", start: 0, end: 4 });
   });
+
+  it("extracts CJK @ tokens like MENTION_RE parses them", () => {
+    expect(extractAtToken("看 @文档", 5)).toEqual({ token: "文档", start: 2, end: 5 });
+  });
 });
 
 describe("suggestPaths", () => {

@@ -5,7 +5,8 @@ import { z } from "zod";
 import { defaultTaskManager } from "../tasks/manager";
 import type { Tool, ToolResult } from "./types";
 
-const MAX_OUTPUT = 30000;
+export const MAX_OUTPUT = 30000;
+const HALF_OUTPUT = MAX_OUTPUT / 2;
 const DEFAULT_TIMEOUT = 120;
 const MAX_TIMEOUT = 600;
 
@@ -28,7 +29,7 @@ function findOnPath(exe: string, exclude?: (dir: string) => boolean): string | n
   return null;
 }
 
-export function resolveShell(): ShellSpec {
+function resolveShellUncached(): ShellSpec {
   if (process.platform !== "win32") {
     return { shell: "sh", wrap: (c) => ["-c", c], label: "sh" };
   }
@@ -57,6 +58,16 @@ export function resolveShell(): ShellSpec {
   return { shell: comspec, wrap: (c) => ["/d", "/s", "/c", c], label: "cmd" };
 }
 
+// The PATH scan runs once per process; the shell cannot change mid-session.
+let cachedSpec: ShellSpec | null = null;
+
+export function resolveShell(): ShellSpec {
+  if (!cachedSpec) {
+    cachedSpec = resolveShellUncached();
+  }
+  return cachedSpec;
+}
+
 const schema = z.object({
   command: z.string().describe("Shell command to execute"),
   timeout: z
@@ -75,24 +86,65 @@ const schema = z.object({
 });
 
 export function killTree(child: ChildProcess): void {
-  if (process.platform === "win32" && child.pid) {
-    spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
-      windowsHide: true,
-      stdio: "ignore",
-    }).unref();
+  if (process.platform === "win32") {
+    if (child.pid) {
+      spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+        windowsHide: true,
+        stdio: "ignore",
+      }).unref();
+    }
     return;
+  }
+  // POSIX children spawn detached, so the pid leads a process group and a
+  // negative-pid kill reaches shell grandchildren too.
+  if (child.pid) {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+      return;
+    } catch {
+      // group already gone (or not detached): fall back to the direct kill
+    }
   }
   child.kill("SIGKILL");
 }
 
-function truncateMiddle(s: string): string {
-  if (s.length <= MAX_OUTPUT) {
-    return s;
+// Bounds memory while a command streams: once the output passes MAX_OUTPUT
+// the first half is kept verbatim, the second half rolls, and the dropped
+// middle is counted so toString() matches truncating the unbounded string.
+class BoundedOutput {
+  private head = "";
+  private tail = "";
+  private dropped = 0;
+  private overflow = false;
+
+  append(text: string): void {
+    if (!this.overflow) {
+      this.head += text;
+      if (this.head.length <= MAX_OUTPUT) {
+        return;
+      }
+      this.overflow = true;
+      this.tail = this.head.slice(HALF_OUTPUT);
+      this.head = this.head.slice(0, HALF_OUTPUT);
+      if (this.tail.length > HALF_OUTPUT) {
+        this.dropped = this.tail.length - HALF_OUTPUT;
+        this.tail = this.tail.slice(-HALF_OUTPUT);
+      }
+      return;
+    }
+    this.tail += text;
+    if (this.tail.length > HALF_OUTPUT) {
+      this.dropped += this.tail.length - HALF_OUTPUT;
+      this.tail = this.tail.slice(-HALF_OUTPUT);
+    }
   }
-  const half = Math.floor(MAX_OUTPUT / 2);
-  const head = s.slice(0, half);
-  const tail = s.slice(-half);
-  return `${head}\n... [${s.length - MAX_OUTPUT} characters truncated] ...\n${tail}`;
+
+  toString(): string {
+    if (!this.overflow) {
+      return this.head;
+    }
+    return `${this.head}\n... [${this.dropped} characters truncated] ...\n${this.tail}`;
+  }
 }
 
 export const bashTool: Tool<typeof schema> = {
@@ -119,8 +171,9 @@ export const bashTool: Tool<typeof schema> = {
       const child = spawn(spec.shell, spec.wrap(args.command), {
         cwd: ctx.cwd,
         windowsHide: true,
+        detached: process.platform !== "win32",
       });
-      let output = "";
+      const output = new BoundedOutput();
       let settled = false;
       const finish = (result: ToolResult) => {
         if (settled) {
@@ -133,34 +186,30 @@ export const bashTool: Tool<typeof schema> = {
       };
       const onAbort = () => {
         killTree(child);
-        finish({ content: `${truncateMiddle(output)}\nCommand aborted`, isError: true });
+        finish({ content: `${output}\nCommand aborted`, isError: true });
       };
       const timer = setTimeout(() => {
         killTree(child);
         finish({
-          content: `${truncateMiddle(output)}\nCommand timed out after ${timeoutSeconds}s`,
+          content: `${output}\nCommand timed out after ${timeoutSeconds}s`,
           isError: true,
         });
       }, timeoutSeconds * 1000);
-      child.stdout.on("data", (d: Buffer) => {
-        output += d.toString("utf8");
-      });
-      child.stderr.on("data", (d: Buffer) => {
-        output += d.toString("utf8");
-      });
+      timer.unref();
+      child.stdout.on("data", (d: Buffer) => output.append(d.toString("utf8")));
+      child.stderr.on("data", (d: Buffer) => output.append(d.toString("utf8")));
       child.on("error", (err) => {
         finish({ content: `Failed to start shell '${spec.label}': ${err.message}`, isError: true });
       });
       ctx.abortSignal?.addEventListener("abort", onAbort);
       child.on("close", (code) => {
-        const trimmed = output.replace(/\s+$/, "");
+        const trimmed = output.toString().replace(/\s+$/, "");
         if (code === 0) {
-          finish({ content: truncateMiddle(trimmed) || "(no output)" });
+          finish({ content: trimmed || "(no output)" });
           return;
         }
-        const body = truncateMiddle(trimmed);
         finish({
-          content: `${body}${body ? "\n" : ""}Exit code: ${code ?? "unknown"}`,
+          content: `${trimmed}${trimmed ? "\n" : ""}Exit code: ${code ?? "unknown"}`,
           isError: true,
         });
       });

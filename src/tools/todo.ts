@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { Tool } from "./types";
@@ -23,6 +23,14 @@ const readSchema = z.object({});
 
 function fileFor(cwd: string): string {
   return path.join(cwd, ".star", "todos.json");
+}
+
+// Wired by the agent loop to the permission mode: readonly/plan sessions
+// still keep the in-memory list but must not touch .star/todos.json.
+let persistGuard: () => boolean = () => true;
+
+export function setTodoPersistGuard(guard: () => boolean): void {
+  persistGuard = guard;
 }
 
 export class TodoStore {
@@ -56,9 +64,17 @@ export class TodoStore {
     }
   }
 
+  // Atomic write (tmp + rename): a crash or failed save can never leave a
+  // truncated todos.json behind.
   async save(cwd: string): Promise<void> {
+    if (!persistGuard()) {
+      return;
+    }
     await mkdir(path.join(cwd, ".star"), { recursive: true });
-    await writeFile(fileFor(cwd), `${JSON.stringify(this.list(), null, 2)}\n`);
+    const file = fileFor(cwd);
+    const tmp = `${file}.tmp`;
+    await writeFile(tmp, `${JSON.stringify(this.list(), null, 2)}\n`);
+    await rename(tmp, file);
   }
 }
 
@@ -124,8 +140,16 @@ export function createTodoTools(store: TodoStore = defaultStore): Tool[] {
       if (!parsed.success) {
         return { content: `Invalid todos: ${parsed.error.message}`, isError: true };
       }
+      // Roll the in-memory list back when the save fails so memory and disk
+      // never diverge silently.
+      const previous = store.list();
       store.replace(parsed.data.todos);
-      await store.save(ctx.cwd);
+      try {
+        await store.save(ctx.cwd);
+      } catch (err) {
+        store.replace(previous);
+        return { content: `Failed to save todos: ${(err as Error).message}`, isError: true };
+      }
       const items = store.list();
       const done = items.filter((it) => it.status === "done").length;
       // The caller just supplied the list and the REPL mirrors it live, so a

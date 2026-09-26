@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
@@ -91,6 +91,8 @@ function makeConfig(): StarConfig {
     notifyBellThresholdSec: 10,
     permissions: { allow: [], deny: [] },
     hooks: [],
+    doomLoopThreshold: 3,
+    gitSnapshots: true,
   };
 }
 
@@ -224,6 +226,43 @@ describe("rewindToSnapshot", () => {
 
   it("returns null for an unknown checkpoint id", async () => {
     expect(await rewindToSnapshot(99999)).toBeNull();
+  });
+
+  it("keeps checkpoints that fail to revert and reports per-file outcomes", async () => {
+    writeFileSync(path.join(dir, "ok.txt"), "v0");
+    writeFileSync(path.join(dir, "blocked.txt"), "b0");
+    beginTurn(0);
+    await writeFileTool.execute({ path: "ok.txt", content: "v1" }, ctx());
+    await writeFileTool.execute({ path: "blocked.txt", content: "b1" }, ctx());
+    // Force the second revert to fail: a directory now sits at the file's path.
+    rmSync(path.join(dir, "blocked.txt"));
+    mkdirSync(path.join(dir, "blocked.txt"));
+
+    const snapshots = listSnapshots();
+    const result = await rewindToSnapshot(snapshots[0]?.id ?? -1);
+
+    expect(result).not.toBeNull();
+    expect(result?.reverted.some((m) => m.includes("Restored") && m.includes("ok.txt"))).toBe(true);
+    expect(
+      result?.reverted.some((m) => m.includes("Failed to revert") && m.includes("blocked.txt")),
+    ).toBe(true);
+    // the failed snapshot stays on the stack and keeps its checkpoint
+    expect(snapshotCount()).toBe(1);
+    expect(listSnapshots()[0]?.path).toBe(path.join(dir, "blocked.txt"));
+    expect(readFileSync(path.join(dir, "ok.txt"), "utf8")).toBe("v0");
+  });
+
+  it("does not fail the tool when checkpoint persistence fails", async () => {
+    setSnapshotHooks({
+      onPush: () => {
+        throw new Error("disk full");
+      },
+    });
+    writeFileSync(path.join(dir, "f.txt"), "v0");
+    const res = await writeFileTool.execute({ path: "f.txt", content: "v1" }, ctx());
+    expect(res.isError).toBeUndefined();
+    expect(readFileSync(path.join(dir, "f.txt"), "utf8")).toBe("v1");
+    expect(snapshotCount()).toBe(1);
   });
 
   it("drops rewound checkpoints from the persisted store too", async () => {

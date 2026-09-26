@@ -2,11 +2,18 @@ import { z } from "zod";
 import { type AgentTaskSnapshot, defaultAgentTasks } from "../agent/agent-tasks";
 import { formatDuration, formatTaskLine, formatTaskList } from "../tasks/format";
 import { defaultTaskManager } from "../tasks/manager";
+import { MAX_OUTPUT } from "./bash";
 import type { Tool } from "./types";
 
 const idSchema = z.object({
   id: z.string().describe("Task id, e.g. task-1 or agent-1"),
 });
+
+// Aligns with the foreground bash output cap: keep the tail, note the cut.
+function truncateOutput(s: string): string {
+  if (s.length <= MAX_OUTPUT) return s;
+  return `[... earlier output truncated; showing the last ${MAX_OUTPUT} characters ...]\n${s.slice(-MAX_OUTPUT)}`;
+}
 
 function formatAgentTaskLine(task: AgentTaskSnapshot): string {
   const duration = formatDuration(task.startedAt, task.endedAt);
@@ -41,7 +48,7 @@ export const taskOutputTool: Tool<typeof idSchema> = {
   execute(args) {
     const shell = defaultTaskManager.get(args.id);
     if (shell) {
-      const body = shell.output.replace(/\s+$/, "") || "(no output yet)";
+      const body = truncateOutput(shell.output.replace(/\s+$/, "") || "(no output yet)");
       return Promise.resolve({ content: `${formatTaskLine(shell)}\n${body}` });
     }
     const agent = defaultAgentTasks.get(args.id);
@@ -49,7 +56,7 @@ export const taskOutputTool: Tool<typeof idSchema> = {
       const body =
         agent.status === "running"
           ? "(still running)"
-          : agent.result.replace(/\s+$/, "") || "(no report)";
+          : truncateOutput(agent.result.replace(/\s+$/, "") || "(no report)");
       return Promise.resolve({ content: `${formatAgentTaskLine(agent)}\n${body}` });
     }
     return Promise.resolve({ content: `Unknown task: ${args.id}`, isError: true });

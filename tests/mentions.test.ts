@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   MAX_DIR_MENTION_ENTRIES,
+  MAX_DIR_MENTION_TOTAL,
   MAX_IMAGE_BYTES,
   MAX_MENTION_BYTES,
   parseMentions,
@@ -69,6 +70,12 @@ describe("parseMentions", () => {
     const { cleanText, mentions } = parseMentions("look at @src/agent/ please");
     expect(mentions).toEqual(["src/agent/"]);
     expect(cleanText).toBe("look at  please");
+  });
+
+  it("extracts mentions with CJK file names", () => {
+    const { cleanText, mentions } = parseMentions("看看 @文档/说明.txt 这个");
+    expect(mentions).toEqual(["文档/说明.txt"]);
+    expect(cleanText).toBe("看看  这个");
   });
 });
 
@@ -165,6 +172,40 @@ describe("resolveMentions", () => {
     expect(resolved.input).toContain("... (truncated, 3 more entries — use glob/grep tools");
     expect(resolved.input).toContain("f000.txt");
     expect(resolved.input).not.toContain("f202.txt");
+  });
+
+  it("skips node_modules, .git and dist in directory listings", async () => {
+    const dir = tempDir();
+    mkdirSync(path.join(dir, "sub", "node_modules", "pkg"), { recursive: true });
+    mkdirSync(path.join(dir, "sub", ".git"), { recursive: true });
+    mkdirSync(path.join(dir, "sub", "dist"), { recursive: true });
+    writeFileSync(path.join(dir, "sub", "node_modules", "pkg", "dep.js"), "x");
+    writeFileSync(path.join(dir, "sub", "dist", "out.js"), "x");
+    writeFileSync(path.join(dir, "sub", "keep.txt"), "x");
+    const resolved = await resolveMentions("read @sub", dir);
+    expect(resolved.input).toContain("keep.txt");
+    expect(resolved.input).not.toContain("node_modules");
+    expect(resolved.input).not.toContain(".git");
+    expect(resolved.input).not.toContain("dist");
+  });
+
+  it("caps the total entry count for huge trees", async () => {
+    const dir = tempDir();
+    mkdirSync(path.join(dir, "sub"));
+    for (let i = 0; i < MAX_DIR_MENTION_TOTAL + 1; i++) {
+      writeFileSync(path.join(dir, "sub", `f${i}.txt`), "");
+    }
+    const resolved = await resolveMentions("read @sub", dir);
+    expect(resolved.input).toContain("... (truncated, many more entries)");
+  }, 30000);
+
+  it("resolves mentions with CJK file names", async () => {
+    const dir = tempDir();
+    writeFileSync(path.join(dir, "说明.txt"), "你好\n");
+    const resolved = await resolveMentions("总结 @说明.txt", dir);
+    expect(resolved.attached).toEqual(["说明.txt"]);
+    expect(resolved.skipped).toEqual([]);
+    expect(resolved.input).toContain("你好");
   });
 
   it("skips missing directories with a reason", async () => {

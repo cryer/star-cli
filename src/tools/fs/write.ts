@@ -17,7 +17,7 @@ export const writeFileTool: Tool<typeof schema> = {
   parameters: schema,
   async execute(args, ctx) {
     const filePath = path.resolve(ctx.cwd, args.path);
-    const snapshot = await captureSnapshot(filePath, "write_file");
+    const snapshot = await captureSnapshot(filePath, "write_file", ctx.snapshotContext);
     try {
       await mkdir(path.dirname(filePath), { recursive: true });
       await writeFile(filePath, args.content, "utf8");

@@ -191,7 +191,7 @@ function applyEdit(
   if (count > 1 && !replaceAll) return null;
   return replaceAll
     ? content.split(oldString).join(newString)
-    : content.replace(oldString, newString);
+    : content.replace(oldString, () => newString);
 }
 
 function newFilePreview(content: string, label: string): DiffPreview {

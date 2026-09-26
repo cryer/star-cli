@@ -4,7 +4,13 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TodoStore, createDefaultRegistry, createTodoTools } from "../src/tools";
 import type { TodoItem } from "../src/tools";
-import { loadTodos, parseTodoArgs, pendingTodoTitles, resetTodos } from "../src/tools/todo";
+import {
+  loadTodos,
+  parseTodoArgs,
+  pendingTodoTitles,
+  resetTodos,
+  setTodoPersistGuard,
+} from "../src/tools/todo";
 import type { Tool, ToolContext, ToolResult } from "../src/tools/types";
 
 let dir: string;
@@ -116,6 +122,49 @@ describe("todo_write / todo_read", () => {
 
     const after = await readFile(path.join(dir, ".star", "todos.json"), "utf8");
     expect(after).toBe(before);
+  });
+
+  it("writes atomically, leaving no tmp file behind", async () => {
+    await run("todo_write", { todos: sample });
+    expect(await readFile(path.join(dir, ".star", "todos.json"), "utf8")).toContain("write docs");
+    await expect(readFile(path.join(dir, ".star", "todos.json.tmp"), "utf8")).rejects.toThrow();
+  });
+
+  it("skips the disk write while keeping memory when the persist guard denies it", async () => {
+    const guardDir = await mkdtemp(path.join(tmpdir(), "star-todo-guard-"));
+    try {
+      const guardStore = new TodoStore();
+      const [guardWrite] = createTodoTools(guardStore);
+      setTodoPersistGuard(() => false);
+      const res = await guardWrite?.execute({ todos: sample }, { cwd: guardDir });
+      expect(res?.isError).toBeUndefined();
+      expect(guardStore.list()).toEqual(sample);
+      await expect(readFile(path.join(guardDir, ".star", "todos.json"), "utf8")).rejects.toThrow();
+    } finally {
+      setTodoPersistGuard(() => true);
+      await rm(guardDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("per-store todo tools", () => {
+  it("keeps separate stores isolated", async () => {
+    const a = new TodoStore();
+    const b = new TodoStore();
+    const [writeA] = createTodoTools(a);
+    await writeA?.execute({ todos: sample }, ctx);
+    expect(a.list()).toEqual(sample);
+    expect(b.list()).toEqual([]);
+  });
+
+  it("registers todo tools exactly once and honors a custom store", async () => {
+    const store = new TodoStore();
+    const registry = createDefaultRegistry(store);
+    expect(registry.names().filter((n) => n === "todo_write")).toHaveLength(1);
+    expect(registry.names().filter((n) => n === "todo_read")).toHaveLength(1);
+    const tool = registry.get("todo_write");
+    await tool?.execute({ todos: sample }, ctx);
+    expect(store.list()).toEqual(sample);
   });
 });
 

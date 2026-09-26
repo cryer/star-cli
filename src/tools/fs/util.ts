@@ -14,6 +14,9 @@ export type IgnorePredicate = (absPath: string, isDir: boolean) => boolean;
 
 export interface WalkOptions {
   ignore?: IgnorePredicate;
+  // Defaults to true. Pass false when the caller does not sort by mtime (e.g.
+  // grep) to skip one stat syscall per file; mtimeMs is then reported as 0.
+  withMtime?: boolean;
 }
 
 export async function walkFiles(
@@ -39,6 +42,10 @@ export async function walkFiles(
         if (options.ignore?.(abs, false)) {
           continue;
         }
+        if (options.withMtime === false) {
+          out.push({ abs, rel, mtimeMs: 0 });
+          continue;
+        }
         try {
           const st = await stat(abs);
           out.push({ abs, rel, mtimeMs: st.mtimeMs });
@@ -54,32 +61,119 @@ export async function walkFiles(
 
 const REGEX_SPECIALS = /[.+^${}()|[\]\\]/g;
 
+function escapeRe(c: string): string {
+  return c.replace(REGEX_SPECIALS, "\\$&");
+}
+
+// Supports *, **, ?, {a,b} braces (nested one level) and [abc] / [!abc]
+// character classes. Consecutive `**/` segments are collapsed into a single
+// (?:[^/]+/)* so adjacent repetitions cannot produce exponential backtracking.
 export function globToRegExp(pattern: string): RegExp {
-  let re = "";
   let i = 0;
-  while (i < pattern.length) {
-    const c = pattern.charAt(i);
-    if (c === "*") {
-      if (pattern.charAt(i + 1) === "*") {
-        i += 2;
-        if (pattern.charAt(i) === "/") {
-          i += 1;
-          re += "(?:[^/]+/)*";
-        } else {
-          re += ".*";
-        }
-      } else {
-        re += "[^/]*";
-        i += 1;
+
+  function parseClass(): string {
+    // i points at "["
+    let j = i + 1;
+    let negate = false;
+    if (pattern.charAt(j) === "!") {
+      negate = true;
+      j += 1;
+    }
+    let body = "";
+    // a "]" right after "[" or "[!" is a literal member of the class
+    if (pattern.charAt(j) === "]") {
+      body += "\\]";
+      j += 1;
+    }
+    while (j < pattern.length && pattern.charAt(j) !== "]") {
+      const ch = pattern.charAt(j);
+      body += ch === "\\" ? "\\\\" : ch;
+      j += 1;
+    }
+    if (j < pattern.length) {
+      i = j + 1;
+      // a leading ^ would negate the regex class; escape it
+      if (body.startsWith("^")) body = `\\${body}`;
+      return `[${negate ? "^" : ""}${body}]`;
+    }
+    // unterminated "[": match it literally
+    i += 1;
+    return "\\[";
+  }
+
+  function parseSegment(depth: number): { re: string; end: string } {
+    let re = "";
+    while (i < pattern.length) {
+      const c = pattern.charAt(i);
+      if (depth > 0 && (c === "," || c === "}")) {
+        return { re, end: c };
       }
-    } else if (c === "?") {
-      re += "[^/]";
-      i += 1;
-    } else {
-      re += c.replace(REGEX_SPECIALS, "\\$&");
+      if (c === "*") {
+        if (pattern.charAt(i + 1) === "*") {
+          i += 2;
+          if (pattern.charAt(i) === "/") {
+            i += 1;
+            re += "(?:[^/]+/)*";
+            while (pattern.startsWith("**/", i)) {
+              i += 3;
+            }
+          } else {
+            re += ".*";
+          }
+        } else {
+          re += "[^/]*";
+          i += 1;
+        }
+        continue;
+      }
+      if (c === "?") {
+        re += "[^/]";
+        i += 1;
+        continue;
+      }
+      if (c === "[") {
+        re += parseClass();
+        continue;
+      }
+      if (c === "{" && depth < 2) {
+        const close = braceEnd(i);
+        if (close === -1) {
+          re += "\\{";
+          i += 1;
+          continue;
+        }
+        i += 1;
+        const alts: string[] = [];
+        for (;;) {
+          const part = parseSegment(depth + 1);
+          alts.push(part.re);
+          if (part.end !== ",") break;
+          i += 1;
+        }
+        i += 1; // consume "}"
+        re += `(?:${alts.join("|")})`;
+        continue;
+      }
+      re += escapeRe(c);
       i += 1;
     }
+    return { re, end: "" };
   }
+
+  function braceEnd(from: number): number {
+    let depth = 0;
+    for (let j = from; j < pattern.length; j++) {
+      const ch = pattern.charAt(j);
+      if (ch === "{") depth += 1;
+      else if (ch === "}") {
+        depth -= 1;
+        if (depth === 0) return j;
+      }
+    }
+    return -1;
+  }
+
+  const { re } = parseSegment(0);
   return new RegExp(`^${re}$`);
 }
 
@@ -170,16 +264,4 @@ export function createIgnorePredicate(cwd: string): IgnorePredicate | undefined 
   };
 }
 
-export function isSensitivePath(filePath: string): boolean {
-  const base = path.basename(filePath);
-  if (base === ".env.example" || base === ".env.sample" || base === ".env.template") {
-    return false;
-  }
-  if (base === ".env" || base.startsWith(".env.")) {
-    return true;
-  }
-  if (base === "id_rsa" || base.endsWith(".pem")) {
-    return true;
-  }
-  return false;
-}
+export { isSensitivePath } from "../../core/sensitive";

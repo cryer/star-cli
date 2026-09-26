@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { formatTaskList, formatTaskStarted } from "../src/tasks/format";
 import {
   DEFAULT_TASK_TIMEOUT,
+  MAX_FINISHED_RECORDS,
   MAX_TASK_OUTPUT,
   TaskManager,
   type TaskSnapshot,
@@ -140,6 +141,21 @@ describe("TaskManager", () => {
   it("has a generous default timeout", () => {
     expect(DEFAULT_TASK_TIMEOUT).toBeGreaterThanOrEqual(3600);
   });
+
+  it("prunes finished records to the most recent 50, keeping running ones", async () => {
+    const manager = new TaskManager();
+    const started: TaskSnapshot[] = [];
+    for (let i = 0; i < MAX_FINISHED_RECORDS + 3; i++) {
+      started.push(manager.start({ command: 'node -e ""', cwd }));
+    }
+    for (const task of started) {
+      await waitForTerminal(manager, task.id);
+    }
+    const listed = manager.list();
+    expect(listed).toHaveLength(MAX_FINISHED_RECORDS);
+    expect(listed.some((t) => t.id === started[0]?.id)).toBe(false);
+    expect(listed.some((t) => t.id === started[started.length - 1]?.id)).toBe(true);
+  }, 30000);
 });
 
 describe("formatTaskList", () => {
@@ -244,6 +260,19 @@ describe("background task tools", () => {
     const res = await run("task_output", { id: "task-999" });
     expect(res.isError).toBe(true);
     expect(res.content).toContain("Unknown task");
+  });
+
+  it("task_output truncates very long output to the 30KB tail", async () => {
+    const res = await run("bash", {
+      command: `node -e "process.stdout.write('z'.repeat(120000))"`,
+      run_in_background: true,
+    });
+    const id = res.content.match(/Background task started: (task-\d+)/)?.[1] as string;
+    await waitForTerminal(defaultTaskManager, id);
+    const out = await run("task_output", { id });
+    expect(out.content).toContain("earlier output truncated; showing the last 30000 characters");
+    const body = out.content.split("\n").slice(1).join("\n");
+    expect(body.length).toBeLessThanOrEqual(30000 + 100);
   });
 
   it("task_kill stops a running task and rejects repeats", async () => {

@@ -1,7 +1,7 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { webFetchTool } from "../src/tools/web/fetch";
+import { decodeEntities, webFetchTool } from "../src/tools/web/fetch";
 
 let server: http.Server;
 let base: string;
@@ -59,6 +59,13 @@ afterAll(async () => {
 });
 
 describe("web_fetch", () => {
+  it("decodes numeric entities and keeps out-of-range code points literal", () => {
+    expect(decodeEntities("&#65; &#x42; &amp; &lt;")).toBe("A B & <");
+    expect(decodeEntities("&#x4E2D;&#25991;")).toBe("中文");
+    expect(decodeEntities("&#x110000;")).toBe("&#x110000;");
+    expect(decodeEntities("&#99999999999;")).toBe("&#99999999999;");
+  });
+
   it("converts HTML to clean text without tags or scripts", async () => {
     const res = await webFetchTool.execute({ url: `${base}/html` }, { cwd: process.cwd() });
     expect(res.isError).toBeUndefined();

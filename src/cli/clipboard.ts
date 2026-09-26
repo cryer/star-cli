@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile, unlink } from "node:fs/promises";
+import { readFile, stat, unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -8,7 +8,7 @@ import type { ImageInput } from "../core/messages";
 import { downsampleImageIfNeeded } from "./image";
 
 export const CLIPBOARD_TIMEOUT_MS = 5000;
-const MAX_CLIPBOARD_IMAGE_BYTES = 10 * 1024 * 1024;
+export const MAX_CLIPBOARD_IMAGE_BYTES = 10 * 1024 * 1024;
 
 const execFileAsync = promisify(execFile);
 
@@ -111,6 +111,17 @@ async function finalizeClipboardImage(image: ImageInput): Promise<ClipboardImage
   return { image: result.image, oversized: result.oversized && !result.resized };
 }
 
+// Reads the temp PNG the platform command wrote, refusing oversized files
+// before they load into memory (the xclip stdout branch is bounded by
+// maxBuffer instead). Null on a missing, empty or too-large file.
+export async function readClipboardTempFile(tempFile: string): Promise<ImageInput | null> {
+  const st = await stat(tempFile).catch(() => null);
+  if (!st || st.size === 0 || st.size > MAX_CLIPBOARD_IMAGE_BYTES) return null;
+  const buf = await readFile(tempFile).catch(() => null);
+  if (!buf || buf.length === 0) return null;
+  return { path: "clipboard.png", mimeType: "image/png", data: buf.toString("base64") };
+}
+
 // Reads a PNG image from the system clipboard, downsampling anything larger
 // than MAX_IMAGE_DIMENSION on its longest side. Every read failure —
 // unsupported platform, missing tool, no image on the clipboard, timeout —
@@ -136,13 +147,9 @@ export async function readClipboardImage(): Promise<ClipboardImage | null> {
       });
     }
     await execFileAsync(plan.command, plan.args, { timeout: CLIPBOARD_TIMEOUT_MS });
-    const buf = await readFile(tempFile).catch(() => null);
-    if (!buf || buf.length === 0) return null;
-    return finalizeClipboardImage({
-      path: "clipboard.png",
-      mimeType: "image/png",
-      data: buf.toString("base64"),
-    });
+    const image = await readClipboardTempFile(tempFile);
+    if (!image) return null;
+    return finalizeClipboardImage(image);
   } catch {
     return null;
   } finally {

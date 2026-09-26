@@ -1,8 +1,14 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { Tool } from "../types";
-import { currentTurnMessageIndex, currentTurnSeq, nextSnapshotId, pushSnapshot } from "./snapshots";
+import {
+  MAX_SNAPSHOT_CONTENT_BYTES,
+  currentTurnMessageIndex,
+  currentTurnSeq,
+  nextSnapshotId,
+  pushSnapshot,
+} from "./snapshots";
 
 const schema = z.object({
   path: z.string().describe("File path, absolute or relative to the working directory"),
@@ -23,8 +29,10 @@ export const editFileTool: Tool<typeof schema> = {
   async execute(args, ctx) {
     const filePath = path.resolve(ctx.cwd, args.path);
     let content: string;
+    let readMtimeMs: number;
     try {
       content = await readFile(filePath, "utf8");
+      readMtimeMs = (await stat(filePath)).mtimeMs;
     } catch (err) {
       return { content: `Failed to read ${args.path}: ${(err as Error).message}`, isError: true };
     }
@@ -45,21 +53,33 @@ export const editFileTool: Tool<typeof schema> = {
     }
     const updated = args.replace_all
       ? content.split(args.old_string).join(args.new_string)
-      : content.replace(args.old_string, args.new_string);
+      : content.replace(args.old_string, () => args.new_string);
     try {
+      // Guard against a silent overwrite when the file changed on disk
+      // between our read and our write.
+      const now = await stat(filePath).catch(() => null);
+      if (!now || now.mtimeMs !== readMtimeMs) {
+        return {
+          content: `Failed to edit ${args.path}: file changed since it was read; re-read and retry`,
+          isError: true,
+        };
+      }
       await writeFile(filePath, updated, "utf8");
     } catch (err) {
       return { content: `Failed to write ${args.path}: ${(err as Error).message}`, isError: true };
     }
+    const contentTooLarge = Buffer.byteLength(content, "utf8") > MAX_SNAPSHOT_CONTENT_BYTES;
     await pushSnapshot({
       id: nextSnapshotId(),
       path: filePath,
       existed: true,
-      content,
+      content: contentTooLarge ? null : content,
+      contentTooLarge: contentTooLarge || undefined,
       toolName: "edit_file",
       timestamp: Date.now(),
-      turn: currentTurnSeq(),
-      messageIndex: currentTurnMessageIndex(),
+      turn: ctx.snapshotContext?.turn ?? currentTurnSeq(),
+      messageIndex: ctx.snapshotContext?.messageIndex ?? currentTurnMessageIndex(),
+      owner: ctx.snapshotContext?.owner ?? "root",
     });
     return { content: `Edited ${args.path}: ${count} replacement${count > 1 ? "s" : ""}` };
   },

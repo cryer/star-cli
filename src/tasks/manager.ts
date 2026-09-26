@@ -17,6 +17,10 @@ export interface TaskSnapshot {
 
 export const MAX_TASK_OUTPUT = 100_000;
 export const DEFAULT_TASK_TIMEOUT = 3600;
+// Finished records are pruned to this many most-recent entries so a long
+// session's task history cannot grow without bound; running tasks are never
+// evicted.
+export const MAX_FINISHED_RECORDS = 50;
 
 const TRUNCATED_PREFIX = "[... earlier output truncated ...]\n";
 
@@ -51,6 +55,9 @@ export class TaskManager extends EventEmitter {
     const child = spawn(spec.shell, spec.wrap(opts.command), {
       cwd: opts.cwd,
       windowsHide: true,
+      // POSIX: the child leads its own process group so killTree can SIGKILL
+      // the whole tree with a negative pid (Windows uses taskkill /t).
+      detached: process.platform !== "win32",
     });
     const rec: TaskRecord = {
       id,
@@ -137,7 +144,17 @@ export class TaskManager extends EventEmitter {
     rec.status = status;
     rec.exitCode = exitCode;
     rec.endedAt = Date.now();
+    this.pruneFinished();
     this.emitUpdate(rec);
+  }
+
+  private pruneFinished(): void {
+    const finished = [...this.records.values()].filter((rec) => rec.status !== "running");
+    if (finished.length <= MAX_FINISHED_RECORDS) return;
+    finished.sort((a, b) => (a.endedAt ?? 0) - (b.endedAt ?? 0));
+    for (const rec of finished.slice(0, finished.length - MAX_FINISHED_RECORDS)) {
+      this.records.delete(rec.id);
+    }
   }
 
   private emitUpdate(rec: TaskRecord): void {

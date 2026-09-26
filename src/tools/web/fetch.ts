@@ -15,10 +15,19 @@ const schema = z.object({
     .describe("Maximum characters of text to return (default 20000)"),
 });
 
+// String.fromCodePoint throws a RangeError on code points past U+10FFFF;
+// keep the original entity text for those instead of dying mid-page.
+function safeCodePoint(n: number, raw: string): string {
+  if (!Number.isInteger(n) || n < 0 || n > 0x10ffff) {
+    return raw;
+  }
+  return String.fromCodePoint(n);
+}
+
 export function decodeEntities(s: string): string {
   return s
-    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
-    .replace(/&#x([0-9a-fA-F]+);/gi, (_, n) => String.fromCodePoint(Number.parseInt(n, 16)))
+    .replace(/&#(\d+);/g, (m, n) => safeCodePoint(Number(n), m))
+    .replace(/&#x([0-9a-fA-F]+);/gi, (m, n) => safeCodePoint(Number.parseInt(n, 16), m))
     .replace(/&(quot|lt|gt|nbsp);/g, (m) => {
       switch (m) {
         case "&quot;":
@@ -88,7 +97,7 @@ function truncate(s: string, maxChars: number): string {
 export const webFetchTool: Tool<typeof schema> = {
   name: "web_fetch",
   description:
-    "Fetch a URL over http(s) and return its contents as readable text. HTML pages are converted to plain text (tags, scripts and styles removed). Output is truncated to maxChars (default 20000).",
+    "Fetch a URL over http(s) and return its contents as readable text. HTML pages are converted to plain text (tags, scripts and styles removed). Output is truncated to maxChars (default 20000). Can reach internal/intranet addresses, so do not use it for untrusted URLs.",
   permission: "read",
   parameters: schema,
   async execute(args, ctx) {
