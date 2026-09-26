@@ -20,6 +20,7 @@ import {
   listSessionEntries,
   relativeTime,
   resolveSessionId,
+  sessionPreview,
   shortSessionId,
 } from "../session/list";
 import { resumeSession } from "../session/resume";
@@ -97,6 +98,7 @@ import { resolveMentions } from "./mentions";
 import { notifyBell } from "./notify";
 import { PromptQueue, type QueuedPrompt } from "./queue";
 import { executeShellBang } from "./shell-bang";
+import { SYSTEM_PROMPT } from "./system-prompt";
 import { toTerminalSafe } from "./terminal-text";
 import { type FlushState, nextFlush, startTicker } from "./ticker";
 import { checkForUpdate } from "./update-check";
@@ -112,6 +114,8 @@ export interface UsageStats {
   completionTokens: number;
   totalTokens: number;
   // Prompt-cache totals; absent until a provider reports cache fields.
+  cachedPromptTokens?: number;
+  cacheReadInputTokens?: number;
   cache?: CacheTotals;
 }
 
@@ -133,6 +137,22 @@ function runningTaskLabels(): string[] {
 
 // Shift+Tab cycles these in order; yolo is reachable only via /permission.
 const SESSION_MODE_CYCLE = ["ask", "auto", "readonly", "plan"] as const;
+
+// Commands that rewrite the conversation, the persistence target, or files:
+// running them mid-turn would corrupt the session underneath the active loop,
+// so they are refused while a turn streams. Read-only commands are unaffected.
+const BUSY_BLOCKED_COMMANDS = new Set([
+  "new",
+  "resume",
+  "undo",
+  "rewind",
+  "compact",
+  "fork",
+  "clear-sessions",
+  "model",
+  "connect",
+  "memory",
+]);
 
 function formatUsage(usage: UsageStats): string {
   return `API usage this session: ${usage.requests} requests, ${usage.promptTokens} prompt + ${usage.completionTokens} completion = ${usage.totalTokens} tokens`;
@@ -164,21 +184,13 @@ interface PendingConnect {
 
 const SESSION_PICKER_CAP = 20;
 
+// First-user-message previews are trimmed to a single ~60-char line in the
+// resume picker description.
+const SESSION_PREVIEW_MAX = 60;
+
 // Queued typeahead entries rendered in the live region: a bounded count so
 // the live region can never grow to terminal height (see TodoPanel).
 const MAX_VISIBLE_QUEUED = 5;
-
-// First user message of a stored session, collapsed to a single ~60-char
-// line for the resume picker. null when there is nothing usable.
-async function sessionPreview(id: string): Promise<string | null> {
-  const store = await SessionStore.open(id);
-  if (!store) return null;
-  const first = (await store.messages()).find((m) => m.role === "user");
-  if (!first) return null;
-  const text = coreMessageText(first).replace(/\s+/g, " ").trim();
-  if (!text) return null;
-  return text.length > 60 ? `${text.slice(0, 60)}…` : text;
-}
 
 interface ReplProps {
   backend: ChatBackend;
@@ -229,12 +241,20 @@ export function Repl({
   const nextIdRef = useRef(initialDisplay.length);
   const abortRef = useRef<AbortController | null>(null);
   const streamedRef = useRef("");
+  // Chars of streamedRef already committed to static history by the ticker.
+  // The live region renders only the suffix past this point, and a stream
+  // retry rolls the buffer back to it (the resend re-streams from scratch).
+  const lastCommittedLenRef = useRef(0);
   const thinkingRef = useRef(false);
   const reasoningRef = useRef("");
   const tickerStopRef = useRef<(() => void) | null>(null);
   const flushedRef = useRef<FlushState>({ streamed: "", reasoning: "" });
   const toolCardsRef = useRef(new Map<string, ToolCardData>());
   const pendingRef = useRef<PendingPermission | null>(null);
+  // Promise chain serializing permission prompts: a background subagent's
+  // request queues behind the open prompt instead of overwriting its resolve
+  // (the single pending slot can only hold one request at a time).
+  const permissionChainRef = useRef<Promise<void>>(Promise.resolve());
   const alwaysAllowedRef = useRef(new Set<string>());
   // Mode the session was in before plan mode was entered; restored on plan
   // approval or /plan toggle. null when plan mode is not active.
@@ -247,6 +267,12 @@ export function Repl({
   // Live session store: /new swaps it mid-session, so callbacks must go
   // through the ref rather than the prop captured at mount.
   const sessionStoreRef = useRef<SessionStore | null>(sessionStore);
+  // Latest config for mount-only listeners (a new config object identity must
+  // not re-register — and thereby kill — the background-task listeners).
+  const configRef = useRef(config);
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
   const usageRef = useRef<UsageStats>(initialUsage ? { ...initialUsage } : emptyUsage());
   // Number of assistant chunks already committed to static history this turn;
   // 0 means the next streamed text still needs the "star" header.
@@ -479,14 +505,25 @@ export function Repl({
 
   const attachConfirmHandler = useCallback(
     (target: ChatBackend) => {
-      target.confirmHandler = async (req) => {
+      target.confirmHandler = (req) => {
         if (isAllowedByRules([...alwaysAllowedRef.current], req)) {
-          return true;
+          return Promise.resolve(true);
         }
-        const preview = await generateDiffPreview(req.toolName, req.args, cwd).catch(() => null);
-        return new Promise<boolean>((resolve) => {
-          setPendingPermission({ request: req, preview, resolve });
-        });
+        const ask = async (): Promise<boolean> => {
+          const preview = await generateDiffPreview(req.toolName, req.args, cwd).catch(() => null);
+          return new Promise<boolean>((resolve) => {
+            setPendingPermission({ request: req, preview, resolve });
+          });
+        };
+        // Queue behind the currently open prompt: a concurrent request (e.g.
+        // from a background subagent) that took the pending slot directly
+        // would overwrite the previous resolve and leak its promise forever.
+        const decision = permissionChainRef.current.then(ask);
+        permissionChainRef.current = decision.then(
+          () => undefined,
+          () => undefined,
+        );
+        return decision;
       };
       target.onHookWarning = (message) => pushMessage("system", message);
     },
@@ -521,25 +558,30 @@ export function Repl({
       .catch(() => {});
   }, [cwd, resumedAtStart]);
 
+  // Mount-only listener registration: re-running this effect would detach and
+  // cleanup() the managers, killing every in-flight background task, so it
+  // must not depend on the config object identity (configRef reads instead).
   useEffect(() => {
     const onUpdate = (task: TaskSnapshot) => {
       setBgLabels(runningTaskLabels());
       pushMessage(
         "system",
-        task.status === "running" ? formatTaskStarted(task) : formatTaskFinished(task),
+        toTerminalSafe(
+          task.status === "running" ? formatTaskStarted(task) : formatTaskFinished(task),
+        ),
       );
       // Background tasks are exactly the case where the user has looked away.
       if (task.status !== "running") {
         notifyBell({
-          enabled: config.notifyBell,
-          thresholdSec: config.notifyBellThresholdSec,
+          enabled: configRef.current.notifyBell,
+          thresholdSec: configRef.current.notifyBellThresholdSec,
           noNotifyEnv: process.env.STAR_NO_NOTIFY === "1",
         });
       }
     };
     const onAgentUpdate = (task: AgentTaskSnapshot) => {
       setBgLabels(runningTaskLabels());
-      const label = task.description ? `: ${task.description}` : "";
+      const label = task.description ? `: ${toTerminalSafe(task.description)}` : "";
       pushMessage(
         "system",
         task.status === "running"
@@ -548,8 +590,8 @@ export function Repl({
       );
       if (task.status !== "running") {
         notifyBell({
-          enabled: config.notifyBell,
-          thresholdSec: config.notifyBellThresholdSec,
+          enabled: configRef.current.notifyBell,
+          thresholdSec: configRef.current.notifyBellThresholdSec,
           noNotifyEnv: process.env.STAR_NO_NOTIFY === "1",
         });
       }
@@ -562,7 +604,7 @@ export function Repl({
       defaultTaskManager.cleanup();
       defaultAgentTasks.cleanup();
     };
-  }, [pushMessage, config]);
+  }, [pushMessage]);
 
   const interrupt = useCallback(() => {
     abortRef.current?.abort();
@@ -606,9 +648,12 @@ export function Repl({
   const handleExit = useCallback(() => {
     const killed = defaultTaskManager.cleanup();
     const killedAgents = defaultAgentTasks.cleanup();
-    const stopped = [...killed.map((t) => t.id), ...killedAgents.map((t) => t.id)];
-    if (stopped.length > 0) {
-      pushMessage("system", `Stopped ${stopped.length} background task(s): ${stopped.join(", ")}`);
+    const stopped = killed.length + killedAgents.length;
+    if (stopped > 0) {
+      pushMessage("system", `${stopped} background task(s) still running; reports will be lost.`);
+      // Let the warning commit to static output before the app tears down.
+      setTimeout(exit, 50);
+      return;
     }
     exit();
   }, [exit, pushMessage]);
@@ -690,6 +735,7 @@ export function Repl({
           registry: createDefaultRegistry(),
           config,
           cwd,
+          system: SYSTEM_PROMPT,
           sessionStore: sessionStoreRef.current,
           contextMaxTokens: contextWindowTokens(config, name),
         });
@@ -733,14 +779,20 @@ export function Repl({
       if (!resumed) {
         return `Session not found: ${id}`;
       }
+      const store = await SessionStore.open(resolvedId);
+      if (!store) {
+        return `Session not found: ${id}`;
+      }
       await current.loadMessages(resumed.messages);
+      // Rebind persistence to the resumed session before anything else can
+      // write: without this, new messages/usage/snapshots keep landing in the
+      // previous session's directory.
+      current.setSessionStore(store);
+      sessionStoreRef.current = store;
       // Resuming is the explicit "continue this project" gesture: bring the
       // persisted todo list back into the panel (and the model's todo_read).
       setTodos(await loadTodos(cwd));
-      const store = await SessionStore.open(resolvedId);
-      if (store) {
-        hydrateSnapshots(await loadSessionSnapshots(store.dir));
-      }
+      hydrateSnapshots(await loadSessionSnapshots(store.dir));
       const display = buildDisplayMessages(resumed.messages);
       nextIdRef.current = display.length;
       applyMessages(display);
@@ -769,6 +821,7 @@ export function Repl({
       abortRef.current = controller;
       const turnStartedAt = Date.now();
       streamedRef.current = "";
+      lastCommittedLenRef.current = 0;
       thinkingRef.current = true;
       reasoningRef.current = "";
       turnChunksRef.current = 0;
@@ -783,22 +836,27 @@ export function Repl({
       // answers, so the live redraw area — and with it the visible flicker —
       // stays small no matter how long the answer gets.
       const commitStreamed = (tight: boolean) => {
-        if (streamedRef.current.length === 0) return;
-        pushAssistantChunk(streamedRef.current, tight);
+        const uncommitted = streamedRef.current.slice(lastCommittedLenRef.current);
+        if (uncommitted.length > 0) {
+          pushAssistantChunk(uncommitted, tight);
+        }
         streamedRef.current = "";
+        lastCommittedLenRef.current = 0;
         flushedRef.current = { ...flushedRef.current, streamed: "" };
         setStreamingText("");
       };
       tickerStopRef.current = startTicker((tick) => {
         setSpinnerTick(tick);
-        const split = splitCommittableLines(streamedRef.current, 8);
+        const uncommitted = streamedRef.current.slice(lastCommittedLenRef.current);
+        const split = splitCommittableLines(uncommitted, 8);
         if (split) {
           pushAssistantChunk(split.committed, true);
-          streamedRef.current = split.rest;
-          flushedRef.current = { ...flushedRef.current, streamed: "" };
+          // +1 for the newline splitCommittableLines consumed but did not
+          // include in either half.
+          lastCommittedLenRef.current += split.committed.length + 1;
         }
         const next: FlushState = {
-          streamed: streamedRef.current,
+          streamed: streamedRef.current.slice(lastCommittedLenRef.current),
           reasoning: reasoningRef.current,
         };
         if (nextFlush(flushedRef.current, next) !== null) {
@@ -874,6 +932,14 @@ export function Repl({
               usage.promptTokens += event.usage.promptTokens;
               usage.completionTokens += event.usage.completionTokens;
               usage.totalTokens += event.usage.totalTokens;
+              if (event.usage.cachedPromptTokens) {
+                usage.cachedPromptTokens =
+                  (usage.cachedPromptTokens ?? 0) + event.usage.cachedPromptTokens;
+              }
+              if (event.usage.cacheReadInputTokens) {
+                usage.cacheReadInputTokens =
+                  (usage.cacheReadInputTokens ?? 0) + event.usage.cacheReadInputTokens;
+              }
               if (cacheUsageReported(event.usage)) {
                 if (!usage.cache) usage.cache = { cachedTokens: 0, promptTokens: 0 };
                 addToCacheTotals(usage.cache, event.usage);
@@ -882,6 +948,13 @@ export function Repl({
               sessionStoreRef.current?.addUsage(event.usage).catch(() => {});
             }
           } else if (event.type === "retry") {
+            // The resend re-streams the reply from scratch, so roll the
+            // buffer back to the committed prefix: the failed attempt's
+            // uncommitted tail must go before it duplicates on screen.
+            // Already-committed chunks stay (static history can't be edited).
+            streamedRef.current = streamedRef.current.slice(0, lastCommittedLenRef.current);
+            flushedRef.current = { ...flushedRef.current, streamed: "" };
+            setStreamingText("");
             const wait =
               event.delayMs !== undefined && event.delayMs >= 1000
                 ? ` in ${Math.round(event.delayMs / 1000)}s`
@@ -917,8 +990,9 @@ export function Repl({
         setThinkingText("");
         setThoughtSummary(null);
         setActivity(null);
-        const finalText = streamedRef.current;
+        const finalText = streamedRef.current.slice(lastCommittedLenRef.current);
         streamedRef.current = "";
+        lastCommittedLenRef.current = 0;
         setStreamingText(null);
         const interrupted = controller.signal.aborted;
         notifyBell({
@@ -1118,10 +1192,12 @@ export function Repl({
         return ctx.permissionMode(picked);
       },
       pickSession: async (all) => {
-        const entries = (await listSessionEntries(all ? undefined : cwd)).slice(
-          0,
-          SESSION_PICKER_CAP,
-        );
+        // Resuming the live session would open a second SessionStore on the
+        // same directory and race its own meta writes — exclude it.
+        const currentId = sessionStoreRef.current?.id;
+        const entries = (await listSessionEntries(all ? undefined : cwd))
+          .filter((entry) => entry.meta.id !== currentId)
+          .slice(0, SESSION_PICKER_CAP);
         if (entries.length === 0) {
           return all ? "No sessions found." : "No sessions found for this directory.";
         }
@@ -1129,13 +1205,18 @@ export function Repl({
           entries.map(async ({ meta, messageCount }) => {
             const parts = [`${messageCount} messages · ${relativeTime(meta.updatedAt)}`];
             const preview = await sessionPreview(meta.id);
-            if (preview) parts.push(preview);
+            if (preview) {
+              parts.push(
+                preview.length > SESSION_PREVIEW_MAX
+                  ? `${preview.slice(0, SESSION_PREVIEW_MAX)}…`
+                  : preview,
+              );
+            }
             if (all) parts.push(`[${meta.cwd}]`);
             return {
               value: meta.id,
               label: meta.title || shortSessionId(meta.id),
               description: parts.join(" · "),
-              hint: meta.id === sessionStoreRef.current?.id ? "current" : undefined,
             };
           }),
         );
@@ -1485,6 +1566,10 @@ export function Repl({
             "system",
             `Unknown command: /${parsed.name} (try /help)${didYouMeanSuffix(suggestions)}`,
           );
+          return;
+        }
+        if (abortRef.current && BUSY_BLOCKED_COMMANDS.has(parsed.name)) {
+          pushMessage("system", "Busy — wait for the turn to finish or press Esc to interrupt it.");
           return;
         }
         void command.run(parsed.args, registry.ctx);

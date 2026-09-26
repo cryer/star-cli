@@ -1,6 +1,7 @@
 import { Box, Text, useStdout } from "ink";
 import { memo } from "react";
 import { formatDollars } from "../cost";
+import { toTerminalSafe } from "../terminal-text";
 
 interface StatusBarProps {
   cwd: string;
@@ -44,7 +45,8 @@ export const StatusBar = memo(function StatusBar({
 }: StatusBarProps) {
   const { stdout } = useStdout();
   const wide = (stdout?.columns ?? 80) >= WIDE_COLUMNS;
-  const joined = backgroundTasks.join(", ");
+  // Task commands/descriptions are model-influenced; escape before display.
+  const joined = backgroundTasks.map((label) => toTerminalSafe(label)).join(", ");
   const labels = joined.length > BG_LABEL_MAX ? `${joined.slice(0, BG_LABEL_MAX)}…` : joined;
   return (
     <Box justifyContent="space-between">

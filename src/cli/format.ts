@@ -1,5 +1,6 @@
 import type { CoreMessage } from "../core/messages";
 import type { DisplayMessage } from "./components/MessageList";
+import { toTerminalSafe } from "./terminal-text";
 
 export function summarizeArgs(args: unknown, maxLength = 120): string {
   let json: string;
@@ -59,7 +60,9 @@ export function buildDisplayMessages(messages: CoreMessage[]): DisplayMessage[] 
     if (message.role === "user" || message.role === "assistant") {
       const text = coreMessageText(message);
       if (text) {
-        display.push({ id: display.length, role: message.role, text });
+        // Restored history skips the streaming ingestion path, so escape it
+        // here instead (idempotent — live-turn text is already normalized).
+        display.push({ id: display.length, role: message.role, text: toTerminalSafe(text) });
       } else {
         collapsed++;
       }
@@ -71,7 +74,7 @@ export function buildDisplayMessages(messages: CoreMessage[]): DisplayMessage[] 
     display.push({
       id: display.length,
       role: "system",
-      text: `已恢复 ${collapsed} 条历史消息`,
+      text: `Restored ${collapsed} history message(s) not shown here.`,
     });
   }
   return display;

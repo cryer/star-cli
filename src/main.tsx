@@ -5,9 +5,10 @@ import { formatStreamError } from "./cli/format";
 import { MAX_IMAGE_BYTES, imageMimeType, readImageInput, resolveMentions } from "./cli/mentions";
 import { UsageTracker, eventToJsonLine } from "./cli/print-json";
 import { renderRepl } from "./cli/repl";
+import { SYSTEM_PROMPT } from "./cli/system-prompt";
 import { loadConfigSync } from "./config/loader";
 import { type StarConfig, contextWindowTokens } from "./config/schema";
-import type { CoreMessage, ImageInput } from "./core/messages";
+import { type CoreMessage, type ImageInput, reconcileToolCalls } from "./core/messages";
 import { createModel } from "./llm/provider";
 import { loadSessionSnapshots } from "./session/checkpoints";
 import { clearSessions } from "./session/clear";
@@ -17,24 +18,12 @@ import {
   listSessionEntries,
   resolveSessionId,
 } from "./session/list";
-import { resumeSession } from "./session/resume";
 import { type SessionMeta, SessionStore } from "./session/store";
 import { defaultTaskManager } from "./tasks/manager";
 import { createDefaultRegistry } from "./tools";
 import { hydrateSnapshots } from "./tools/fs/snapshots";
 import { loadTodos } from "./tools/todo";
 import { VERSION } from "./version";
-
-const SYSTEM_PROMPT = `You are Star CLI, an AI coding agent running in the user's terminal.
-You help with software engineering tasks: reading, writing and editing code, running shell commands, and managing todos.
-Be concise and direct. Use tools when they help accomplish the task.
-For any task with two or more steps, start by creating a todo list with todo_write and keep it updated as you progress; only mark an item completed after you have verified its result.
-The working directory is the user's project root; never touch files outside it without explicit instruction.
-For conversion, batch-processing, or other scriptable tasks, write a script file into the working directory and run it instead of pasting long inline code into the shell; once the script's output is verified, delete the script unless the user asked to keep it.
-When a tool call or command fails, read the error output, work out the cause, and try again with a corrected or alternative approach — never repeat an identical failing call without changing something.
-Never consider the task finished until you have verified the result yourself: run the tests, the build, or a check command that proves the output is correct, and if verification fails or reveals gaps, keep fixing until it passes.
-Do not end your turn while the task is still incomplete; keep going until it is done or you are genuinely blocked, and if you are blocked, state exactly what is missing.
-Never end a reply by announcing what you will do next — either do it now with tool calls, or do not mention it. Narrating future actions is not progress.`;
 
 async function createLoop(
   config: StarConfig,
@@ -61,6 +50,7 @@ async function printMode(
   cwd: string,
   json: boolean,
   imagePaths: string[],
+  sessionStore: SessionStore | null,
 ): Promise<number> {
   const flagImages: ImageInput[] = [];
   for (const imagePath of imagePaths) {
@@ -125,6 +115,11 @@ async function printMode(
         }
         case "finish":
           usage.add(event.usage);
+          // A resumed session (-c/-r -p) must accumulate this turn's usage,
+          // same as the REPL does; plain print runs have no store.
+          if (event.usage) {
+            sessionStore?.addUsage(event.usage).catch(() => {});
+          }
           break;
         case "retry": {
           if (!json) {
@@ -167,8 +162,14 @@ async function printMode(
     }
   }
   if (!json) process.stdout.write("\n");
-  defaultTaskManager.cleanup();
-  defaultAgentTasks.cleanup();
+  const killedShells = defaultTaskManager.cleanup();
+  const killedAgents = defaultAgentTasks.cleanup();
+  const stopped = killedShells.length + killedAgents.length;
+  if (stopped > 0) {
+    process.stderr.write(
+      `[info] ${stopped} background task(s) were still running and have been stopped.\n`,
+    );
+  }
   return exitCode;
 }
 
@@ -271,12 +272,20 @@ program
     }
 
     if (resumeId) {
-      resumed = await resumeSession(resumeId);
-      if (!resumed) {
+      // Open the store once and read through it: resumeSession() would open a
+      // second SessionStore instance on the same directory whose independent
+      // meta cache could race this instance's writes.
+      sessionStore = await SessionStore.open(resumeId);
+      if (!sessionStore) {
         console.error(`Session not found: ${resumeId}`);
         process.exit(1);
       }
-      sessionStore = await SessionStore.open(resumeId);
+      const [meta, loaded] = await Promise.all([sessionStore.meta(), sessionStore.messages()]);
+      const messages = reconcileToolCalls(loaded);
+      if (messages.length !== loaded.length) {
+        await sessionStore.replaceMessages(messages);
+      }
+      resumed = { meta, messages };
     } else if (!opts.print) {
       sessionStore = await SessionStore.create(cwd, modelName);
     }
@@ -307,6 +316,7 @@ program
         cwd,
         Boolean(opts.json),
         opts.image ?? [],
+        sessionStore,
       );
       return;
     }
