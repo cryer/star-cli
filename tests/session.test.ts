@@ -212,6 +212,44 @@ describe("SessionStore", () => {
       totalTokens: 3,
     });
   });
+
+  it("heals a mid-session corrupt meta.json from the cached meta instead of wiping it", async () => {
+    const store = await SessionStore.create("/tmp/work", "test-model");
+    await store.append({ role: "user", content: "hi" });
+
+    // A truncated write (crash, racing reader) must not turn the next write
+    // into a persisted fallback that loses model/cwd/usage.
+    fs.writeFileSync(path.join(store.dir, "meta.json"), "{not json");
+    await store.addUsage({ promptTokens: 10, completionTokens: 5, totalTokens: 15 });
+
+    const meta = readMeta(store.dir);
+    expect(meta.model).toBe("test-model");
+    expect(meta.cwd).toBe("/tmp/work");
+    expect(meta.usage?.totalTokens).toBe(15);
+  });
+
+  it("merges racing meta writers (append + addUsage + setTitle) without losing fields", async () => {
+    const store = await SessionStore.create("/tmp/work", "test-model");
+    await store.append({ role: "user", content: "hi" });
+
+    await Promise.all([
+      store.append({ role: "assistant", content: "hello" }),
+      store.addUsage({ promptTokens: 10, completionTokens: 5, totalTokens: 15 }),
+      store.setTitle("并发标题"),
+    ]);
+
+    const meta = readMeta(store.dir);
+    expect(meta.model).toBe("test-model");
+    expect(meta.cwd).toBe("/tmp/work");
+    expect(meta.title).toBe("并发标题");
+    expect(meta.usage).toEqual({
+      requests: 1,
+      promptTokens: 10,
+      completionTokens: 5,
+      totalTokens: 15,
+    });
+    expect(await store.messages()).toHaveLength(2);
+  });
 });
 
 describe("resumeSession", () => {

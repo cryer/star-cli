@@ -190,4 +190,50 @@ describe("AgentLoop session title", () => {
     expect(events.every((e) => e.type !== "error")).toBe(true);
     expect((await store.meta()).title).toBe("");
   });
+
+  it("titles the session from the first user message when the first step only calls tools", async () => {
+    let streamCalls = 0;
+    const generateCalls: string[] = [];
+    const model = new MockLanguageModelV1({
+      doStream: async (options) => {
+        streamCalls += 1;
+        if (streamCalls > 1) return textStream("修复完成")(options);
+        return {
+          stream: convertArrayToReadableStream([
+            {
+              type: "tool-call" as const,
+              toolCallType: "function" as const,
+              toolCallId: "call-1",
+              toolName: "read_file",
+              args: JSON.stringify({ path: "missing.txt" }),
+            },
+            {
+              type: "finish" as const,
+              finishReason: "tool-calls" as const,
+              usage: { promptTokens: 5, completionTokens: 3 },
+            },
+          ]),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+      doGenerate: async (options) => {
+        generateCalls.push(JSON.stringify(options.prompt));
+        return generateRound("修复登录缺陷")(options);
+      },
+    });
+    const store = await SessionStore.create(cwd, "test-model");
+    const loop = makeLoop(model, store);
+
+    const events = await collect(
+      loop.stream("帮我修复登录页面的 bug", new AbortController().signal),
+    );
+
+    expect(events.every((e) => e.type !== "error")).toBe(true);
+    expect(await waitForTitle(store)).toBe("修复登录缺陷");
+    // The turn-end completion check also calls doGenerate with the user text
+    // embedded; only the title call carries the title-writer system prompt.
+    const titleCalls = generateCalls.filter((p) => p.includes("short titles"));
+    expect(titleCalls).toHaveLength(1);
+    expect(titleCalls[0]).toContain("帮我修复登录页面的 bug");
+  });
 });

@@ -162,6 +162,7 @@ export class AgentLoop {
   // line up — in that case /undo only retracts messages, never wrong files.
   private turnMarkers: { seq: number; userIndex: number }[] = [];
   private titleScheduled = false;
+  private titleInput?: string;
   confirmHandler?: (req: PermissionRequest) => Promise<boolean>;
   // Hook failures never block the turn (except an explicit PreToolUse block);
   // their stderr surfaces through this callback (REPL system message / stderr
@@ -208,6 +209,7 @@ export class AgentLoop {
   setSessionStore(store: SessionStore | null): void {
     this.opts.sessionStore = store;
     this.titleScheduled = false;
+    this.titleInput = undefined;
     if (store) this.bindSnapshotHooks(store);
   }
 
@@ -318,13 +320,18 @@ export class AgentLoop {
     return removed;
   }
 
-  // After the first assistant reply, kick off background title generation
-  // for the session. Runs once per loop; the store-level title check makes
-  // resumed sessions that already have a title a no-op.
-  private maybeScheduleTitle(input: string): void {
+  // Background title generation runs once per loop, fed by the first real
+  // user message of the session. It must NOT latch on the first assistant
+  // step's text: that text is empty for a tool-call-only first step (the
+  // common agentic case), which used to burn the one-shot flag on an empty
+  // input and left every such session untitled. The store-level title check
+  // makes resumed sessions that already have a title a no-op.
+  private maybeScheduleTitle(): void {
     if (this.titleScheduled) return;
     const store = this.opts.sessionStore;
     if (!store) return;
+    const input = this.titleInput;
+    if (!input) return;
     this.titleScheduled = true;
     scheduleSessionTitle(store, input, this.opts.model);
   }
@@ -382,6 +389,9 @@ export class AgentLoop {
 
     const inputText = typeof input === "string" ? input : input.text;
     const images = typeof input === "string" ? [] : input.images;
+    if (this.titleInput === undefined && inputText.trim().length > 0) {
+      this.titleInput = inputText;
+    }
     const userMessage: CoreMessage =
       images.length > 0
         ? {
@@ -406,6 +416,7 @@ export class AgentLoop {
     await this.persist(
       opts?.persistAs !== undefined ? { role: "user", content: opts.persistAs } : userMessage,
     );
+    this.maybeScheduleTitle();
 
     const { config, registry, cwd } = this.opts;
     const aiTools = this.buildAiTools();
@@ -611,7 +622,6 @@ export class AgentLoop {
       };
       this.messages.push(assistantMessage);
       await this.persist(assistantMessage);
-      this.maybeScheduleTitle(text);
 
       if (toolCalls.length === 0) {
         // A turn that ends in text only is suspect: weaker models announce

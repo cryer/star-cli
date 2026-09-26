@@ -60,6 +60,9 @@ export class SessionStore {
 
   private pendingMeta: { cwd: string; model: string; createdAt: number } | null = null;
   private initialized = false;
+  private cachedMeta: SessionMeta | null = null;
+  private metaTmpSeq = 0;
+  private metaWriteQueue: Promise<void> = Promise.resolve();
 
   private constructor(id: string) {
     this.id = id;
@@ -120,6 +123,25 @@ export class SessionStore {
     return metas.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
+  // Meta writes are serialized per instance and land atomically (tmp file +
+  // rename) over a cached in-memory meta: the fire-and-forget title/usage
+  // writers race the loop's own appends, and a truncated read once turned
+  // fallbackMeta's empty defaults into a persisted wipe of model/cwd/usage.
+  private writeMeta(meta: SessionMeta): Promise<void> {
+    const tmp = `${this.metaPath()}.tmp-${process.pid}-${this.metaTmpSeq++}`;
+    const run = this.metaWriteQueue.then(async () => {
+      try {
+        await fs.writeFile(tmp, JSON.stringify(meta, null, 2));
+        await fs.rename(tmp, this.metaPath());
+      } catch (error) {
+        await fs.unlink(tmp).catch(() => {});
+        throw error;
+      }
+    });
+    this.metaWriteQueue = run.catch(() => {});
+    return run;
+  }
+
   private async ensureInitialized(): Promise<void> {
     if (this.initialized) return;
     const pending = this.pendingMeta;
@@ -136,7 +158,8 @@ export class SessionStore {
       createdAt: pending.createdAt,
       updatedAt: pending.createdAt,
     };
-    await fs.writeFile(this.metaPath(), JSON.stringify(meta, null, 2));
+    await this.writeMeta(meta);
+    this.cachedMeta = meta;
     this.initialized = true;
   }
 
@@ -145,7 +168,7 @@ export class SessionStore {
     await fs.appendFile(this.messagesPath(), `${JSON.stringify(message)}\n`);
     const meta = await this.meta();
     meta.updatedAt = Date.now();
-    await fs.writeFile(this.metaPath(), JSON.stringify(meta, null, 2));
+    await this.writeMeta(meta);
   }
 
   async replaceMessages(messages: CoreMessage[]): Promise<void> {
@@ -154,7 +177,7 @@ export class SessionStore {
     await fs.writeFile(this.messagesPath(), content ? `${content}\n` : "");
     const meta = await this.meta();
     meta.updatedAt = Date.now();
-    await fs.writeFile(this.metaPath(), JSON.stringify(meta, null, 2));
+    await this.writeMeta(meta);
   }
 
   async messages(): Promise<CoreMessage[]> {
@@ -184,10 +207,14 @@ export class SessionStore {
 
   async meta(): Promise<SessionMeta> {
     await this.ensureInitialized();
+    if (this.cachedMeta) return this.cachedMeta;
     try {
       const raw = await fs.readFile(this.metaPath(), "utf8");
-      return JSON.parse(raw) as SessionMeta;
+      this.cachedMeta = JSON.parse(raw) as SessionMeta;
+      return this.cachedMeta;
     } catch {
+      // The fallback is neither cached nor written back: a transient read
+      // failure must not turn into a persisted wipe of the real meta.
       debugWarn(`session ${this.id}: unreadable meta.json, using defaults`);
       return this.fallbackMeta();
     }
@@ -198,7 +225,7 @@ export class SessionStore {
     const meta = await this.meta();
     meta.title = title;
     meta.updatedAt = Date.now();
-    await fs.writeFile(this.metaPath(), JSON.stringify(meta, null, 2));
+    await this.writeMeta(meta);
   }
 
   async appendCheckpoint(record: CheckpointRecord, content: string | null): Promise<void> {
@@ -240,6 +267,6 @@ export class SessionStore {
     bucket.totalTokens += delta.totalTokens;
     byDay[day] = bucket;
     meta.usageByDay = byDay;
-    await fs.writeFile(this.metaPath(), JSON.stringify(meta, null, 2));
+    await this.writeMeta(meta);
   }
 }
