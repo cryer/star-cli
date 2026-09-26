@@ -92,15 +92,15 @@ export async function resolveSessionId(query: string): Promise<string | null> {
 export function relativeTime(timestamp: number): string {
   const diff = Date.now() - timestamp;
   const minutes = Math.floor(diff / 60_000);
-  if (minutes < 1) return "刚刚";
-  if (minutes < 60) return `${minutes} 分钟前`;
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 小时前`;
+  if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
-  if (days < 30) return `${days} 天前`;
+  if (days < 30) return `${days}d ago`;
   const months = Math.floor(days / 30);
-  if (months < 12) return `${months} 个月前`;
-  return `${Math.floor(months / 12)} 年前`;
+  if (months < 12) return `${months}mo ago`;
+  return `${Math.floor(months / 12)}y ago`;
 }
 
 export function formatSessionEntries(
@@ -109,10 +109,10 @@ export function formatSessionEntries(
 ): string {
   return entries
     .map(({ meta, messageCount }) => {
-      const title = meta.title || "(无标题)";
+      const title = meta.title || "(untitled)";
       const base =
         `${shortSessionId(meta.id)}  ${title}  ` +
-        `${messageCount} 条消息  更新于 ${relativeTime(meta.updatedAt)}`;
+        `${messageCount} messages  updated ${relativeTime(meta.updatedAt)}`;
       return options.showCwd ? `${base}  [${meta.cwd}]` : base;
     })
     .join("\n");

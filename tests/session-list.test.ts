@@ -244,7 +244,7 @@ describe("formatSessionEntries", () => {
     ];
 
     expect(formatSessionEntries(entries)).toBe(
-      "ab12cd  调试会话  4 条消息  更新于 1 小时前\n" + "ef34gh  (无标题)  0 条消息  更新于 2 天前",
+      "ab12cd  调试会话  4 messages  updated 1h ago\n" + "ef34gh  (untitled)  0 messages  updated 2d ago",
     );
     vi.useRealTimers();
   });
@@ -267,7 +267,7 @@ describe("formatSessionEntries", () => {
     ];
 
     expect(formatSessionEntries(entries, { showCwd: true })).toBe(
-      "ab12cd  跨目录  1 条消息  更新于 刚刚  [/work/other]",
+      "ab12cd  跨目录  1 messages  updated just now  [/work/other]",
     );
     vi.useRealTimers();
   });
