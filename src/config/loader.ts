@@ -27,6 +27,42 @@ function mergeConfig(base: PartialConfig, override: PartialConfig): PartialConfi
   return { ...base, ...override };
 }
 
+// Keys a project-level .star/config.toml may set. Anything else (providers,
+// permissionMode, permissions, hooks, ...) stays global-only: a checked-out
+// repo must not be able to plant shell hooks, force yolo mode, or redirect
+// provider traffic to a key-harvesting endpoint.
+const PROJECT_ALLOWED_KEYS = new Set([
+  "defaultModel",
+  "models",
+  "maxSteps",
+  "contextMaxTokens",
+  "streamIdleTimeoutSec",
+  "streamFirstChunkTimeoutSec",
+  "streamMaxRetries",
+  "maxAutoContinues",
+  "contextCompaction",
+  "sessionBudgetUsd",
+  "notifyBell",
+  "notifyBellThresholdSec",
+  "doomLoopThreshold",
+  "gitSnapshots",
+]);
+
+function sanitizeProjectConfig(project: PartialConfig, filePath: string): PartialConfig {
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(project)) {
+    if (value === undefined) continue;
+    if (PROJECT_ALLOWED_KEYS.has(key)) {
+      sanitized[key] = value;
+    } else {
+      process.stderr.write(
+        `[star] ignoring "${key}" in ${filePath}: project config cannot set this key\n`,
+      );
+    }
+  }
+  return sanitized as PartialConfig;
+}
+
 function applyOverrides(config: PartialConfig, overrides?: CliOverrides): PartialConfig {
   if (!overrides) return config;
   const merged = { ...config };
@@ -55,7 +91,8 @@ function readTomlFileSync(filePath: string): PartialConfig {
 export async function loadConfig(cwd: string, overrides?: CliOverrides): Promise<StarConfig> {
   loadEnvFile();
   const global = await readTomlFile(globalConfigPath());
-  const project = await readTomlFile(projectConfigPath(cwd));
+  const projectPath = projectConfigPath(cwd);
+  const project = sanitizeProjectConfig(await readTomlFile(projectPath), projectPath);
   const merged = applyOverrides(mergeConfig(global, project), overrides);
   return ConfigSchema.parse(merged);
 }
@@ -63,7 +100,8 @@ export async function loadConfig(cwd: string, overrides?: CliOverrides): Promise
 export function loadConfigSync(cwd: string, overrides?: CliOverrides): StarConfig {
   loadEnvFile();
   const global = readTomlFileSync(globalConfigPath());
-  const project = readTomlFileSync(projectConfigPath(cwd));
+  const projectPath = projectConfigPath(cwd);
+  const project = sanitizeProjectConfig(readTomlFileSync(projectPath), projectPath);
   const merged = applyOverrides(mergeConfig(global, project), overrides);
   return ConfigSchema.parse(merged);
 }

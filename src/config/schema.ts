@@ -27,6 +27,10 @@ export const ModelConfigSchema = z.object({
   // the model is treated as unpriced.
   promptPrice: z.number().nonnegative().optional(),
   completionPrice: z.number().nonnegative().optional(),
+  // Optional price (USD per 1M tokens) for cache-read prompt tokens. When
+  // unset, OpenAI-style cached tokens bill at promptPrice and Anthropic-style
+  // cache reads are not billed — set this for accurate cache pricing.
+  cacheReadPrice: z.number().nonnegative().optional(),
 });
 
 export const PermissionsConfigSchema = z.object({
@@ -95,6 +99,16 @@ export const ConfigSchema = z.object({
   notifyBellThresholdSec: z.number().positive().default(10),
   permissions: PermissionsConfigSchema.default({ allow: [], deny: [] }),
   hooks: z.array(HookConfigSchema).default([]),
+  // Consecutive identical tool calls (same tool + same arguments) allowed
+  // before the loop refuses to execute the repeat and tells the model to
+  // change approach — a guard against agents stuck retrying a failing call
+  // (opencode's doom_loop). 0 disables.
+  doomLoopThreshold: z.number().int().min(0).default(3),
+  // Track the whole working tree with an internal git repo (outside the
+  // user's .git) at every turn boundary, so /undo and /redo can restore
+  // changes made by ANY tool (bash included), not just write_file/edit_file.
+  // Falls back silently to per-file snapshots when git is unavailable.
+  gitSnapshots: z.boolean().default(true),
 });
 
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
