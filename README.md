@@ -52,6 +52,8 @@ Config file: `~/.star-cli/config.toml` (project-level override: `.star/config.to
 defaultModel = "gpt"
 permissionMode = "ask"   # ask | auto | readonly | yolo | plan
 contextMaxTokens = 100000
+# compactThresholdTokens = 80000   # optional auto-compaction trigger in tokens; defaults to the
+                                  # context window. /compact always compacts, regardless of this.
 contextCompaction = "summary"   # summary | truncate — how over-budget history is compacted
 # Seconds with no stream output before a stalled response is ended gracefully
 # (some relays never close the stream). The first token gets a fixed 120s allowance.
@@ -148,7 +150,7 @@ star --clear-sessions all     delete every stored session
 | `/connect` | interactive provider onboarding wizard: pick a preset or custom endpoint, paste the API key (masked), name a model — appends `[[providers]]`/`[[models]]` to the config, stores the key in `~/.star-cli/.env` (never in `config.toml`), and can set the new model as default + switch to it immediately |
 | `/plan` | toggle plan mode: read-only research, then approve the generated plan before it executes (session-only) |
 | `/memory [add <text>]` | show the long-term memory file (`~/.star-cli/MEMORY.md`, injected into every session's system prompt), or append a line to it — see [Long-term memory](#long-term-memory) |
-| `/compact` | compact conversation history to free up context |
+| `/compact` | compact conversation history now — always runs, even below the auto-compact threshold |
 | `/export [path]` | export the current session to a Markdown file |
 | `/undo` | undo the last conversation turn: revert its file changes (write_file/edit_file) and retract its messages — earlier turns are never touched (previews the message count and per-file revert diffs, then asks for confirmation) |
 | `/rewind [n]` | list file-change checkpoints, or rewind to just before checkpoint `n`: restore every file changed since then and retract the matching conversation messages (asks for confirmation first) |

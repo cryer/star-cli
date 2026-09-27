@@ -65,6 +65,11 @@ export const ConfigSchema = z.object({
   models: z.array(ModelConfigSchema).default([]),
   maxSteps: z.number().int().positive().default(50),
   contextMaxTokens: z.number().int().positive().default(100_000),
+  // Token threshold at which the agent loop auto-compacts the history.
+  // Defaults to the effective context window (compact only when full); set a
+  // lower value to compact earlier and keep headroom. Manual /compact ignores
+  // this — it always compacts.
+  compactThresholdTokens: z.number().int().positive().optional(),
   // Seconds without any stream part before a stalled response is ended
   // gracefully (some relays never send the terminal chunks). Applies once
   // streaming has started; the first part gets a longer, fixed allowance.
@@ -78,8 +83,10 @@ export const ConfigSchema = z.object({
   // The wait between attempts honors Retry-After headers and otherwise backs
   // off exponentially with jitter (llm/retry.ts); retries after a
   // timeout/empty failure also scale both stream timeouts up (attempt number
-  // ×, capped at 3x) since the relay is likely overloaded.
-  streamMaxRetries: z.number().int().min(0).default(3),
+  // ×, capped at 3x) since the relay is likely overloaded. Default 5 matches
+  // opencode/Codex retry budgets and rides out flaky relays (中转站) better
+  // than a minimal budget.
+  streamMaxRetries: z.number().int().min(0).default(5),
   // How many consecutive unproductive replies may be nudged before the turn
   // is handed back: a text-only reply that announces pending work ("我将…",
   // "I will…") or answers a nudge with more words, or an empty reply that
@@ -123,6 +130,14 @@ export function contextWindowTokens(config: StarConfig, modelName: string): numb
   return (
     config.models.find((m) => m.name === modelName)?.contextMaxTokens ?? config.contextMaxTokens
   );
+}
+
+// Token threshold that triggers automatic compaction in the agent loop:
+// config.compactThresholdTokens when set, clamped to the window so a stale
+// value (e.g. after switching to a smaller model) never pushes compaction
+// past it; otherwise the window itself (current behavior).
+export function resolveCompactThreshold(config: StarConfig, windowTokens: number): number {
+  return Math.min(config.compactThresholdTokens ?? windowTokens, windowTokens);
 }
 
 export interface CliOverrides {

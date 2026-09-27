@@ -36,6 +36,7 @@ const PROJECT_ALLOWED_KEYS = new Set([
   "models",
   "maxSteps",
   "contextMaxTokens",
+  "compactThresholdTokens",
   "streamIdleTimeoutSec",
   "streamFirstChunkTimeoutSec",
   "streamMaxRetries",

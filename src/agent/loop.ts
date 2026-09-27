@@ -1,5 +1,5 @@
 import { type LanguageModel, tool as aiTool, generateText } from "ai";
-import type { StarConfig } from "../config/schema";
+import { type StarConfig, resolveCompactThreshold } from "../config/schema";
 import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
 import type { StreamEvent } from "../core/events";
 import { formatGitSummary, getGitSummaryCached } from "../core/git";
@@ -600,7 +600,12 @@ export class AgentLoop {
         }
       }
       const maxTokens = this.opts.contextMaxTokens ?? config.contextMaxTokens;
-      const compacted = compactMessages([...this.messages], maxTokens);
+      // Auto-compaction fires at compactThresholdTokens when configured
+      // (clamped to the window), otherwise only once the window is full.
+      const compacted = compactMessages(
+        [...this.messages],
+        resolveCompactThreshold(config, maxTokens),
+      );
       if (compacted.compacted) {
         this.messages = await this.applyCompactionSummary(compacted, signal);
         // Compaction rewrote the history wholesale, so recorded turn indices
@@ -722,7 +727,10 @@ export class AgentLoop {
         )
           break;
 
-        const delayMs = computeRetryDelayMs(attempt, baseDelay, failure);
+        // An empty reply is the signature of an overloaded relay answering
+        // with an empty stub, so resend more patiently than after a hard
+        // error (doubled base delay) to give the relay time to recover.
+        const delayMs = computeRetryDelayMs(attempt, failure ? baseDelay : baseDelay * 2, failure);
         yield {
           type: "retry",
           attempt: attempt + 2,

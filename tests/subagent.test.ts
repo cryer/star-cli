@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentTaskManager, defaultAgentTasks } from "../src/agent/agent-tasks";
+import {
+  AgentTaskManager,
+  type AgentTaskSnapshot,
+  defaultAgentTasks,
+  formatAgentTaskUpdate,
+} from "../src/agent/agent-tasks";
 import { AgentLoop, type AgentLoopOptions } from "../src/agent/loop";
 import type { StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
@@ -418,5 +423,41 @@ describe("AgentTaskManager record pruning", () => {
     expect(manager.list()).toHaveLength(50);
     expect(manager.get("agent-11")).toBeUndefined();
     expect(manager.get("agent-61")).toBeDefined();
+  });
+});
+
+describe("formatAgentTaskUpdate", () => {
+  const task = (overrides: Partial<AgentTaskSnapshot>): AgentTaskSnapshot => ({
+    id: "agent-1",
+    prompt: "do the thing",
+    status: "running",
+    startedAt: 0,
+    result: "",
+    ...overrides,
+  });
+
+  it("announces starts and plain completions", () => {
+    expect(formatAgentTaskUpdate(task({}))).toBe("Background subagent agent-1 started");
+    expect(
+      formatAgentTaskUpdate(task({ status: "completed", description: "调研", result: "done" })),
+    ).toBe("Background subagent agent-1 completed: 调研");
+  });
+
+  it("appends the failure reason, stripping the wrapper prefix", () => {
+    const result = [
+      "Subagent failed: The model returned an empty response after retries; ending the turn.",
+      "[subagent: 13 tool call(s)]",
+      "partial report",
+    ].join("\n");
+    expect(formatAgentTaskUpdate(task({ status: "failed", result }))).toBe(
+      "Background subagent agent-1 failed — The model returned an empty response after retries; ending the turn.",
+    );
+  });
+
+  it("truncates a long failure reason", () => {
+    const result = `Subagent failed: ${"x".repeat(300)}`;
+    const text = formatAgentTaskUpdate(task({ status: "failed", result }));
+    expect(text.length).toBeLessThan(200);
+    expect(text).toContain("…");
   });
 });

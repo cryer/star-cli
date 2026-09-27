@@ -38,10 +38,12 @@ export async function compactSession(opts: CompactSessionOptions): Promise<Compa
     };
   }
   const beforeTokens = estimateTokens(messages);
-  const compacted = compactMessages(messages, config.contextMaxTokens);
+  // Manual compaction is explicit user intent: force it regardless of the
+  // token budget instead of refusing while under contextMaxTokens.
+  const compacted = compactMessages(messages, config.contextMaxTokens, { force: true });
   if (!compacted.compacted) {
     return {
-      message: `Nothing to compact: ~${beforeTokens} estimated tokens, below the limit of ${config.contextMaxTokens}.`,
+      message: `Nothing to compact: history is too short to drop a whole turn (~${beforeTokens} estimated tokens).`,
       compacted: false,
     };
   }

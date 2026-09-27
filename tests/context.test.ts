@@ -142,4 +142,29 @@ describe("compactMessages", () => {
     expect(placeholder?.role).toBe("user");
     expect(placeholder?.content).toBe("[context compacted: 2 earlier messages dropped]");
   });
+
+  it("force compacts even when under budget, keeping the last 4 messages", () => {
+    const messages = [
+      system("sys"),
+      user(pad(400)),
+      assistant(pad(400)),
+      user("u2"),
+      assistant("a2"),
+      user("u3"),
+      assistant("a3"),
+    ];
+    const result = compactMessages(messages, 10_000, { force: true });
+    expect(result.compacted).toBe(true);
+    expect(result.droppedCount).toBe(2);
+    expect(result.messages[0]?.role).toBe("system");
+    expect(result.messages[1]?.content).toBe("[context compacted: 2 earlier messages dropped]");
+    expect(result.messages.slice(2)).toEqual(messages.slice(3));
+  });
+
+  it("force still refuses when no whole turn can be dropped", () => {
+    const messages = [user("u1"), assistant("a1"), user("u2"), assistant("a2"), user("u3")];
+    const result = compactMessages(messages, 10_000, { force: true });
+    expect(result.compacted).toBe(false);
+    expect(result.messages).toEqual(messages);
+  });
 });

@@ -52,6 +52,8 @@ star -p "hi"             # non-interactive print mode
 defaultModel = "gpt"
 permissionMode = "ask"   # ask | auto | readonly | yolo | plan
 contextMaxTokens = 100000
+# compactThresholdTokens = 80000   # optional auto-compaction trigger in tokens; defaults to the
+                                  # context window. /compact always compacts, regardless of this.
 contextCompaction = "summary"   # summary | truncate — how over-budget history is compacted
 # Seconds with no stream output before a stalled response is ended gracefully
 # (some relays never close the stream). The first token gets a fixed 120s allowance.
@@ -148,7 +150,7 @@ star --clear-sessions all     delete every stored session
 | `/connect` | 交互式服务商接入向导：选择预设或自定义端点，粘贴 API 密钥（掩码显示），命名模型——把 `[[providers]]`/`[[models]]` 追加到配置，密钥存入 `~/.star-cli/.env`（绝不写入 `config.toml`），还可将新模型设为默认并立即切换 |
 | `/plan` | 切换计划模式：先只读调研，再批准生成的计划后才执行（仅会话内有效） |
 | `/memory [add <text>]` | 查看长期记忆文件（`~/.star-cli/MEMORY.md`，注入每个会话的系统提示词），或向其中追加一行——见[长期记忆](#长期记忆) |
-| `/compact` | 压缩对话历史以释放上下文 |
+| `/compact` | 立即压缩对话历史——低于自动压缩阈值时也会执行 |
 | `/export [path]` | 将当前会话导出为 Markdown 文件 |
 | `/undo` | 撤销上一轮对话：还原其文件改动（write_file/edit_file）并撤回其消息——更早的回合不受影响（先预览消息数量与逐文件还原 diff，再要求确认） |
 | `/rewind [n]` | 列出文件改动检查点，或回滚到检查点 `n` 之前：还原此后改动的所有文件并撤回对应的对话消息（先要求确认） |

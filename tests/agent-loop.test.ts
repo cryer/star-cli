@@ -693,6 +693,50 @@ describe("AgentLoop", () => {
     }
   });
 
+  it("waits on a doubled base delay before resending after an empty reply", async () => {
+    const loop = new AgentLoop({
+      model: mockModel([[]]),
+      registry: createDefaultRegistry(),
+      config: makeConfig({ streamMaxRetries: 1, maxAutoContinues: 0 }),
+      cwd,
+      retryDelayMs: 100,
+    });
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    const retry = events.find((e) => e.type === "retry");
+    if (retry?.type !== "retry") throw new Error("expected a retry event");
+    // Empty replies are the relay-overload signature: base 100ms doubled to
+    // 200ms, plus up to 25% jitter.
+    expect(retry.delayMs).toBeGreaterThanOrEqual(200);
+    expect(retry.delayMs).toBeLessThanOrEqual(250);
+  });
+
+  it("keeps the base delay for hard stream errors", async () => {
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: convertArrayToReadableStream([
+          { type: "error", error: new Error("relay down") } satisfies Chunk,
+        ]),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+    const loop = new AgentLoop({
+      model,
+      registry: createDefaultRegistry(),
+      config: makeConfig({ streamMaxRetries: 1 }),
+      cwd,
+      retryDelayMs: 100,
+    });
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    const retry = events.find((e) => e.type === "retry");
+    if (retry?.type !== "retry") throw new Error("expected a retry event");
+    expect(retry.delayMs).toBeGreaterThanOrEqual(100);
+    expect(retry.delayMs).toBeLessThanOrEqual(125);
+  });
+
   it("steers an empty stop reply with a nudge after the retry budget is spent", async () => {
     const emptyStop: Chunk[] = [
       {

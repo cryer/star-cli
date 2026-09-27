@@ -158,3 +158,23 @@ export class AgentTaskManager extends EventEmitter {
 }
 
 export const defaultAgentTasks = new AgentTaskManager();
+
+// One-line REPL announcement for a task status change. A failure is the final
+// state after the child loop's own retries, so the reason (first line of the
+// failure report, which reads "Subagent failed: <cause>") is surfaced inline —
+// a bare "failed" looks like a transient hiccup even though the full report
+// has been delivered to the main agent, which decides how to recover.
+export function formatAgentTaskUpdate(task: AgentTaskSnapshot): string {
+  const label = task.description ? `: ${task.description}` : "";
+  if (task.status === "running") {
+    return `Background subagent ${task.id} started${label}`;
+  }
+  let text = `Background subagent ${task.id} ${task.status}${label}`;
+  if (task.status === "failed") {
+    const reason = (task.result.split("\n")[0] ?? "").replace(/^Subagent failed:\s*/, "");
+    if (reason) {
+      text += ` — ${reason.length > 140 ? `${reason.slice(0, 140)}…` : reason}`;
+    }
+  }
+  return text;
+}

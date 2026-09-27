@@ -63,8 +63,22 @@ export async function summarizeMessages(
   return text.trim();
 }
 
-export function compactMessages(messages: CoreMessage[], maxTokens: number): CompactionResult {
-  if (estimateTokens(messages) <= maxTokens) {
+export interface CompactOptions {
+  // Manual /compact: compact even when under the token budget, dropping whole
+  // turns down to MIN_KEPT_MESSAGES instead of refusing. Auto-compaction in
+  // the agent loop never forces.
+  force?: boolean;
+}
+
+export function compactMessages(
+  messages: CoreMessage[],
+  maxTokens: number,
+  opts: CompactOptions = {},
+): CompactionResult {
+  // Forced compaction uses a zero budget: the under-budget exits below never
+  // fire, so turns are dropped until only MIN_KEPT_MESSAGES would remain.
+  const limit = opts.force ? 0 : maxTokens;
+  if (estimateTokens(messages) <= limit) {
     return { messages, compacted: false, droppedCount: 0 };
   }
 
@@ -93,7 +107,7 @@ export function compactMessages(messages: CoreMessage[], maxTokens: number): Com
     droppedCount += turn.length;
     turnIndex += 1;
     const candidate = [...head, placeholderMessage(droppedCount), ...rest.slice(droppedCount)];
-    if (estimateTokens(candidate) <= maxTokens) {
+    if (estimateTokens(candidate) <= limit) {
       break;
     }
   }

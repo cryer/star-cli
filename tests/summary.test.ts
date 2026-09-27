@@ -197,6 +197,40 @@ describe("AgentLoop compaction summary", () => {
     expect(first?.content).toBe("[earlier conversation summarized]\nSUMMARY TEXT");
   });
 
+  it("auto-compacts at compactThresholdTokens below the context window", async () => {
+    const loop = makeLoop(
+      new MockLanguageModelV1({
+        doGenerate: generateRound("SUMMARY TEXT"),
+        doStream: textStream("ok"),
+      }),
+      { contextMaxTokens: 100_000, compactThresholdTokens: 90 },
+    );
+    await loadLongHistory(loop);
+
+    await collect(loop.stream("hi", new AbortController().signal));
+
+    const first = loop.getMessages()[0];
+    expect(first?.role).toBe("user");
+    expect(first?.content).toBe("[earlier conversation summarized]\nSUMMARY TEXT");
+  });
+
+  it("does not auto-compact below the context window without a threshold", async () => {
+    const loop = makeLoop(
+      new MockLanguageModelV1({
+        doGenerate: generateRound("SUMMARY TEXT"),
+        doStream: textStream("ok"),
+      }),
+      { contextMaxTokens: 100_000 },
+    );
+    await loadLongHistory(loop);
+
+    await collect(loop.stream("hi", new AbortController().signal));
+
+    const first = loop.getMessages()[0];
+    expect(first?.role).toBe("user");
+    expect(first?.content).toBe(pad(400));
+  });
+
   it("falls back to the truncation placeholder when the summary call throws", async () => {
     const loop = makeLoop(
       new MockLanguageModelV1({

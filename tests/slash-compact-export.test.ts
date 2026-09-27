@@ -109,7 +109,32 @@ describe("slash /compact and /export", () => {
       expect(fs.existsSync(store.dir)).toBe(false);
     });
 
-    it("reports no-op when history is below the token threshold", async () => {
+    it("compacts even when history is below the token threshold", async () => {
+      const loop = makeLoop(new MockLanguageModelV1({ doGenerate: generateRound("s") }));
+      await loop.loadMessages([
+        user("u1"),
+        assistant("a1"),
+        user("u2"),
+        assistant("a2"),
+        user("u3"),
+        assistant("a3"),
+      ]);
+
+      const result = await compactSession({
+        backend: loop,
+        sessionStore: null,
+        config: makeConfig({ contextMaxTokens: 100_000 }),
+        model: null,
+      });
+
+      expect(result.compacted).toBe(true);
+      expect(result.message).toContain("Compacted context: 6 -> 5 messages");
+      expect(loop.getMessages()[0]?.content).toBe(
+        "[context compacted: 2 earlier messages dropped]",
+      );
+    });
+
+    it("refuses when no whole turn can be dropped", async () => {
       const loop = makeLoop(new MockLanguageModelV1({ doGenerate: generateRound("s") }));
       await loop.loadMessages([
         user("u1"),
@@ -127,7 +152,7 @@ describe("slash /compact and /export", () => {
       });
 
       expect(result.compacted).toBe(false);
-      expect(result.message).toContain("below the limit");
+      expect(result.message).toContain("too short to drop a whole turn");
       expect(loop.getMessages()).toHaveLength(5);
     });
 

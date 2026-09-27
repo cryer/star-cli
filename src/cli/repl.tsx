@@ -1,6 +1,10 @@
 import { Box, Text, render, useApp, useInput } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type AgentTaskSnapshot, defaultAgentTasks } from "../agent/agent-tasks";
+import {
+  type AgentTaskSnapshot,
+  defaultAgentTasks,
+  formatAgentTaskUpdate,
+} from "../agent/agent-tasks";
 import { AgentLoop } from "../agent/loop";
 import { globalConfigPath } from "../config/paths";
 import { addAllowRule, savePermissionMode } from "../config/save";
@@ -583,13 +587,7 @@ export function Repl({
     };
     const onAgentUpdate = (task: AgentTaskSnapshot) => {
       setBgLabels(runningTaskLabels());
-      const label = task.description ? `: ${toTerminalSafe(task.description)}` : "";
-      pushMessage(
-        "system",
-        task.status === "running"
-          ? `Background subagent ${task.id} started${label}`
-          : `Background subagent ${task.id} ${task.status}${label}`,
-      );
+      pushMessage("system", toTerminalSafe(formatAgentTaskUpdate(task)));
       if (task.status !== "running") {
         notifyBell({
           enabled: configRef.current.notifyBell,
@@ -1304,18 +1302,29 @@ export function Repl({
         } catch {
           summaryModel = null;
         }
-        const result = await compactSession({
-          backend: backendRef.current,
-          sessionStore: sessionStoreRef.current,
-          config,
-          model: summaryModel,
-        });
-        if (result.compacted && result.messages) {
-          const display = buildDisplayMessages(result.messages);
-          nextIdRef.current = display.length;
-          applyMessages(display);
+        // /compact is refused mid-turn, so the stream ticker is free to reuse:
+        // drive the spinner with a busy label while compaction runs — the
+        // summary call alone can take up to 60s on a slow relay.
+        tickerStopRef.current = startTicker((tick) => setSpinnerTick(tick));
+        setActivity("compacting context…");
+        try {
+          const result = await compactSession({
+            backend: backendRef.current,
+            sessionStore: sessionStoreRef.current,
+            config,
+            model: summaryModel,
+          });
+          if (result.compacted && result.messages) {
+            const display = buildDisplayMessages(result.messages);
+            nextIdRef.current = display.length;
+            applyMessages(display);
+          }
+          return result.message;
+        } finally {
+          tickerStopRef.current?.();
+          tickerStopRef.current = null;
+          setActivity(null);
         }
-        return result.message;
       },
       exportSession: (arg) =>
         exportSession({
@@ -1512,6 +1521,7 @@ export function Repl({
           `models (${config.models.length}): ${config.models.map((m) => m.name).join(", ") || "(none)"}`,
           `maxSteps: ${config.maxSteps}`,
           `contextMaxTokens: ${config.contextMaxTokens}`,
+          `compactThresholdTokens: ${config.compactThresholdTokens ?? "(context window)"}`,
           `streamIdleTimeoutSec: ${config.streamIdleTimeoutSec}`,
           `streamFirstChunkTimeoutSec: ${config.streamFirstChunkTimeoutSec}`,
           `streamMaxRetries: ${config.streamMaxRetries}`,
