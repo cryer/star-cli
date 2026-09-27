@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -266,6 +267,51 @@ describe("SessionStore", () => {
 
     expect(reopened).not.toBeNull();
     expect(fs.existsSync(orphan)).toBe(false);
+  });
+
+  it("retries meta writes past transient EPERM rename failures", async () => {
+    // Windows antivirus/indexers briefly lock freshly written files; the
+    // rename must ride out the scan instead of killing the agent turn.
+    const realRename = fsPromises.rename;
+    let failuresLeft = 2;
+    const spy = vi.spyOn(fsPromises, "rename").mockImplementation(async (oldPath, newPath) => {
+      if (failuresLeft > 0) {
+        failuresLeft--;
+        const error: NodeJS.ErrnoException = new Error("EPERM: operation not permitted, rename");
+        error.code = "EPERM";
+        throw error;
+      }
+      return realRename(oldPath, newPath);
+    });
+    try {
+      const store = await SessionStore.create("/a", "m");
+      await store.append({ role: "user", content: "hi" });
+
+      expect(spy).toHaveBeenCalled();
+      expect(readMeta(store.dir)).toMatchObject({ id: store.id, cwd: "/a" });
+      expect(await store.messages()).toEqual([{ role: "user", content: "hi" }]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("keeps appending messages when meta writes fail permanently", async () => {
+    const spy = vi
+      .spyOn(fsPromises, "rename")
+      .mockRejectedValue(
+        Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" }),
+      );
+    try {
+      const store = await SessionStore.create("/a", "m");
+      await store.append({ role: "user", content: "hi" });
+
+      // The meta write is bookkeeping and may be dropped; the message itself
+      // must still be durable and the append must not throw.
+      expect(await store.messages()).toEqual([{ role: "user", content: "hi" }]);
+      expect(fs.existsSync(path.join(store.dir, "meta.json"))).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("serializes concurrent checkpoint appends without losing records", async () => {

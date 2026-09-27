@@ -52,6 +52,17 @@ function debugWarn(message: string): void {
   if (process.env.STAR_DEBUG === "1") process.stderr.write(`[star-cli] ${message}\n`);
 }
 
+// Windows antivirus and search indexers briefly lock freshly written files,
+// so a rename right after the write can come back EPERM/EACCES/EBUSY; a few
+// short retries ride out the scan.
+const META_WRITE_MAX_ATTEMPTS = 5;
+const META_WRITE_RETRY_DELAY_MS = 25;
+
+function isTransientFsError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "EPERM" || code === "EACCES" || code === "EBUSY";
+}
+
 // Brands the fallback meta returned for a corrupt/unreadable meta.json so
 // writeMeta can refuse to persist it: writing the empty defaults back would
 // wipe the real model/cwd/usage fields still sitting in the damaged file.
@@ -145,16 +156,32 @@ export class SessionStore {
   // writers race the loop's own appends, and a truncated read once turned
   // fallbackMeta's empty defaults into a persisted wipe of model/cwd/usage.
   // A branded fallback meta is never written back for the same reason.
+  // A write that still fails after retries is dropped rather than thrown:
+  // meta.json is bookkeeping the cached meta rebuilds on the next write,
+  // while the conversation itself lives in messages.jsonl — killing the
+  // agent turn over a stale updatedAt would be the wrong trade.
   private writeMeta(meta: SessionMeta): Promise<void> {
     if (isFallbackMeta(meta)) return Promise.resolve();
     const tmp = `${this.metaPath()}.tmp-${process.pid}-${this.metaTmpSeq++}`;
     const run = this.metaWriteQueue.then(async () => {
-      try {
-        await fs.writeFile(tmp, JSON.stringify(meta, null, 2));
-        await fs.rename(tmp, this.metaPath());
-      } catch (error) {
-        await fs.unlink(tmp).catch(() => {});
-        throw error;
+      for (let attempt = 0; attempt < META_WRITE_MAX_ATTEMPTS; attempt++) {
+        try {
+          await fs.writeFile(tmp, JSON.stringify(meta, null, 2));
+          await fs.rename(tmp, this.metaPath());
+          return;
+        } catch (error) {
+          if (isTransientFsError(error) && attempt + 1 < META_WRITE_MAX_ATTEMPTS) {
+            await new Promise((resolve) =>
+              setTimeout(resolve, META_WRITE_RETRY_DELAY_MS * (attempt + 1)),
+            );
+            continue;
+          }
+          await fs.unlink(tmp).catch(() => {});
+          debugWarn(
+            `session ${this.id}: meta write failed (${(error as NodeJS.ErrnoException).code ?? String(error)}), skipping`,
+          );
+          return;
+        }
       }
     });
     this.metaWriteQueue = run.catch(() => {});
