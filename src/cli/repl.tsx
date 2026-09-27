@@ -1519,7 +1519,7 @@ export function Repl({
           `permissionMode: ${config.permissionMode}`,
           `providers (${config.providers.length}): ${config.providers.map((p) => p.name).join(", ") || "(none)"}`,
           `models (${config.models.length}): ${config.models.map((m) => m.name).join(", ") || "(none)"}`,
-          `maxSteps: ${config.maxSteps}`,
+          `maxSteps: ${config.maxSteps === 0 ? "unlimited" : config.maxSteps}`,
           `contextMaxTokens: ${config.contextMaxTokens}`,
           `compactThresholdTokens: ${config.compactThresholdTokens ?? "(context window)"}`,
           `streamIdleTimeoutSec: ${config.streamIdleTimeoutSec}`,

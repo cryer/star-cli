@@ -584,7 +584,34 @@ export class AgentLoop {
     // "work still pending" signal that needs no text interpretation.
     let openTodos: string[] = [];
 
-    for (let step = 0; step < config.maxSteps; step++) {
+    // One step = one model round-trip: the streamed reply plus every tool
+    // call it asked for. Stream retries have their own budget
+    // (streamMaxRetries) and auto-continue nudges theirs (maxAutoContinues),
+    // so neither consumes steps. maxSteps is a progress checkpoint rather
+    // than a hard kill: reaching it while tools still execute resets the
+    // budget with a notice, and the turn stops only when no tool ran since
+    // the last checkpoint — the doom-loop signature. 0 disables the cap.
+    const maxSteps = config.maxSteps;
+    let step = 0;
+    let toolExecutedSinceCheckpoint = false;
+    for (;;) {
+      if (maxSteps > 0 && step >= maxSteps) {
+        if (!toolExecutedSinceCheckpoint) {
+          yield {
+            type: "error",
+            error: new Error(
+              `Max steps (${maxSteps}) reached with no tool execution since the last checkpoint, stopping.`,
+            ),
+          };
+          return;
+        }
+        toolExecutedSinceCheckpoint = false;
+        step = 0;
+        yield {
+          type: "notice",
+          message: `maxSteps (${maxSteps}) reached and the turn is still making progress; continuing. Press Esc to interrupt.`,
+        };
+      }
       // Deliver finished background subagent reports at step boundaries so
       // the parent monitors its children without polling. Only the root
       // loop drains — children cannot spawn subagents.
@@ -873,6 +900,8 @@ export class AgentLoop {
           const refusal = this.doomLoopRefusal(call);
           if (refusal !== null) {
             yield { type: "notice", message: refusal };
+          } else {
+            toolExecutedSinceCheckpoint = true;
           }
           const result =
             refusal !== null
@@ -931,12 +960,8 @@ export class AgentLoop {
       }
 
       if (signal.aborted) return;
+      step++;
     }
-
-    yield {
-      type: "error",
-      error: new Error(`Max steps (${config.maxSteps}) reached, stopping.`),
-    };
   }
 
   // The permission mode can change at runtime, so the system message is

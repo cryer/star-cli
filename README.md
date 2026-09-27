@@ -52,6 +52,11 @@ Config file: `~/.star-cli/config.toml` (project-level override: `.star/config.to
 defaultModel = "gpt"
 permissionMode = "ask"   # ask | auto | readonly | yolo | plan
 contextMaxTokens = 100000
+# Max model round-trips ("steps") per turn between progress checkpoints — one
+# step is a reply plus the tool calls it asked for; retries and auto-continue
+# nudges don't count. Reaching the cap while tools still execute resets it
+# with a notice instead of stopping the turn; 0 disables the cap entirely.
+maxSteps = 100
 # compactThresholdTokens = 80000   # optional auto-compaction trigger in tokens; defaults to the
                                   # context window. /compact always compacts, regardless of this.
 contextCompaction = "summary"   # summary | truncate — how over-budget history is compacted

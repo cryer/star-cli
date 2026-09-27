@@ -63,7 +63,13 @@ export const ConfigSchema = z.object({
   permissionMode: z.enum(["auto", "ask", "readonly", "yolo", "plan"]).default("ask"),
   providers: z.array(ProviderConfigSchema).default([]),
   models: z.array(ModelConfigSchema).default([]),
-  maxSteps: z.number().int().positive().default(50),
+  // Cap on model round-trips ("steps") per turn between progress checkpoints.
+  // One step is a streamed reply plus every tool call it asked for — stream
+  // retries and auto-continue nudges do not consume steps. Reaching the cap
+  // while tools still execute resets the budget with a notice; the turn stops
+  // only when no tool ran since the last checkpoint (the doom-loop
+  // signature). 0 disables the cap entirely (opencode/codex have none).
+  maxSteps: z.number().int().min(0).default(100),
   contextMaxTokens: z.number().int().positive().default(100_000),
   // Token threshold at which the agent loop auto-compacts the history.
   // Defaults to the effective context window (compact only when full); set a

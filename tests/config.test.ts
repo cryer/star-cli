@@ -53,7 +53,7 @@ describe("loadConfig", () => {
       permissionMode: "ask",
       providers: [],
       models: [],
-      maxSteps: 50,
+      maxSteps: 100,
       contextMaxTokens: 100_000,
       streamIdleTimeoutSec: 20,
       streamFirstChunkTimeoutSec: 300,

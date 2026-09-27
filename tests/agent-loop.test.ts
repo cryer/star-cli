@@ -559,7 +559,9 @@ describe("AgentLoop", () => {
     expect(content).not.toContain("version one");
   });
 
-  it("stops with an error when maxSteps is reached", async () => {
+  it("stops with an error when maxSteps is reached without progress", async () => {
+    // Identical calls trip the doom-loop guard from the 3rd on, so after one
+    // checkpoint extension no tool executes anymore and the turn stops.
     const loop = makeLoop(mockModel([toolCallRound("call-1", "todo_read", {})]), {
       maxSteps: 2,
     });
@@ -572,6 +574,72 @@ describe("AgentLoop", () => {
       expect(last.error.message).toContain("Max steps (2)");
     }
     expect(events.filter((e) => e.type === "tool-result" && !e.isError)).toHaveLength(2);
+  });
+
+  it("resets the maxSteps budget while tools keep executing", async () => {
+    // Alternating arguments dodge the doom-loop guard, so every call executes
+    // and the checkpoint extends the turn instead of killing it.
+    const model = judgeModel(
+      ["DONE"],
+      [
+        toolCallRound("call-1", "glob", { pattern: "a1" }),
+        toolCallRound("call-2", "glob", { pattern: "a2" }),
+        toolCallRound("call-3", "glob", { pattern: "a3" }),
+        textRound("done"),
+      ],
+    );
+    const loop = makeLoop(model, { maxSteps: 2 });
+
+    const events = await collect(loop.stream("work", new AbortController().signal));
+
+    expect(events.filter((e) => e.type === "tool-result" && !e.isError)).toHaveLength(3);
+    expect(
+      events.some(
+        (e) =>
+          e.type === "notice" &&
+          e.message.includes("maxSteps (2)") &&
+          e.message.includes("progress"),
+      ),
+    ).toBe(true);
+    expect(events.some((e) => e.type === "error")).toBe(false);
+  });
+
+  it("does not spend maxSteps on auto-continue nudges", async () => {
+    // The nudge after the text-only first reply is budgeted by
+    // maxAutoContinues, not maxSteps — otherwise it would eat the only step
+    // here and the tool call below would never run.
+    const model = judgeModel(
+      ["DONE"],
+      [
+        textRound("I will now do the work."),
+        toolCallRound("call-1", "todo_read", {}),
+        textRound("done"),
+      ],
+    );
+    const loop = makeLoop(model, { maxSteps: 1, maxAutoContinues: 1 });
+
+    const events = await collect(loop.stream("work", new AbortController().signal));
+
+    expect(events.filter((e) => e.type === "tool-result" && !e.isError)).toHaveLength(1);
+    expect(events.some((e) => e.type === "error" && e.error.message.includes("Max steps"))).toBe(
+      false,
+    );
+  });
+
+  it("maxSteps 0 disables the step cap", async () => {
+    const rounds = [
+      ...Array.from({ length: 5 }, (_, i) =>
+        toolCallRound(`call-${i}`, "glob", { pattern: `p${i}` }),
+      ),
+      textRound("done"),
+    ];
+    const loop = makeLoop(judgeModel(["DONE"], rounds), { maxSteps: 0 });
+
+    const events = await collect(loop.stream("work", new AbortController().signal));
+
+    expect(events.filter((e) => e.type === "tool-result" && !e.isError)).toHaveLength(5);
+    expect(events.some((e) => e.type === "error")).toBe(false);
+    expect(events.some((e) => e.type === "notice")).toBe(false);
   });
 
   it("errors when the model calls an unknown tool", async () => {

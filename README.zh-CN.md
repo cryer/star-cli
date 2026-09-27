@@ -52,6 +52,10 @@ star -p "hi"             # non-interactive print mode
 defaultModel = "gpt"
 permissionMode = "ask"   # ask | auto | readonly | yolo | plan
 contextMaxTokens = 100000
+# 每回合在进度检查点之间允许的最大模型往返（"step"）数——一个 step 是
+# 一次回复加上它请求的所有工具调用；重试和 auto-continue nudge 不占 step。
+# 到达上限时若工具仍在执行，会发提示并重置额度而不是终止回合；0 表示完全不限。
+maxSteps = 100
 # compactThresholdTokens = 80000   # optional auto-compaction trigger in tokens; defaults to the
                                   # context window. /compact always compacts, regardless of this.
 contextCompaction = "summary"   # summary | truncate — how over-budget history is compacted
