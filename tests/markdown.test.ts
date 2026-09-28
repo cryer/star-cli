@@ -98,11 +98,17 @@ describe("renderMarkdown", () => {
     expect(cellWidth(lines[2] ?? "")).toBe(cellWidth(lines[4] ?? ""));
   });
 
-  it("truncates overly long cells", () => {
+  it("truncates cells only when the grid would exceed the terminal width", () => {
     const md = `| A |\n| --- |\n| ${"x".repeat(60)} |`;
-    const plain = stripAnsi(renderMarkdown(md));
-    expect(plain).toContain("…");
-    expect(plain).not.toContain("x".repeat(60));
+    // Wide enough terminal: no truncation.
+    expect(stripAnsi(renderMarkdown(md))).toContain("x".repeat(60));
+    // Narrow terminal: the column shrinks to fit.
+    const narrow = stripAnsi(renderMarkdown(md, "", 20));
+    expect(narrow).toContain("…");
+    expect(narrow).not.toContain("x".repeat(60));
+    for (const line of narrow.split("\n")) {
+      expect(cellWidth(line)).toBeLessThanOrEqual(20);
+    }
   });
 
   it("leaves non-table pipe lines alone", () => {

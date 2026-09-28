@@ -58,8 +58,6 @@ export function cellWidth(text: string): number {
   return width;
 }
 
-const MAX_CELL_WIDTH = 40;
-
 function truncateCell(text: string, max: number): string {
   if (cellWidth(text) <= max) return text;
   let out = "";
@@ -125,17 +123,34 @@ function splitTableRow(line: string): string[] | null {
   return stripped.split("|").map((cell) => cell.trim());
 }
 
-function renderTable(lines: string[], base: string): string[] {
+const MIN_COLUMN_WIDTH = 4;
+
+function renderTable(lines: string[], base: string, maxWidth: number): string[] {
   const rows: string[][] = [];
   for (const line of lines) {
     const cells = splitTableRow(line);
-    if (cells) rows.push(cells.map((cell) => truncateCell(cell, MAX_CELL_WIDTH)));
+    if (cells) rows.push(cells);
   }
   if (rows.length < 2) return lines;
   const columnCount = Math.max(...rows.map((row) => row.length));
+  // Natural widths first: cells are only truncated when the whole grid would
+  // exceed the terminal — then the widest column shrinks one cell at a time.
   const widths = Array.from({ length: columnCount }, (_, column) =>
     Math.max(1, ...rows.map((row) => cellWidth(row[column] ?? ""))),
   );
+  // 2 for the indent, 3 per " │ " joiner.
+  const totalWidth = () =>
+    2 + widths.reduce((sum, width) => sum + width, 0) + 3 * (columnCount - 1);
+  while (totalWidth() > maxWidth) {
+    const widest = widths.indexOf(Math.max(...widths));
+    if (widths[widest] === undefined || widths[widest] <= MIN_COLUMN_WIDTH) break;
+    widths[widest] -= 1;
+  }
+  for (const row of rows) {
+    for (let column = 0; column < row.length; column++) {
+      row[column] = truncateCell(row[column] ?? "", widths[column] ?? 1);
+    }
+  }
   // Widths come from the raw cell text; padding is appended after styling so
   // ANSI bytes never skew the alignment.
   const joiner = ` ${dim("│", base)} `;
@@ -181,7 +196,8 @@ export function committableLineCount(lines: string[]): number {
 
 // Renders a markdown block into an ANSI-styled string. `base` re-opens the
 // surrounding text color after each styled span (see module docstring).
-export function renderMarkdown(text: string, base = ""): string {
+// `maxWidth` caps rendered table grids so rows never wrap in the terminal.
+export function renderMarkdown(text: string, base = "", maxWidth = 80): string {
   const lines = text.split("\n");
   const out: string[] = [];
   let inFence = false;
@@ -228,7 +244,7 @@ export function renderMarkdown(text: string, base = ""): string {
         block.push(lines[j] ?? "");
         j += 1;
       }
-      out.push(...renderTable(block, base));
+      out.push(...renderTable(block, base, maxWidth));
       i = j - 1;
       continue;
     }

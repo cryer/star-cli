@@ -1,4 +1,4 @@
-import { Box, Static, Text } from "ink";
+import { Box, Static, Text, useStdout } from "ink";
 import { memo } from "react";
 import type { DiffLine } from "../diff-preview";
 import { renderMarkdown } from "../markdown";
@@ -34,6 +34,8 @@ const interruptedMarker = (text: string) => (
 );
 
 export const MessageList = memo(function MessageList({ messages }: { messages: DisplayMessage[] }) {
+  const { stdout } = useStdout();
+  const termWidth = stdout.columns ?? 80;
   return (
     <Static items={messages}>
       {(message) => {
@@ -42,7 +44,7 @@ export const MessageList = memo(function MessageList({ messages }: { messages: D
           return (
             <Box key={message.id} flexDirection="column" marginBottom={marginBottom}>
               <Text color="green">
-                {renderMarkdown(message.text, "32")}
+                {renderMarkdown(message.text, "32", termWidth)}
                 {message.interrupted && interruptedMarker(message.text)}
               </Text>
             </Box>
@@ -80,7 +82,9 @@ export const MessageList = memo(function MessageList({ messages }: { messages: D
               {style.label}
             </Text>
             <Text color={style.color}>
-              {message.role === "assistant" ? renderMarkdown(message.text, "32") : message.text}
+              {message.role === "assistant"
+                ? renderMarkdown(message.text, "32", termWidth)
+                : message.text}
               {message.interrupted && interruptedMarker(message.text)}
             </Text>
             {message.diff && <DiffLines lines={message.diff} />}
