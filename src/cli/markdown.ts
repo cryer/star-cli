@@ -58,19 +58,6 @@ export function cellWidth(text: string): number {
   return width;
 }
 
-function truncateCell(text: string, max: number): string {
-  if (cellWidth(text) <= max) return text;
-  let out = "";
-  let width = 0;
-  for (const ch of text) {
-    const w = cellWidth(ch);
-    if (width + w > max - 1) break;
-    out += ch;
-    width += w;
-  }
-  return `${out}…`;
-}
-
 const IMAGE_RE = /!\[([^\]]*)\]\(([^)\s]+)\)/g;
 const LINK_RE = /\[([^\]]+)\]\(([^)\s]+)\)/g;
 const BOLD_RE = /\*\*([^*\n]+)\*\*|__([^_\n]+)__/g;
@@ -125,6 +112,33 @@ function splitTableRow(line: string): string[] | null {
 
 const MIN_COLUMN_WIDTH = 4;
 
+// Wraps a cell to its column width by display cells. Breaks at the last
+// space when there is one, hard-breaks otherwise (CJK text has no spaces).
+function wrapCell(text: string, width: number): string[] {
+  const lines: string[] = [];
+  let current = "";
+  let currentWidth = 0;
+  for (const ch of text) {
+    const w = cellWidth(ch);
+    if (currentWidth > 0 && currentWidth + w > width) {
+      const lastSpace = current.lastIndexOf(" ");
+      if (lastSpace > 0 && ch !== " ") {
+        lines.push(current.slice(0, lastSpace));
+        current = current.slice(lastSpace + 1) + ch;
+      } else {
+        lines.push(current);
+        current = ch === " " ? "" : ch;
+      }
+      currentWidth = cellWidth(current);
+    } else {
+      current += ch;
+      currentWidth += w;
+    }
+  }
+  if (current.length > 0 || lines.length === 0) lines.push(current);
+  return lines;
+}
+
 function renderTable(lines: string[], base: string, maxWidth: number): string[] {
   const rows: string[][] = [];
   for (const line of lines) {
@@ -133,8 +147,9 @@ function renderTable(lines: string[], base: string, maxWidth: number): string[] 
   }
   if (rows.length < 2) return lines;
   const columnCount = Math.max(...rows.map((row) => row.length));
-  // Natural widths first: cells are only truncated when the whole grid would
-  // exceed the terminal — then the widest column shrinks one cell at a time.
+  // Natural widths first: columns only shrink when the whole grid would
+  // exceed the terminal — then the widest column gives up one cell at a
+  // time. Overlong cell text wraps onto extra lines instead of truncating.
   const widths = Array.from({ length: columnCount }, (_, column) =>
     Math.max(1, ...rows.map((row) => cellWidth(row[column] ?? ""))),
   );
@@ -146,30 +161,34 @@ function renderTable(lines: string[], base: string, maxWidth: number): string[] 
     if (widths[widest] === undefined || widths[widest] <= MIN_COLUMN_WIDTH) break;
     widths[widest] -= 1;
   }
-  for (const row of rows) {
-    for (let column = 0; column < row.length; column++) {
-      row[column] = truncateCell(row[column] ?? "", widths[column] ?? 1);
-    }
-  }
   // Widths come from the raw cell text; padding is appended after styling so
   // ANSI bytes never skew the alignment.
   const joiner = ` ${dim("│", base)} `;
-  const formatRow = (row: string[], style: (cell: string) => string) =>
-    `  ${widths
-      .map((width, column) => {
-        const raw = row[column] ?? "";
-        return style(raw) + " ".repeat(Math.max(0, width - cellWidth(raw)));
-      })
-      .join(joiner)
-      .trimEnd()}`;
+  const formatRow = (row: string[], style: (cell: string) => string): string[] => {
+    const wrapped = widths.map((width, column) => wrapCell(row[column] ?? "", width));
+    const height = Math.max(...wrapped.map((cell) => cell.length));
+    const out: string[] = [];
+    for (let line = 0; line < height; line++) {
+      out.push(
+        `  ${widths
+          .map((width, column) => {
+            const raw = wrapped[column]?.[line] ?? "";
+            return style(raw) + " ".repeat(Math.max(0, width - cellWidth(raw)));
+          })
+          .join(joiner)
+          .trimEnd()}`,
+      );
+    }
+    return out;
+  };
   const separator = dim(`  ${widths.map((width) => "─".repeat(width)).join("─┼─")}`, base);
   const [header, , ...body] = rows as [string[], string[], ...string[][]];
   return [
-    formatRow(header, (cell) => bold(cell, base)),
+    ...formatRow(header, (cell) => bold(cell, base)),
     separator,
     ...body.flatMap((row, index) => {
-      const line = formatRow(row, (cell) => renderInline(cell, base));
-      return index < body.length - 1 ? [line, separator] : [line];
+      const lines = formatRow(row, (cell) => renderInline(cell, base));
+      return index < body.length - 1 ? [...lines, separator] : lines;
     }),
   ];
 }

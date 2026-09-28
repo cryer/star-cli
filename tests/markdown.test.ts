@@ -98,16 +98,31 @@ describe("renderMarkdown", () => {
     expect(cellWidth(lines[2] ?? "")).toBe(cellWidth(lines[4] ?? ""));
   });
 
-  it("truncates cells only when the grid would exceed the terminal width", () => {
+  it("wraps cells instead of truncating when the grid exceeds the terminal width", () => {
     const md = `| A |\n| --- |\n| ${"x".repeat(60)} |`;
-    // Wide enough terminal: no truncation.
-    expect(stripAnsi(renderMarkdown(md))).toContain("x".repeat(60));
-    // Narrow terminal: the column shrinks to fit.
+    // Wide enough terminal: no wrapping.
+    expect(stripAnsi(renderMarkdown(md)).split("\n")).toHaveLength(3);
+    // Narrow terminal: the column shrinks and the cell wraps onto extra lines.
     const narrow = stripAnsi(renderMarkdown(md, "", 20));
-    expect(narrow).toContain("…");
-    expect(narrow).not.toContain("x".repeat(60));
-    for (const line of narrow.split("\n")) {
+    expect(narrow).not.toContain("…");
+    const lines = narrow.split("\n");
+    expect(lines).toHaveLength(6); // header + separator + 4 wrapped lines
+    expect(lines.slice(2).join("").replaceAll(" ", "")).toContain("x".repeat(60));
+    for (const line of lines) {
       expect(cellWidth(line)).toBeLessThanOrEqual(20);
+    }
+  });
+
+  it("grows the row height to the tallest wrapped cell", () => {
+    const md = `| A | B |\n| --- | --- |\n| x | ${"y".repeat(30)} |`;
+    const lines = stripAnsi(renderMarkdown(md, "", 26)).split("\n");
+    // B wraps onto multiple lines; A's cell stays on the first of them.
+    expect(lines.length).toBeGreaterThan(3);
+    expect(lines[2]).toContain("x");
+    expect(lines[2]).toContain("│");
+    expect(lines[3]).not.toContain("x");
+    for (const line of lines) {
+      expect(cellWidth(line)).toBeLessThanOrEqual(26);
     }
   });
 
