@@ -6,6 +6,8 @@ import type { ProviderConfig, StarConfig } from "../config/schema";
 import { resolveModelConfig } from "./registry";
 import { createSseNormalizingFetch } from "./sse-normalize";
 
+export type ProviderMetadata = Record<string, Record<string, unknown>>;
+
 function resolveApiKey(provider: ProviderConfig): string {
   const fromEnv = provider.apiKeyEnv ? process.env[provider.apiKeyEnv] : undefined;
   const apiKey = fromEnv ?? provider.apiKey;
@@ -57,4 +59,23 @@ export function createModel(config: StarConfig, modelName?: string): LanguageMod
         fetch: createSseNormalizingFetch(),
       }).responses(modelConfig.model);
   }
+}
+
+// Builds the per-call provider metadata carrying the model's configured
+// reasoningEffort. The metadata key must equal the provider instance name:
+// "openai" for the responses-protocol provider (createOpenAI fixes it), the
+// provider's own name for openai-compatible (createOpenAICompatible names the
+// instance after it). Anthropic maps effort to a thinking budget rather than
+// an effort enum — unsupported, so no metadata is produced for it. Returns
+// undefined when the model sets no reasoningEffort (request unchanged).
+export function reasoningEffortMetadata(
+  config: StarConfig,
+  modelName?: string,
+): ProviderMetadata | undefined {
+  const modelConfig = resolveModelConfig(config, modelName);
+  if (!modelConfig.reasoningEffort) return undefined;
+  const provider = config.providers.find((p) => p.name === modelConfig.provider);
+  if (!provider || provider.protocol === "anthropic") return undefined;
+  const key = provider.protocol === "openai-responses" ? "openai" : provider.name;
+  return { [key]: { reasoningEffort: modelConfig.reasoningEffort } };
 }

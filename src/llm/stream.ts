@@ -2,6 +2,7 @@ import { type LanguageModel, type ToolSet, streamText } from "ai";
 import type { StreamEvent, TokenUsage } from "../core/events";
 import type { CoreMessage } from "../core/messages";
 import { debugStreamLog } from "./debug";
+import type { ProviderMetadata } from "./provider";
 import { summarizeStreamError } from "./retry";
 
 export interface StreamChatOptions {
@@ -10,6 +11,10 @@ export interface StreamChatOptions {
   tools?: Record<string, unknown>;
   abortSignal?: AbortSignal;
   maxTokens?: number;
+  // Extra per-call provider metadata (e.g. reasoningEffort), keyed by provider
+  // instance name. Merged into the request; the openai entry merges with the
+  // strictSchemas/store defaults below instead of replacing them.
+  providerMetadata?: ProviderMetadata;
   // Idle watchdog: some relays deliver the final content but never send the
   // terminal chunks (or never close the socket). If no stream part arrives
   // within this window once streaming has started, the stream is ended
@@ -59,6 +64,7 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
   // was still preparing the request), or the request would run on until the
   // idle watchdog despite having been cancelled.
   if (opts.abortSignal?.aborted) controller.abort();
+  const { openai: openaiMetadata, ...otherMetadata } = opts.providerMetadata ?? {};
   const result = streamText({
     model: opts.model,
     messages: opts.messages,
@@ -79,7 +85,8 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
       // classic function-calling schemas use optional properties, which
       // relays then reject. store:false matches how codex and opencode talk
       // to relays (no server-side response storage).
-      openai: { strictSchemas: false, store: false },
+      ...otherMetadata,
+      openai: { strictSchemas: false, store: false, ...openaiMetadata },
     },
   });
   const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;

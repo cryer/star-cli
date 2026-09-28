@@ -20,6 +20,9 @@ export interface SubagentDeps {
   config: StarConfig;
   cwd: string;
   system?: string;
+  // Inherited from the parent loop so the child requests carry the same
+  // provider metadata (reasoningEffort).
+  providerMetadata?: Record<string, Record<string, unknown>>;
   depth: number;
   getConfirmHandler?: () => ((req: PermissionRequest) => Promise<boolean>) | undefined;
 }
@@ -44,6 +47,7 @@ async function runSubagent(
     config: deps.config,
     cwd,
     system: deps.system ? `${deps.system}\n\n${SUBAGENT_PROMPT}` : SUBAGENT_PROMPT,
+    providerMetadata: deps.providerMetadata,
     subagentDepth: deps.depth + 1,
   });
   const confirmHandler = deps.getConfirmHandler?.();

@@ -9,7 +9,7 @@ import { SYSTEM_PROMPT } from "./cli/system-prompt";
 import { loadConfigSync } from "./config/loader";
 import { type StarConfig, contextWindowTokens } from "./config/schema";
 import { type CoreMessage, type ImageInput, reconcileToolCalls } from "./core/messages";
-import { createModel } from "./llm/provider";
+import { createModel, reasoningEffortMetadata } from "./llm/provider";
 import { loadSessionSnapshots } from "./session/checkpoints";
 import { clearSessions } from "./session/clear";
 import {
@@ -41,6 +41,7 @@ async function createLoop(
     system: SYSTEM_PROMPT,
     sessionStore,
     contextMaxTokens: contextWindowTokens(config, modelName),
+    providerMetadata: reasoningEffortMetadata(config, modelName),
   });
 }
 

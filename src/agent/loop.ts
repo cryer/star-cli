@@ -43,6 +43,9 @@ export interface AgentLoopOptions {
   // Effective context window for compaction (per-model override resolved by
   // the caller); falls back to config.contextMaxTokens when omitted.
   contextMaxTokens?: number;
+  // Per-call provider metadata (e.g. the model's reasoningEffort), resolved
+  // by the caller via llm/provider.ts reasoningEffortMetadata.
+  providerMetadata?: Record<string, Record<string, unknown>>;
   // Depth of this loop in the subagent chain (0 = main agent). At
   // MAX_SUBAGENT_DEPTH the subagent tool is not registered, so subagents
   // cannot spawn further subagents.
@@ -268,6 +271,7 @@ export class AgentLoop {
           config: opts.config,
           cwd: opts.cwd,
           system: opts.system,
+          providerMetadata: opts.providerMetadata,
           depth,
           getConfirmHandler: () => this.confirmHandler,
         }),
@@ -1033,6 +1037,7 @@ export class AgentLoop {
       messages: this.messages,
       tools: aiTools,
       abortSignal: signal,
+      providerMetadata: this.opts.providerMetadata,
       idleTimeoutMs: this.opts.config.streamIdleTimeoutSec * 1000 * timeoutScale,
       firstPartTimeoutMs: this.opts.config.streamFirstChunkTimeoutSec * 1000 * timeoutScale,
     })) {
