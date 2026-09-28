@@ -1,4 +1,4 @@
-import { Box, Text, render, useApp, useInput } from "ink";
+import { Box, Text, render, useApp } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type AgentTaskSnapshot,
@@ -98,6 +98,7 @@ import {
   summarizeArgs,
 } from "./format";
 import { appendHistory, loadHistory } from "./history";
+import { thinkingIcon, toolIcon } from "./icons";
 import { resolveMentions } from "./mentions";
 import { notifyBell } from "./notify";
 import { PromptQueue, type QueuedPrompt } from "./queue";
@@ -106,6 +107,7 @@ import { SYSTEM_PROMPT } from "./system-prompt";
 import { toTerminalSafe } from "./terminal-text";
 import { type FlushState, nextFlush, startTicker } from "./ticker";
 import { checkForUpdate } from "./update-check";
+import { useInput } from "./use-input";
 
 // Matches ansi-escapes' clearTerminal (Ink pulls the same sequence for its
 // own full redraws): erase screen + scrollback, cursor home.
@@ -933,7 +935,7 @@ export function Repl({
               setThinking(false);
               if (reasoningRef.current.length > 0) {
                 setThoughtSummary(
-                  `thought: ${truncateTail(reasoningRef.current, THOUGHT_SUMMARY_LENGTH)}`,
+                  `${thinkingIcon} thought: ${truncateTail(reasoningRef.current, THOUGHT_SUMMARY_LENGTH)}`,
                 );
               }
             }
@@ -953,7 +955,9 @@ export function Repl({
               const list = parseTodoArgs(event.args);
               if (list) setTodos(list);
             }
-            setActivity(`running ${event.name}: ${summarizeArgs(event.args, 60)}`);
+            setActivity(
+              `${toolIcon(event.name)} running ${event.name}: ${summarizeArgs(event.args, 60)}`,
+            );
           } else if (event.type === "tool-result") {
             const card = toolCardsRef.current.get(event.id) ?? {
               id: event.id,

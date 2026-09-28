@@ -1,4 +1,4 @@
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { useRef, useState } from "react";
 import {
   type ConnectAnswers,
@@ -12,6 +12,7 @@ import {
   deriveProviderName,
   maskApiKey,
 } from "../commands/connect";
+import { useInput } from "../use-input";
 import { type SelectOption, SelectPrompt } from "./SelectPrompt";
 import { TextField } from "./TextField";
 

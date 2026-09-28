@@ -1,5 +1,6 @@
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import { useRef, useState } from "react";
+import { useInput } from "../use-input";
 
 export interface SelectOption {
   value: string;

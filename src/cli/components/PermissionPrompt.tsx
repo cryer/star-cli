@@ -1,8 +1,9 @@
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import type { PermissionRequest } from "../../permissions/types";
 import type { DiffPreview } from "../diff-preview";
 import { summarizeArgs } from "../format";
 import { toTerminalSafe } from "../terminal-text";
+import { useInput } from "../use-input";
 import { DiffLines } from "./DiffLines";
 
 export type PermissionDecision = "yes" | "no" | "always";

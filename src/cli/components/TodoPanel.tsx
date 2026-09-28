@@ -3,9 +3,9 @@ import type { TodoItem } from "../../tools/todo";
 import { toTerminalSafe } from "../terminal-text";
 
 const SYMBOLS: Record<TodoItem["status"], string> = {
-  pending: "[ ]",
-  in_progress: "[~]",
-  done: "[x]",
+  pending: "○",
+  in_progress: "◐",
+  done: "●",
 };
 
 // The panel lives in Ink's live region, so its height must stay bounded:
@@ -49,6 +49,7 @@ export function TodoPanel({ todos }: { todos: TodoItem[] }) {
         <Text
           key={todo.id}
           dimColor={todo.status === "done"}
+          strikethrough={todo.status === "done"}
           color={todo.status === "in_progress" ? "cyan" : undefined}
         >
           {SYMBOLS[todo.status]} {toTerminalSafe(todo.title)}

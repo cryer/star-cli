@@ -1,6 +1,8 @@
 import { Box, Text } from "ink";
 
-export const SPINNER_FRAMES = ["-", "\\", "|", "/"];
+import { thinkingIcon } from "../icons";
+
+export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 export const REASONING_TAIL_LENGTH = 200;
 export const THOUGHT_SUMMARY_LENGTH = 100;
 
@@ -20,12 +22,20 @@ export function ThinkingIndicator({
 }: { reasoning?: string; frame?: number; activity?: string }) {
   const tail = reasoning ? truncateTail(reasoning, REASONING_TAIL_LENGTH) : "";
   const spinner = SPINNER_FRAMES[frame % SPINNER_FRAMES.length];
+  // Tool-running activities carry their own per-tool icon in the label
+  // (see repl.tsx), so the 💭 prefix only applies while thinking.
+  const label = activity ?? `${thinkingIcon} star is thinking…`;
   return (
     <Box flexDirection="column">
       <Text dimColor>
-        {spinner} {activity ?? "star is thinking…"}
+        {spinner} {label}
       </Text>
-      {tail !== "" && <Text dimColor> {tail}</Text>}
+      {tail !== "" && (
+        <Text dimColor>
+          {"   "}
+          {tail}
+        </Text>
+      )}
     </Box>
   );
 }

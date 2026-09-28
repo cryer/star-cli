@@ -149,6 +149,32 @@ describe("InputBox", () => {
     app.unmount();
   });
 
+  it("coalesced arrow presses in one stdin chunk each register", async () => {
+    // Real terminals deliver rapid key presses as a single chunk; every key
+    // in it must dispatch, not just the first.
+    const onSubmit = vi.fn();
+    const app = renderApp(
+      createElement(InputBox, {
+        isStreaming: false,
+        initialHistory: ["one", "two", "three"],
+        onSubmit,
+        onInterrupt: () => {},
+        onExit: () => {},
+      }),
+    );
+    app.stdin.write(`${UP}${UP}`);
+    await tick();
+    await tick();
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("two");
+    app.stdin.write(`${DOWN}${DOWN}`);
+    await tick();
+    await tick();
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).not.toContain("two");
+    expect(frame).not.toContain("three");
+    app.unmount();
+  });
+
   it("editing a recalled entry ends history browsing; up recalls history again", async () => {
     const onSubmit = vi.fn();
     const app = renderApp(

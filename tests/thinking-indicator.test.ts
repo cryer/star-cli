@@ -1,6 +1,9 @@
 import { createElement } from "react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderApp, stripAnsi, tick } from "./ink-harness";
+
+// Pin the icon set: the label icon depends on terminal detection otherwise.
+vi.stubEnv("STAR_ICONS", "plain");
 
 // Dynamic import so ./ink-harness sets FORCE_COLOR before ink is loaded.
 const { ThinkingIndicator, SPINNER_FRAMES, truncateTail } = await import(
@@ -30,7 +33,7 @@ describe("truncateTail", () => {
 });
 
 describe("ThinkingIndicator", () => {
-  it("shows the thinking label with an ASCII spinner frame", async () => {
+  it("shows the thinking label with a braille spinner frame", async () => {
     const app = renderApp(createElement(ThinkingIndicator, {}));
     await tick();
     const frame = stripAnsi(app.lastFrame() ?? "");
@@ -44,7 +47,7 @@ describe("ThinkingIndicator", () => {
       const app = renderApp(createElement(ThinkingIndicator, { frame }));
       await tick();
       const output = stripAnsi(app.lastFrame() ?? "");
-      expect(output).toContain(`${SPINNER_FRAMES[frame]} star is thinking`);
+      expect(output).toContain(`${SPINNER_FRAMES[frame]} ✧ star is thinking`);
       app.unmount();
     }
   });

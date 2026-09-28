@@ -1,6 +1,7 @@
 import { Box, Static, Text } from "ink";
 import { memo } from "react";
 import type { DiffLine } from "../diff-preview";
+import { renderMarkdown } from "../markdown";
 import { DiffLines } from "./DiffLines";
 
 export interface DisplayMessage {
@@ -21,13 +22,11 @@ export interface DisplayMessage {
 }
 
 const roleStyles: Record<
-  Exclude<DisplayMessage["role"], "assistant-cont">,
+  Exclude<DisplayMessage["role"], "assistant-cont" | "user" | "tool">,
   { label: string; color: string }
 > = {
-  user: { label: "you", color: "cyan" },
-  assistant: { label: "star", color: "green" },
-  system: { label: "system", color: "yellow" },
-  tool: { label: "tool", color: "magenta" },
+  assistant: { label: "✦ star", color: "green" },
+  system: { label: "● system", color: "yellow" },
 };
 
 const interruptedMarker = (text: string) => (
@@ -43,9 +42,34 @@ export const MessageList = memo(function MessageList({ messages }: { messages: D
           return (
             <Box key={message.id} flexDirection="column" marginBottom={marginBottom}>
               <Text color="green">
-                {message.text}
+                {renderMarkdown(message.text, "32")}
                 {message.interrupted && interruptedMarker(message.text)}
               </Text>
+            </Box>
+          );
+        }
+        if (message.role === "user") {
+          return (
+            <Box key={message.id} flexDirection="column" marginBottom={marginBottom}>
+              <Box>
+                <Text bold color="cyan">
+                  {"❯ "}
+                </Text>
+                <Text color="cyan">
+                  {message.text}
+                  {message.interrupted && interruptedMarker(message.text)}
+                </Text>
+              </Box>
+              {message.note && <Text dimColor> {message.note}</Text>}
+            </Box>
+          );
+        }
+        if (message.role === "tool") {
+          // The card text carries its own tool icon + name header, so no
+          // separate label line is needed.
+          return (
+            <Box key={message.id} flexDirection="column" marginBottom={marginBottom}>
+              <Text color="magenta">{message.text}</Text>
             </Box>
           );
         }
@@ -56,7 +80,7 @@ export const MessageList = memo(function MessageList({ messages }: { messages: D
               {style.label}
             </Text>
             <Text color={style.color}>
-              {message.text}
+              {message.role === "assistant" ? renderMarkdown(message.text, "32") : message.text}
               {message.interrupted && interruptedMarker(message.text)}
             </Text>
             {message.diff && <DiffLines lines={message.diff} />}

@@ -1,5 +1,6 @@
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
 import type { DiffLine } from "../diff-preview";
+import { useInput } from "../use-input";
 import { DiffLines } from "./DiffLines";
 
 export type RewindDecision = "yes" | "no";

@@ -1,6 +1,7 @@
 import { Box, Text, useStdout } from "ink";
 import { memo } from "react";
 import { formatDollars } from "../cost";
+import { folderIcon } from "../icons";
 import { toTerminalSafe } from "../terminal-text";
 
 interface StatusBarProps {
@@ -51,6 +52,7 @@ export const StatusBar = memo(function StatusBar({
   return (
     <Box justifyContent="space-between">
       <Text dimColor>
+        {folderIcon}
         {cwdLabel(cwd, wide)}
         {gitBranch ? ` [${gitBranch}]` : ""}
       </Text>
@@ -59,7 +61,7 @@ export const StatusBar = memo(function StatusBar({
           bg: {backgroundTasks.length} ({labels})
         </Text>
       )}
-      <Text dimColor>model: {model}</Text>
+      <Text dimColor>✦ {model}</Text>
       {contextPercent != null && <Text dimColor>ctx: {contextPercent}%</Text>}
       <Text dimColor>cache: {cachePercent != null ? `${cachePercent}%` : "Not provided"}</Text>
       {sessionCostUsd != null && sessionCostUsd > 0 && (

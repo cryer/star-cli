@@ -1,7 +1,8 @@
-import { Box, Text, useInput, useStdout } from "ink";
+import { Box, Text, useStdout } from "ink";
 import { useEffect, useRef, useState } from "react";
 import { type SlashCommandHint, filterCommands } from "../commands/suggest";
 import { type PathSuggestion, extractAtToken, suggestPaths } from "../path-suggest";
+import { useInput } from "../use-input";
 
 export interface InputRefill {
   text: string;
@@ -658,7 +659,7 @@ export function InputBox({
           ? "\u001B[2mno match\u001B[22m\u001B[7m \u001B[27m"
           : `${history[search.match]}\u001B[7m \u001B[27m`
       }`
-    : `\u001B[36m> \u001B[39m${stylePasteTokens(before)}\u001B[7m${cursorChar}\u001B[27m${tail}`;
+    : `\u001B[36m❯ \u001B[39m${stylePasteTokens(before)}\u001B[7m${cursorChar}\u001B[27m${tail}`;
 
   return (
     <Box flexDirection="column">
