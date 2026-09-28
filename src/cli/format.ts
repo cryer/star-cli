@@ -1,5 +1,6 @@
 import type { CoreMessage } from "../core/messages";
 import type { DisplayMessage } from "./components/MessageList";
+import { committableLineCount } from "./markdown";
 import { toTerminalSafe } from "./terminal-text";
 
 export function summarizeArgs(args: unknown, maxLength = 120): string {
@@ -21,6 +22,8 @@ export function previewLines(text: string, maxLines = 10): { text: string; trunc
 // Splits a streaming buffer into a committable head (complete lines) and a
 // remainder, once the buffer holds at least minCompleteLines complete lines.
 // The last line is always kept in the remainder: it may still be growing.
+// The head is further capped at a markdown block boundary (never mid-table
+// or mid-fence) because committed chunks render standalone in static history.
 // Returns null when there is nothing worth committing yet.
 export function splitCommittableLines(
   text: string,
@@ -29,9 +32,11 @@ export function splitCommittableLines(
   const lastNewline = text.lastIndexOf("\n");
   if (lastNewline < 0) return null;
   const complete = text.slice(0, lastNewline);
-  const completeLines = complete.split("\n").length;
-  if (completeLines < minCompleteLines) return null;
-  return { committed: complete, rest: text.slice(lastNewline + 1) };
+  const lines = complete.split("\n");
+  const count = committableLineCount(lines);
+  if (count < minCompleteLines) return null;
+  const committed = lines.slice(0, count).join("\n");
+  return { committed, rest: text.slice(committed.length + 1) };
 }
 
 export function formatStreamError(error: Error): string {

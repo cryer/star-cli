@@ -154,6 +154,26 @@ function renderTable(lines: string[], base: string): string[] {
   ];
 }
 
+// Longest leading run of lines that ends at a markdown block boundary: not
+// inside a fenced code block, and not inside a run of pipe lines (a table, or
+// a would-be table whose separator is still streaming). The REPL commits
+// streamed text to static history in chunks and each chunk is rendered
+// standalone, so a chunk must never end mid-construct — a table split in two
+// would render its tail as raw pipe text.
+export function committableLineCount(lines: string[]): number {
+  let inFence = false;
+  let safe = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (FENCE_RE.test(line)) inFence = !inFence;
+    const isPipe = line.includes("|");
+    // For the last line the next line is still streaming, so assume the worst.
+    const nextIsPipe = i + 1 >= lines.length || (lines[i + 1] ?? "").includes("|");
+    if (!inFence && !(isPipe && nextIsPipe)) safe = i + 1;
+  }
+  return safe;
+}
+
 // Renders a markdown block into an ANSI-styled string. `base` re-opens the
 // surrounding text color after each styled span (see module docstring).
 export function renderMarkdown(text: string, base = ""): string {
