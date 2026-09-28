@@ -138,19 +138,24 @@ function renderTable(lines: string[], base: string): string[] {
   );
   // Widths come from the raw cell text; padding is appended after styling so
   // ANSI bytes never skew the alignment.
+  const joiner = ` ${dim("│", base)} `;
   const formatRow = (row: string[], style: (cell: string) => string) =>
     `  ${widths
       .map((width, column) => {
         const raw = row[column] ?? "";
         return style(raw) + " ".repeat(Math.max(0, width - cellWidth(raw)));
       })
-      .join("  ")
+      .join(joiner)
       .trimEnd()}`;
+  const separator = dim(`  ${widths.map((width) => "─".repeat(width)).join("─┼─")}`, base);
   const [header, , ...body] = rows as [string[], string[], ...string[][]];
   return [
     formatRow(header, (cell) => bold(cell, base)),
-    dim(`  ${widths.map((width) => "─".repeat(width)).join("  ")}`, base),
-    ...body.map((row) => formatRow(row, (cell) => renderInline(cell, base))),
+    separator,
+    ...body.flatMap((row, index) => {
+      const line = formatRow(row, (cell) => renderInline(cell, base));
+      return index < body.length - 1 ? [line, separator] : [line];
+    }),
   ];
 }
 

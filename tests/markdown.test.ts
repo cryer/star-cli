@@ -79,22 +79,23 @@ describe("renderMarkdown", () => {
     expect(stripAnsi(renderMarkdown("---"))).toContain("────");
   });
 
-  it("renders pipe tables as aligned columns", () => {
+  it("renders pipe tables as an aligned grid", () => {
     const md = "| Name | Age |\n| --- | ---: |\n| bob | 7 |\n| alice | 12 |";
     const plain = stripAnsi(renderMarkdown(md));
     const lines = plain.split("\n");
-    expect(lines).toHaveLength(4);
-    expect(lines[0]).toBe("  Name   Age");
-    expect(lines[1]).toContain("─");
-    expect(lines[2]).toBe("  bob    7");
-    expect(lines[3]).toBe("  alice  12");
+    expect(lines).toHaveLength(5);
+    expect(lines[0]).toBe("  Name  │ Age");
+    expect(lines[1]).toBe("  ──────┼─────");
+    expect(lines[2]).toBe("  bob   │ 7");
+    expect(lines[3]).toBe(lines[1]);
+    expect(lines[4]).toBe("  alice │ 12");
   });
 
   it("aligns CJK table cells by display width", () => {
     const md = "| 名 | 值 |\n| --- | --- |\n| 甲 | 1 |\n| bb | 2 |";
     const lines = stripAnsi(renderMarkdown(md)).split("\n");
     // 名 is 2 cells wide, so "bb" needs no extra padding to align with it.
-    expect(cellWidth(lines[2] ?? "")).toBe(cellWidth(lines[3] ?? ""));
+    expect(cellWidth(lines[2] ?? "")).toBe(cellWidth(lines[4] ?? ""));
   });
 
   it("truncates overly long cells", () => {
