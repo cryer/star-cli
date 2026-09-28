@@ -87,8 +87,10 @@ model = "gpt-4o"
 # optional per-model context window — overrides the top-level contextMaxTokens
 # for compaction and the ctx % in the status bar
 # contextMaxTokens = 272000
-# 可选的推理强度（思考模型用）：low | medium | high——每次请求都会以
-# reasoning_effort 发送；不设置则使用服务商默认值
+# 可选的推理强度（思考模型用）——每次请求原样以 reasoning_effort 发送。
+# 档位命名因服务商/模型而异（常见 low/medium/high，部分还有 minimal/max 等），
+# 因此接受任意字符串，由服务端校验。不设置 = 服务端默认。
+# /model 选完模型后也会接着让你选择推理强度。
 # reasoningEffort = "high"
 # optional per-model pricing in USD per 1M tokens — enables the $ estimate in
 # /cost and /usage. promptPrice prices input tokens (system prompt, history,

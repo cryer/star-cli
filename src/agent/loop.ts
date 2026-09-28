@@ -283,6 +283,12 @@ export class AgentLoop {
     return this.messages;
   }
 
+  // Rebinds the per-call provider metadata (e.g. after the reasoning effort
+  // for the current model changed via /model) without recreating the loop.
+  setProviderMetadata(metadata: Record<string, Record<string, unknown>> | undefined): void {
+    this.opts.providerMetadata = metadata;
+  }
+
   // Swaps the persistence target (/new starts a fresh session mid-REPL).
   // Title generation is re-armed so the new session gets one after its first
   // turn, and snapshot checkpoints now flow to the new store. The redo stack

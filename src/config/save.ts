@@ -130,3 +130,93 @@ export async function savePermissionMode(mode: string): Promise<void> {
   await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
   await writeFileAtomic(filePath, upsertTopLevelKeyText(content, "permissionMode", mode));
 }
+
+// Unquotes a TOML basic ("...") or literal ('...') string; returns null for
+// anything else (the value comparison then simply never matches).
+function unquoteTomlString(raw: string): string | null {
+  if (raw.startsWith("'") && raw.endsWith("'")) return raw.slice(1, -1);
+  try {
+    return JSON.parse(raw) as string;
+  } catch {
+    return null;
+  }
+}
+
+// Text-level upsert of reasoningEffort into the [[models]] block whose name
+// matches, so comments and sibling keys survive: the key line is replaced in
+// place (trailing comment kept), removed when effort is undefined, inserted
+// after the model/name line when missing. Returns null when no block declares
+// this model — the caller then applies the change for the session only
+// instead of appending a fragment block that would fail schema validation.
+export function setReasoningEffortInToml(
+  content: string,
+  modelName: string,
+  effort: string | undefined,
+): string | null {
+  const lines = content.split("\n");
+  const header = /^\s*\[\[\s*models\s*\]\]\s*(?:#.*)?$/;
+  const anyHeader = /^\s*\[/;
+  const nameLine = /^\s*name\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')/;
+  for (let start = 0; start < lines.length; start++) {
+    if (!header.test(lines[start] ?? "")) continue;
+    let end = lines.length;
+    for (let i = start + 1; i < lines.length; i++) {
+      if (anyHeader.test(lines[i] ?? "")) {
+        end = i;
+        break;
+      }
+    }
+    let nameIndex = -1;
+    for (let i = start + 1; i < end; i++) {
+      const match = nameLine.exec(lines[i] ?? "");
+      if (match?.[1] && unquoteTomlString(match[1]) === modelName) {
+        nameIndex = i;
+        break;
+      }
+    }
+    if (nameIndex === -1) continue;
+    const keyLine = /^\s*reasoningEffort\s*=/;
+    for (let i = start + 1; i < end; i++) {
+      if (!keyLine.test(lines[i] ?? "")) continue;
+      if (effort === undefined) {
+        lines.splice(i, 1);
+      } else {
+        const comment = /\s+#.*$/.exec(lines[i] ?? "");
+        lines[i] = `reasoningEffort = ${tomlString(effort)}${comment?.[0] ?? ""}`;
+      }
+      return lines.join("\n");
+    }
+    if (effort === undefined) return content;
+    let insertAt = nameIndex + 1;
+    for (let i = start + 1; i < end; i++) {
+      if (/^\s*model\s*=/.test(lines[i] ?? "")) {
+        insertAt = i + 1;
+        break;
+      }
+    }
+    lines.splice(insertAt, 0, `reasoningEffort = ${tomlString(effort)}`);
+    return lines.join("\n");
+  }
+  return null;
+}
+
+// Persists a model's reasoningEffort to the global config. Returns false when
+// the file declares no [[models]] block for it (e.g. the model only exists in
+// a project config) — nothing is written then.
+export async function saveReasoningEffort(
+  modelName: string,
+  effort: string | undefined,
+): Promise<boolean> {
+  const filePath = globalConfigPath();
+  let content = "";
+  try {
+    content = await fs.promises.readFile(filePath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const updated = setReasoningEffortInToml(content, modelName, effort);
+  if (updated === null) return false;
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  await writeFileAtomic(filePath, updated);
+  return true;
+}

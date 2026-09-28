@@ -88,8 +88,10 @@ model = "gpt-4o"
 # optional per-model context window — overrides the top-level contextMaxTokens
 # for compaction and the ctx % in the status bar
 # contextMaxTokens = 272000
-# optional reasoning intensity for thinking models: low | medium | high —
-# sent as reasoning_effort on every request; unset = the server default applies
+# optional reasoning intensity for thinking models — forwarded verbatim as
+# reasoning_effort on every request. Level naming varies by provider
+# (low/medium/high are common; some add minimal/max...). Unset = server
+# default. The /model picker also offers these levels after a model pick.
 # reasoningEffort = "high"
 # optional per-model pricing in USD per 1M tokens — enables the $ estimate in
 # /cost and /usage. promptPrice prices input tokens (system prompt, history,

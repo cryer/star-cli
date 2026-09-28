@@ -23,12 +23,14 @@ export const ModelConfigSchema = z.object({
   // Per-model context window; overrides the top-level contextMaxTokens for
   // compaction and the status bar when set.
   contextMaxTokens: z.number().int().positive().optional(),
-  // Reasoning intensity for thinking models (OpenAI-style reasoning_effort).
-  // Sent as provider metadata on every request (llm/provider.ts
-  // reasoningEffortMetadata); unset = the request carries no effort field and
-  // the server-side default applies. Anthropic maps effort to a thinking
-  // budget instead — not supported, the key is ignored there.
-  reasoningEffort: z.enum(["low", "medium", "high"]).optional(),
+  // Reasoning intensity for thinking models, forwarded verbatim as
+  // OpenAI-style reasoning_effort on every request (llm/provider.ts
+  // reasoningEffortMetadata) — level naming varies by model/provider
+  // (low|medium|high are common; some add minimal/max/xhigh/none), so any
+  // non-empty string is accepted and the server validates it. Unset = the
+  // request carries no effort field and the server-side default applies.
+  // Anthropic maps effort to a thinking budget instead — ignored there.
+  reasoningEffort: z.string().min(1).optional(),
   // Cost estimation needs BOTH prices (USD per 1M tokens); with only one set
   // the model is treated as unpriced.
   promptPrice: z.number().nonnegative().optional(),

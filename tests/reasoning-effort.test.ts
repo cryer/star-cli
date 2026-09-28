@@ -1,5 +1,6 @@
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
 import { describe, expect, it } from "vitest";
+import { setReasoningEffortInToml } from "../src/config/save";
 import { ConfigSchema, type StarConfig } from "../src/config/schema";
 import { reasoningEffortMetadata } from "../src/llm/provider";
 import { streamChat } from "../src/llm/stream";
@@ -14,9 +15,13 @@ describe("reasoningEffort config", () => {
     expect(config.models[0]?.reasoningEffort).toBe("high");
   });
 
-  it("rejects an unknown effort level", () => {
+  it("accepts provider-specific level names and rejects empty strings", () => {
+    // Level naming is not standardized (minimal/max/xhigh/none...), so any
+    // non-empty string passes and the server validates it.
+    const config = makeConfig([{ name: "m", provider: "p", model: "x", reasoningEffort: "xhigh" }]);
+    expect(config.models[0]?.reasoningEffort).toBe("xhigh");
     expect(() =>
-      makeConfig([{ name: "m", provider: "p", model: "x", reasoningEffort: "ultra" }]),
+      makeConfig([{ name: "m", provider: "p", model: "x", reasoningEffort: "" }]),
     ).toThrow();
   });
 });
@@ -52,6 +57,61 @@ describe("reasoningEffortMetadata", () => {
     expect(reasoningEffortMetadata(anthropic)).toBeUndefined();
     const unset = makeConfig([{ name: "m", provider: "compat", model: "x" }], providers);
     expect(reasoningEffortMetadata(unset)).toBeUndefined();
+  });
+});
+
+describe("setReasoningEffortInToml", () => {
+  const base = [
+    'defaultModel = "a"',
+    "",
+    "[[models]]",
+    'name = "a"',
+    'provider = "p1"',
+    'model = "a-1"',
+    "",
+    "[[models]]",
+    'name = "b"',
+    'provider = "p2"',
+    'model = "b-1"',
+    'reasoningEffort = "low" # keep this comment',
+    "",
+  ].join("\n");
+
+  it("inserts the key after the model line of the matching block", () => {
+    const next = setReasoningEffortInToml(base, "a", "high");
+    expect(next).toContain('model = "a-1"\nreasoningEffort = "high"');
+    // the other block is untouched
+    expect(next).toContain('reasoningEffort = "low" # keep this comment');
+    expect(next).toContain('model = "b-1"');
+  });
+
+  it("replaces an existing key in place, keeping the trailing comment", () => {
+    const next = setReasoningEffortInToml(base, "b", "max");
+    expect(next).toContain('reasoningEffort = "max" # keep this comment');
+    expect(next).not.toContain('reasoningEffort = "low"');
+  });
+
+  it("removes the key when effort is undefined", () => {
+    const next = setReasoningEffortInToml(base, "b", undefined);
+    expect(next).not.toContain("reasoningEffort");
+    expect(next).toContain('model = "b-1"');
+  });
+
+  it("matches single-quoted names and ignores name keys elsewhere", () => {
+    const content =
+      '[other]\nname = "a"\n\n[[models]]\nname = \'a\'\nprovider = "p"\nmodel = "x"\n';
+    const next = setReasoningEffortInToml(content, "a", "low");
+    expect(next).toContain('model = "x"\nreasoningEffort = "low"');
+    expect(next).toContain('[other]\nname = "a"');
+  });
+
+  it("returns null when no block declares the model", () => {
+    expect(setReasoningEffortInToml(base, "missing", "high")).toBeNull();
+    expect(setReasoningEffortInToml("", "a", "high")).toBeNull();
+  });
+
+  it("is a no-op when removing an unset key", () => {
+    expect(setReasoningEffortInToml(base, "a", undefined)).toBe(base);
   });
 });
 

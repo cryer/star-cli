@@ -7,7 +7,7 @@ import {
 } from "../agent/agent-tasks";
 import { AgentLoop } from "../agent/loop";
 import { globalConfigPath } from "../config/paths";
-import { addAllowRule, savePermissionMode } from "../config/save";
+import { addAllowRule, savePermissionMode, saveReasoningEffort } from "../config/save";
 import { type StarConfig, contextWindowTokens } from "../config/schema";
 import { estimateTokens } from "../context/tokens";
 import { getGitSummary } from "../core/git";
@@ -197,6 +197,12 @@ const SESSION_PREVIEW_MAX = 60;
 // Queued typeahead entries rendered in the live region: a bounded count so
 // the live region can never grow to terminal height (see TodoPanel).
 const MAX_VISIBLE_QUEUED = 5;
+
+// Reasoning-effort presets offered by the /model follow-up picker. Level
+// naming is not standardized across models (some add none/xhigh...), so the
+// config accepts any string and a custom value already set on the model is
+// appended to this list.
+const REASONING_EFFORT_LEVELS = ["minimal", "low", "medium", "high", "max"];
 
 interface ReplProps {
   backend: ChatBackend;
@@ -756,6 +762,50 @@ export function Repl({
     [config, cwd, attachConfirmHandler],
   );
 
+  // Follow-up to the model picker: applies the chosen reasoning effort to the
+  // live loop (no rebuild), then persists it to the model's [[models]] block.
+  const pickReasoningEffort = useCallback(
+    async (name: string): Promise<string> => {
+      const modelConfig = config.models.find((m) => m.name === name);
+      const current = modelConfig?.reasoningEffort;
+      const levels =
+        current && !REASONING_EFFORT_LEVELS.includes(current)
+          ? [...REASONING_EFFORT_LEVELS, current]
+          : REASONING_EFFORT_LEVELS;
+      const options: SelectOption[] = [
+        {
+          value: "",
+          label: "default",
+          description: "send no effort field — the provider's server-side default applies",
+          hint: current === undefined ? "current" : undefined,
+        },
+        ...levels.map((level) => ({
+          value: level,
+          label: level,
+          description: "only works if the model/provider supports this level",
+          hint: level === current ? "current" : undefined,
+        })),
+      ];
+      const picked = await showPicker(`Reasoning effort for "${name}"`, options);
+      if (picked === null || (picked === "" && current === undefined) || picked === current) {
+        return `Reasoning effort unchanged${current ? ` — still "${current}"` : " — server default"}.`;
+      }
+      const effort = picked === "" ? undefined : picked;
+      if (modelConfig) modelConfig.reasoningEffort = effort;
+      const backend = backendRef.current;
+      if (backend instanceof AgentLoop) {
+        backend.setProviderMetadata(reasoningEffortMetadata(config, name));
+      }
+      const saved = await saveReasoningEffort(name, effort);
+      const applied = effort === undefined ? "server default" : `"${effort}"`;
+      const suffix = saved
+        ? "Saved to config."
+        : `This session only — "${name}" has no [[models]] block in the global config file; add reasoningEffort there to persist it.`;
+      return `Reasoning effort for "${name}" set to ${applied}. ${suffix}`;
+    },
+    [config, showPicker],
+  );
+
   const handleConnectSetDefault = useCallback(
     async (modelName: string): Promise<string> => {
       saveDefaultModel(modelName);
@@ -1136,7 +1186,7 @@ export function Repl({
         if (models.length === 0) return "No models configured.";
         const lines = models.map(
           (m) =>
-            `${m.name === modelNameRef.current ? "*" : " "} ${m.name} (${m.provider}/${m.model})`,
+            `${m.name === modelNameRef.current ? "*" : " "} ${m.name} (${m.provider}/${m.model})${m.reasoningEffort ? ` [effort: ${m.reasoningEffort}]` : ""}`,
         );
         return `Models (* = current):\n${lines.join("\n")}`;
       },
@@ -1154,6 +1204,7 @@ export function Repl({
         if (models.length === 0) return "No models configured.";
         const options: SelectOption[] = models.map((m) => {
           const parts = [`${m.provider}/${m.model}`, `${contextWindowTokens(config, m.name)} ctx`];
+          if (m.reasoningEffort) parts.push(`effort: ${m.reasoningEffort}`);
           if (m.promptPrice !== undefined && m.completionPrice !== undefined) {
             parts.push(`$${m.promptPrice}/$${m.completionPrice} per 1M tokens`);
           }
@@ -1165,10 +1216,17 @@ export function Repl({
           };
         });
         const picked = await showPicker("Select a model", options);
-        if (!picked || picked === modelNameRef.current) {
-          return `Model unchanged — still "${modelNameRef.current}".`;
+        if (!picked) return `Model unchanged — still "${modelNameRef.current}".`;
+        const results: string[] = [];
+        if (picked === modelNameRef.current) {
+          results.push(`Model unchanged — still "${picked}".`);
+        } else {
+          const switched = await switchModel(picked);
+          if (switched.startsWith("Failed to switch model:")) return switched;
+          results.push(switched);
         }
-        return switchModel(picked);
+        results.push(await pickReasoningEffort(picked));
+        return results.join("\n");
       },
       pickPermissionMode: async () => {
         const current = config.permissionMode;
@@ -1541,6 +1599,7 @@ export function Repl({
     config,
     cwd,
     switchModel,
+    pickReasoningEffort,
     resume,
     runStream,
     applyMessages,
