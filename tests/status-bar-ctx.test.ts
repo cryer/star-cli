@@ -132,4 +132,62 @@ describe("StatusBar context percent", () => {
     expect(Number(match?.[1])).toBeLessThan(1);
     app.unmount();
   });
+
+  it("refreshes ctx % immediately after a /model switch", { timeout: 30_000 }, async () => {
+    const config = makeConfig();
+    config.providers.push({
+      name: "p",
+      protocol: "anthropic",
+      baseURL: "https://example.invalid",
+      apiKey: "test-key",
+    });
+    config.models.push(
+      { name: "test", provider: "p", model: "m1", contextMaxTokens: 100_000 },
+      { name: "big", provider: "p", model: "m2", contextMaxTokens: 1_000_000 },
+    );
+    const backend = new AgentLoop({
+      model: mockModel(),
+      registry: createDefaultRegistry(),
+      config,
+      cwd,
+    });
+    const app = renderApp(
+      createElement(Repl, {
+        backend,
+        model: "test",
+        permissionMode: "auto",
+        config,
+        cwd,
+        sessionStore: null,
+      }),
+    );
+    await tick();
+    // 20k chars ≈ 5k estimated tokens: 5% of the 100k window, 0.5% of 1M.
+    await typeText(app.stdin, "x".repeat(20_000), "\r");
+    await vi.waitFor(
+      () => {
+        expect(stripAnsi(app.lastFrame() ?? "")).toContain("ok");
+      },
+      { timeout: 15_000 },
+    );
+    for (let i = 0; i < 5; i++) await tick();
+    const before = stripAnsi(app.lastFrame() ?? "").match(/ctx: ([\d.]+)%/);
+    expect(Number(before?.[1])).toBeGreaterThanOrEqual(4);
+    await typeText(app.stdin, "/model big", "\r");
+    await vi.waitFor(
+      () => {
+        expect(stripAnsi(app.lastFrame() ?? "")).toContain('Switched to model "big"');
+      },
+      { timeout: 15_000 },
+    );
+    await vi.waitFor(
+      () => {
+        const after = stripAnsi(app.lastFrame() ?? "").match(/ctx: ([\d.]+)%/);
+        expect(after, "ctx % should recompute against the new window").not.toBeNull();
+        expect(Number(after?.[1])).toBeLessThan(1);
+      },
+      { timeout: 15_000 },
+    );
+    app.unmount();
+  });
 });

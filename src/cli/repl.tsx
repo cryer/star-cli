@@ -10,7 +10,7 @@ import { globalConfigPath } from "../config/paths";
 import { addAllowRule, savePermissionMode, saveReasoningEffort } from "../config/save";
 import { type StarConfig, contextWindowTokens } from "../config/schema";
 import { estimateTokens } from "../context/tokens";
-import { getGitSummary } from "../core/git";
+import { getGitSummaryCached } from "../core/git";
 import { MAX_IMAGE_DIMENSION } from "../core/image";
 import type { CoreMessage, ImageInput } from "../core/messages";
 import { createModel, reasoningEffortMetadata } from "../llm/provider";
@@ -87,7 +87,7 @@ import {
 } from "./components/ThinkingIndicator";
 import { TodoPanel } from "./components/TodoPanel";
 import { type ToolCardData, formatToolCard } from "./components/ToolCallCard";
-import { computeCostUsd, estimateCost, formatDollars } from "./cost";
+import { computeCostUsd, estimateCost, formatDollars, formatTokens } from "./cost";
 import { type DiffPreview, generateDiffPreview } from "./diff-preview";
 import { isDoubleEscape } from "./double-esc";
 import {
@@ -163,7 +163,7 @@ export const BUSY_BLOCKED_COMMANDS = new Set([
 ]);
 
 function formatUsage(usage: UsageStats): string {
-  return `API usage this session: ${usage.requests} requests, ${usage.promptTokens} prompt + ${usage.completionTokens} completion = ${usage.totalTokens} tokens`;
+  return `API usage this session: ${usage.requests} requests, ${formatTokens(usage.promptTokens)} prompt + ${formatTokens(usage.completionTokens)} completion = ${formatTokens(usage.totalTokens)} tokens`;
 }
 
 interface PendingPermission {
@@ -254,6 +254,11 @@ export function Repl({
   const backendRef = useRef<ChatBackend>(backend);
   const nextIdRef = useRef(initialDisplay.length);
   const abortRef = useRef<AbortController | null>(null);
+  // Name of a long-running slash command currently in flight (only /compact
+  // for now): prompts queue and session-rewriting commands are refused just
+  // like during a stream — /compact ends with backend.loadMessages(), which
+  // would clobber any turn that ran concurrently with it.
+  const busyCommandRef = useRef<string | null>(null);
   const streamedRef = useRef("");
   // Chars of streamedRef already committed to static history by the ticker.
   // The live region renders only the suffix past this point, and a stream
@@ -653,10 +658,19 @@ export function Repl({
     pushMessage("system", "last message restored for editing");
   }, [pushMessage, redrawMessages]);
 
-  const handleExit = useCallback(() => {
+  // Kills every still-running background shell task and subagent; returns the
+  // count. The agent-task drain is discarded with it: stopped agents stay
+  // un-notified otherwise, and the loop would inject their reports as user
+  // messages at the next step boundary — into whatever session is active then.
+  const stopBackgroundWork = useCallback((): number => {
     const killed = defaultTaskManager.cleanup();
     const killedAgents = defaultAgentTasks.cleanup();
-    const stopped = killed.length + killedAgents.length;
+    defaultAgentTasks.drainNotifications();
+    return killed.length + killedAgents.length;
+  }, []);
+
+  const handleExit = useCallback(() => {
+    const stopped = stopBackgroundWork();
     if (stopped > 0) {
       pushMessage("system", `${stopped} background task(s) still running; reports will be lost.`);
       // Let the warning commit to static output before the app tears down.
@@ -664,17 +678,25 @@ export function Repl({
       return;
     }
     exit();
-  }, [exit, pushMessage]);
+  }, [exit, pushMessage, stopBackgroundWork]);
 
   useInput((_input, key) => {
     if (key.escape) {
-      const busy =
-        abortRef.current !== null ||
-        pendingRef.current !== null ||
+      // Popups with their own Esc handling (picker, rewind/plan confirms,
+      // connect wizard) keep the key: interrupting here too would close the
+      // popup and kill the running turn (or drop the queue) with one press.
+      // The permission prompt has no Esc of its own, so it stays on the
+      // interrupt path below.
+      const popupOpen =
         planApprovalRef.current ||
         pendingRewindRef.current !== null ||
         pendingConnectRef.current !== null ||
         pickerRef.current !== null;
+      if (popupOpen) {
+        lastEscRef.current = null;
+        return;
+      }
+      const busy = abortRef.current !== null || pendingRef.current !== null;
       if (busy) {
         lastEscRef.current = null;
         interrupt();
@@ -836,6 +858,10 @@ export function Repl({
       if (!store) {
         return `Session not found: ${id}`;
       }
+      // Background work belongs to the conversation being replaced: left
+      // running, subagent reports would drain into the resumed session's
+      // history and its file changes into its checkpoints.
+      const stopped = stopBackgroundWork();
       await current.loadMessages(resumed.messages);
       // Rebind persistence to the resumed session before anything else can
       // write: without this, new messages/usage/snapshots keep landing in the
@@ -851,9 +877,11 @@ export function Repl({
       applyMessages(display);
       usageRef.current = resumed.meta.usage ? { ...resumed.meta.usage } : emptyUsage();
       setUsageVersion((v) => v + 1);
-      return `Resumed session ${resolvedId} (${resumed.messages.length} messages).`;
+      const stoppedNote =
+        stopped > 0 ? ` Stopped ${stopped} background task(s) from the previous session.` : "";
+      return `Resumed session ${resolvedId} (${resumed.messages.length} messages).${stoppedNote}`;
     },
-    [applyMessages, cwd],
+    [applyMessages, cwd, stopBackgroundWork],
   );
 
   const runStream = useCallback(
@@ -1207,7 +1235,10 @@ export function Repl({
         const models = listModels(config);
         if (models.length === 0) return "No models configured.";
         const options: SelectOption[] = models.map((m) => {
-          const parts = [`${m.provider}/${m.model}`, `${contextWindowTokens(config, m.name)} ctx`];
+          const parts = [
+            `${m.provider}/${m.model}`,
+            `${formatTokens(contextWindowTokens(config, m.name))} ctx`,
+          ];
           if (m.reasoningEffort) parts.push(`effort: ${m.reasoningEffort}`);
           if (m.promptPrice !== undefined && m.completionPrice !== undefined) {
             parts.push(`$${m.promptPrice}/$${m.completionPrice} per 1M tokens`);
@@ -1314,6 +1345,10 @@ export function Repl({
         if (!(current instanceof AgentLoop)) {
           return "Current backend does not support starting a new session.";
         }
+        // Background work belongs to the conversation being abandoned: left
+        // running, subagent reports would drain into the new session's
+        // history and its file changes into its checkpoints.
+        const stopped = stopBackgroundWork();
         const store = await SessionStore.create(cwd, modelNameRef.current);
         current.setSessionStore(store);
         sessionStoreRef.current = store;
@@ -1329,7 +1364,9 @@ export function Repl({
         budgetWarnedRef.current = false;
         budgetExceededRef.current = false;
         setUsageVersion((v) => v + 1);
-        return `Started a new session (${store.id}) with a clean context.`;
+        const stoppedNote =
+          stopped > 0 ? ` Stopped ${stopped} background task(s) from the previous session.` : "";
+        return `Started a new session (${store.id}) with a clean context.${stoppedNote}`;
       },
       connect: async () => {
         if (pendingConnectRef.current) return "The connect wizard is already open.";
@@ -1359,6 +1396,12 @@ export function Repl({
       },
       showGlobalUsage: async () => formatUsageDashboard(await collectUsageStats(), config.models),
       compactContext: async () => {
+        // No nesting: a second /compact (or any concurrent prompt) would race
+        // the loadMessages() at the end of this one.
+        if (busyCommandRef.current) {
+          return `Busy — /${busyCommandRef.current} is still running.`;
+        }
+        busyCommandRef.current = "compact";
         let summaryModel = null;
         try {
           summaryModel = createModel(config, modelNameRef.current);
@@ -1387,6 +1430,14 @@ export function Repl({
           tickerStopRef.current?.();
           tickerStopRef.current = null;
           setActivity(null);
+          busyCommandRef.current = null;
+          // Prompts queued while compaction ran start now that the history
+          // rewrite is done (same drain as the end of a stream turn).
+          const nextPrompt = queueRef.current.dequeue();
+          if (nextPrompt) {
+            setQueueItems(queueRef.current.list());
+            void runStreamRef.current?.(nextPrompt.text, nextPrompt.images);
+          }
         }
       },
       exportSession: (arg) =>
@@ -1574,6 +1625,14 @@ export function Repl({
       },
       runDoctor: async () => formatDoctorReport(await runDoctor({ cwd, config })),
       submitPrompt: async (text) => {
+        // /commit lands here: respect the turn/command guards instead of
+        // clobbering the live stream's abort controller — queue like a
+        // typeahead prompt.
+        if (abortRef.current || busyCommandRef.current) {
+          queueRef.current.enqueue({ text, images: [] });
+          setQueueItems(queueRef.current.list());
+          return;
+        }
         await runStream(text);
       },
       describeConfig: () =>
@@ -1612,6 +1671,7 @@ export function Repl({
     setPendingRewind,
     setPendingConnect,
     showPicker,
+    stopBackgroundWork,
   ]);
 
   const runShellBang = useCallback(
@@ -1659,7 +1719,7 @@ export function Repl({
       if (text.startsWith("!")) {
         // A bang would clobber the streaming turn's abort controller, so it
         // waits in the queue like a regular prompt.
-        if (abortRef.current) {
+        if (abortRef.current || busyCommandRef.current) {
           queueRef.current.enqueue({ text, images: [] });
           setQueueItems(queueRef.current.list());
           return;
@@ -1679,9 +1739,18 @@ export function Repl({
           );
           return;
         }
-        if (abortRef.current && BUSY_BLOCKED_COMMANDS.has(parsed.name)) {
-          pushMessage("system", "Busy — wait for the turn to finish or press Esc to interrupt it.");
-          return;
+        if (BUSY_BLOCKED_COMMANDS.has(parsed.name)) {
+          if (abortRef.current) {
+            pushMessage(
+              "system",
+              "Busy — wait for the turn to finish or press Esc to interrupt it.",
+            );
+            return;
+          }
+          if (busyCommandRef.current) {
+            pushMessage("system", `Busy — /${busyCommandRef.current} is still running.`);
+            return;
+          }
         }
         void command.run(parsed.args, registry.ctx);
         return;
@@ -1696,7 +1765,7 @@ export function Repl({
       }
       const images = pendingImagesRef.current.map((staged) => staged.image);
       if (images.length > 0) clearPendingImages();
-      if (abortRef.current) {
+      if (abortRef.current || busyCommandRef.current) {
         queueRef.current.enqueue({ text, images });
         setQueueItems(queueRef.current.list());
         return;
@@ -1716,11 +1785,14 @@ export function Repl({
     [registry],
   );
 
-  // Expensive status-bar bits (sync git call, token estimate over the full
-  // history) refresh on turn boundaries and history rewrites, not per tick.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: isStreaming and epoch are deliberate refresh triggers, not values read inside
+  // Expensive status-bar bits (git branch, token estimate over the full
+  // history) refresh on turn boundaries, history rewrites and model switches,
+  // not per tick. The git probe goes through the 15s TTL cache: the uncached
+  // summary runs several synchronous git processes that would block the
+  // event loop on every refresh.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: isStreaming, epoch and modelName are deliberate refresh triggers, not values read inside
   useEffect(() => {
-    setGitBranch(getGitSummary(cwd)?.branch ?? null);
+    setGitBranch(getGitSummaryCached(cwd)?.branch ?? null);
     const current = backendRef.current;
     if (current instanceof AgentLoop) {
       const window_ = contextWindowTokens(config, modelNameRef.current);
@@ -1730,7 +1802,7 @@ export function Repl({
     } else {
       setContextPercent(null);
     }
-  }, [cwd, config, isStreaming, epoch]);
+  }, [cwd, config, isStreaming, epoch, modelName]);
 
   const sessionCost = sessionCostUsd();
 
@@ -1843,6 +1915,13 @@ export interface ReplOptions {
   initialUsage?: UsageStats;
 }
 
+// Ink's default exitOnCtrlC would unmount the app on \x03, bypassing the
+// InputBox Ctrl+C semantics (interrupt the turn / clear the draft) and the
+// session's final persistence. The app owns Ctrl+C; Ctrl+D and /exit handle
+// quitting. Exported so tests can pin the production value — the Ink test
+// harness mirrors it.
+export const REPL_RENDER_OPTIONS = { exitOnCtrlC: false };
+
 export function renderRepl(backend: ChatBackend, opts: ReplOptions) {
   // Backstop for abnormal exits: never leave orphaned background processes.
   process.on("exit", () => {
@@ -1859,5 +1938,6 @@ export function renderRepl(backend: ChatBackend, opts: ReplOptions) {
       initialMessages={opts.initialMessages}
       initialUsage={opts.initialUsage}
     />,
+    REPL_RENDER_OPTIONS,
   );
 }

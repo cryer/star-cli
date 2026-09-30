@@ -17,7 +17,7 @@ import { createDefaultRegistry } from "../src/tools";
 import { renderApp, stripAnsi, tick, typeText } from "./ink-harness";
 
 process.env.STAR_NO_UPDATE_CHECK = "1";
-const { Repl, BUSY_BLOCKED_COMMANDS } = await import("../src/cli/repl");
+const { Repl, BUSY_BLOCKED_COMMANDS, REPL_RENDER_OPTIONS } = await import("../src/cli/repl");
 
 const ESC = String.fromCharCode(27);
 
@@ -90,6 +90,13 @@ describe("REPL turn guards", () => {
   it("lists /redo among the busy-blocked commands", () => {
     expect(BUSY_BLOCKED_COMMANDS.has("redo")).toBe(true);
     expect(BUSY_BLOCKED_COMMANDS.has("undo")).toBe(true);
+  });
+
+  it("opts Ink out of exit-on-Ctrl-C so the app owns Ctrl+C", () => {
+    // Ink's default (true) would kill the process on \x03 and make the
+    // InputBox Ctrl+C branch (interrupt the turn / clear the draft) dead
+    // code; the harness mirrors this production value.
+    expect(REPL_RENDER_OPTIONS).toEqual({ exitOnCtrlC: false });
   });
 
   it(
@@ -283,4 +290,190 @@ describe("REPL turn guards", () => {
     expect(oldMessages.some((m) => coreMessageText(m) === "hello")).toBe(false);
     app.unmount();
   });
+
+  it(
+    "queues prompts and refuses nested session commands while /compact runs",
+    { timeout: 30_000 },
+    async () => {
+      const model = new MockLanguageModelV1({
+        doStream: async () => ({
+          stream: convertArrayToReadableStream([
+            { type: "text-delta", textDelta: "pong" },
+            {
+              type: "finish",
+              finishReason: "stop",
+              usage: { promptTokens: 5, completionTokens: 3 },
+            },
+          ]),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        }),
+      });
+      const loop = new AgentLoop({
+        model,
+        registry: createDefaultRegistry(),
+        config: makeConfig(),
+        cwd,
+      });
+      const pad = (n: number) => "x".repeat(n);
+      await loop.loadMessages([
+        { role: "user", content: pad(400) },
+        { role: "assistant", content: pad(400) },
+        { role: "user", content: "u2" },
+        { role: "assistant", content: "a2" },
+        { role: "user", content: "u3" },
+        { role: "assistant", content: "a3" },
+      ]);
+      // Gate the loadMessages call that /compact ends with, so the in-flight
+      // window stays open until this test releases it.
+      const original = loop.loadMessages.bind(loop);
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      loop.loadMessages = (async (messages: Parameters<AgentLoop["loadMessages"]>[0]) => {
+        await gate;
+        return original(messages);
+      }) as AgentLoop["loadMessages"];
+
+      const app = renderRepl(loop, cwd);
+      await tick();
+      await typeText(app.stdin, "/compact", "\r");
+      await vi.waitFor(
+        () => {
+          expect(stripAnsi(app.lastFrame() ?? "")).toContain("compacting context…");
+        },
+        { timeout: 15_000 },
+      );
+      // A prompt typed mid-compact queues instead of starting a turn whose
+      // messages the compaction's loadMessages would then clobber.
+      await typeText(app.stdin, "hello", "\r");
+      await vi.waitFor(
+        () => {
+          expect(stripAnsi(app.lastFrame() ?? "")).toContain("queued: hello");
+        },
+        { timeout: 15_000 },
+      );
+      // Nested /compact and other session-rewriting commands are refused.
+      await typeText(app.stdin, "/compact", "\r");
+      await vi.waitFor(
+        () => {
+          expect(stripAnsi(app.lastFrame() ?? "")).toContain("Busy — /compact is still running.");
+        },
+        { timeout: 15_000 },
+      );
+      await typeText(app.stdin, "/new", "\r");
+      await tick();
+      expect(stripAnsi(app.lastFrame() ?? "")).not.toContain("Started a new session");
+      // Release the compaction: the rewrite lands, then the queued prompt runs.
+      release();
+      await vi.waitFor(
+        () => {
+          expect(stripAnsi(app.lastFrame() ?? "")).toContain("Compacted context");
+        },
+        { timeout: 15_000 },
+      );
+      await vi.waitFor(
+        () => {
+          expect(stripAnsi(app.lastFrame() ?? "")).toContain("pong");
+        },
+        { timeout: 15_000 },
+      );
+      app.unmount();
+    },
+  );
+
+  it("Esc closes a picker without interrupting the running turn", { timeout: 30_000 }, async () => {
+    const backend = streamingBackend([{ type: "text-delta", text: "working" }]);
+    const app = renderRepl(backend, cwd);
+    await tick();
+    await typeText(app.stdin, "hello", "\r");
+    await vi.waitFor(
+      () => {
+        expect(stripAnsi(app.lastFrame() ?? "")).toContain("working");
+      },
+      { timeout: 15_000 },
+    );
+    // /permission is not busy-blocked: its picker opens mid-turn.
+    await typeText(app.stdin, "/permission", "\r");
+    await vi.waitFor(
+      () => {
+        expect(stripAnsi(app.lastFrame() ?? "")).toContain("Select a permission mode");
+      },
+      { timeout: 15_000 },
+    );
+    // Esc goes to the picker alone: it cancels, the turn keeps streaming.
+    app.stdin.write(ESC);
+    await vi.waitFor(
+      () => {
+        const frame = stripAnsi(app.lastFrame() ?? "");
+        expect(frame).toContain("Permission mode unchanged");
+        expect(frame).not.toContain("[interrupted]");
+      },
+      { timeout: 15_000 },
+    );
+    // With the popup gone, Esc interrupts the turn as before.
+    app.stdin.write(ESC);
+    await vi.waitFor(
+      () => {
+        expect(stripAnsi(app.lastFrame() ?? "")).toContain("[interrupted]");
+      },
+      { timeout: 15_000 },
+    );
+    app.unmount();
+  });
+
+  it(
+    "stops background subagents on /new so their reports never reach the new session",
+    { timeout: 30_000 },
+    async () => {
+      const model = new MockLanguageModelV1({
+        doStream: async () => ({
+          stream: convertArrayToReadableStream([
+            { type: "text-delta", textDelta: "pong" },
+            {
+              type: "finish",
+              finishReason: "stop",
+              usage: { promptTokens: 5, completionTokens: 3 },
+            },
+          ]),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        }),
+      });
+      const store = await SessionStore.create(cwd, "test");
+      const loop = new AgentLoop({
+        model,
+        registry: createDefaultRegistry(),
+        config: makeConfig(),
+        cwd,
+        sessionStore: store,
+      });
+      const app = renderRepl(loop, cwd, store);
+      await tick();
+      defaultAgentTasks.start(() => new Promise<string>(() => {}), { prompt: "never ends" });
+      await tick();
+      await typeText(app.stdin, "/new", "\r");
+      await vi.waitFor(
+        () => {
+          expect(stripAnsi(app.lastFrame() ?? "")).toContain("Started a new session");
+        },
+        { timeout: 15_000 },
+      );
+      expect(stripAnsi(app.lastFrame() ?? "")).toContain("Stopped 1 background task(s)");
+      expect(defaultAgentTasks.list().every((t) => t.status !== "running")).toBe(true);
+      // The stopped agent's report is discarded, not drained: the next turn
+      // must not carry a background-subagent user note into the new session.
+      await typeText(app.stdin, "hello", "\r");
+      await vi.waitFor(
+        () => {
+          expect(stripAnsi(app.lastFrame() ?? "")).toContain("pong");
+        },
+        { timeout: 15_000 },
+      );
+      const drained = loop
+        .getMessages()
+        .filter((m) => m.role === "user" && coreMessageText(m).includes("background subagent"));
+      expect(drained).toEqual([]);
+      app.unmount();
+    },
+  );
 });

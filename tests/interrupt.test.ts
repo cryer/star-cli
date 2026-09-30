@@ -339,4 +339,55 @@ describe("REPL interrupt display", () => {
       app.unmount();
     },
   );
+
+  it(
+    "interrupts the stream on Ctrl+C instead of exiting the app",
+    { timeout: 30_000 },
+    async () => {
+      const backend: ChatBackend = {
+        async *stream(_input: ChatInput, signal: AbortSignal): AsyncGenerator<StreamEvent> {
+          yield { type: "text-delta", text: "partial reply" };
+          await new Promise<void>((resolve) => {
+            if (signal.aborted) resolve();
+            else signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+        },
+      };
+      const app = renderApp(
+        createElement(Repl, {
+          backend,
+          model: "test",
+          permissionMode: "auto",
+          config: makeConfig(),
+          cwd,
+          sessionStore: null,
+        }),
+      );
+      await tick();
+      await typeText(app.stdin, "hello", "\r");
+      await vi.waitFor(
+        () => {
+          expect(stripAnsi(app.lastFrame() ?? "")).toContain("partial reply");
+        },
+        { timeout: 15_000 },
+      );
+      app.stdin.write("\x03");
+      await vi.waitFor(
+        () => {
+          expect(stripAnsi(app.lastFrame() ?? "")).toContain("[interrupted]");
+        },
+        { timeout: 15_000 },
+      );
+      // The app survived: a follow-up prompt runs a whole new turn.
+      await typeText(app.stdin, "again", "\r");
+      await vi.waitFor(
+        () => {
+          const replies = stripAnsi(app.allOutput()).match(/partial reply/g);
+          expect(replies?.length ?? 0).toBeGreaterThanOrEqual(2);
+        },
+        { timeout: 15_000 },
+      );
+      app.unmount();
+    },
+  );
 });

@@ -47,6 +47,7 @@ export function renderApp(node: ReactElement): InkApp {
     stdout: stdout as never,
     stdin: stdin as never,
     debug: true,
+    // Mirrors REPL_RENDER_OPTIONS in src/cli/repl.tsx (production value).
     exitOnCtrlC: false,
   });
   return {

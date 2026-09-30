@@ -14,6 +14,15 @@ export function useInput(inputHandler: InputHandler, options: { isActive?: boole
   // An escape sequence split across two reads is held here until the rest
   // arrives (a bare trailing ESC is never held — it is the Escape key).
   const pendingRef = useRef("");
+  // The handler is invoked through a ref so the emitter registration stays
+  // the one made at mount: re-subscribing per render (inline handlers have a
+  // fresh identity every time) would move the listener to the end of the
+  // dispatch order — a late-mounted popup's Esc handler would then run
+  // before the Repl-level one.
+  const handlerRef = useRef(inputHandler);
+  useEffect(() => {
+    handlerRef.current = inputHandler;
+  });
 
   useEffect(() => {
     if (options.isActive === false) return;
@@ -33,7 +42,7 @@ export function useInput(inputHandler: InputHandler, options: { isActive?: boole
         // Same guard as Ink: Ctrl+C is left to Ink's own exit handler unless
         // the app opted out of exit-on-Ctrl-C.
         if (!(input === "c" && key.ctrl) || !internal_exitOnCtrlC) {
-          inputHandler(input, key);
+          handlerRef.current(input, key);
         }
       }
     };
@@ -41,5 +50,5 @@ export function useInput(inputHandler: InputHandler, options: { isActive?: boole
     return () => {
       internal_eventEmitter?.removeListener("input", handleData);
     };
-  }, [options.isActive, internal_exitOnCtrlC, internal_eventEmitter, inputHandler]);
+  }, [options.isActive, internal_exitOnCtrlC, internal_eventEmitter]);
 }

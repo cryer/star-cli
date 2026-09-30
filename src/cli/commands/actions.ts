@@ -9,6 +9,7 @@ import { estimateTokens } from "../../context/tokens";
 import type { CoreMessage } from "../../core/messages";
 import type { SessionStore } from "../../session/store";
 import type { ChatBackend } from "../backend";
+import { formatTokens } from "../cost";
 
 const MIN_COMPACT_MESSAGES = 4;
 
@@ -43,7 +44,7 @@ export async function compactSession(opts: CompactSessionOptions): Promise<Compa
   const compacted = compactMessages(messages, config.contextMaxTokens, { force: true });
   if (!compacted.compacted) {
     return {
-      message: `Nothing to compact: history is too short to drop a whole turn (~${beforeTokens} estimated tokens).`,
+      message: `Nothing to compact: history is too short to drop a whole turn (~${formatTokens(beforeTokens)} estimated tokens).`,
       compacted: false,
     };
   }
@@ -52,7 +53,7 @@ export async function compactSession(opts: CompactSessionOptions): Promise<Compa
   await sessionStore?.replaceMessages(next);
   const afterTokens = estimateTokens(next);
   return {
-    message: `Compacted context: ${messages.length} -> ${next.length} messages (~${beforeTokens} -> ~${afterTokens} estimated tokens).`,
+    message: `Compacted context: ${messages.length} -> ${next.length} messages (~${formatTokens(beforeTokens)} -> ~${formatTokens(afterTokens)} estimated tokens).`,
     compacted: true,
     messages: next,
   };
