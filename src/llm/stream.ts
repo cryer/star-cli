@@ -1,6 +1,7 @@
 import { type LanguageModel, type ToolSet, streamText } from "ai";
 import type { StreamEvent, TokenUsage } from "../core/events";
 import type { CoreMessage } from "../core/messages";
+import { streamActivity } from "./activity";
 import { debugStreamLog } from "./debug";
 import type { ProviderMetadata } from "./provider";
 import { summarizeStreamError } from "./retry";
@@ -42,6 +43,11 @@ const DEFAULT_FIRST_PART_TIMEOUT_MS = 120_000;
 // thinking, buffered function-call arguments) dies as a spurious
 // idle-timeout and burns the whole retry budget on a deterministic stall.
 const GENERATION_PART_TYPES = new Set(["text-delta", "reasoning", "tool-call", "tool-call-delta"]);
+
+// Absolute cap on how long byte-level keepalives (SSE heartbeat comments the
+// SDK swallows) may extend a stream that produces no parts at all — without
+// it a heartbeat-only zombie connection could hang a turn forever.
+const MAX_KEEPALIVE_SILENCE_MS = 10 * 60_000;
 
 const CACHE_READ_KEYS = ["cacheReadInputTokens", "cache_read_input_tokens"];
 const CACHED_PROMPT_KEYS = ["cachedPromptTokens", "cached_prompt_tokens", "cachedTokens"];
@@ -114,6 +120,9 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
   // Any visible content streamed (text, reasoning, or a tool call) — decides
   // whether an idle-watchdog cutoff marks the finish event as truncated.
   let hasContent = false;
+  // Last time ANY part arrived; the keepalive extension is bounded against
+  // this, not against the last byte (bytes without parts can flow forever).
+  let lastPartAt = Date.now();
   debugStreamLog("request", {
     messages: opts.messages.length,
     idleTimeoutMs,
@@ -122,8 +131,9 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
   try {
     for (;;) {
       let timer: ReturnType<typeof setTimeout> | undefined;
+      const windowMs = seenContent ? idleTimeoutMs : firstPartTimeoutMs;
       const idle = new Promise<null>((resolve) => {
-        timer = setTimeout(() => resolve(null), seenContent ? idleTimeoutMs : firstPartTimeoutMs);
+        timer = setTimeout(() => resolve(null), windowMs);
       });
       let next: Awaited<ReturnType<typeof iterator.next>> | null;
       try {
@@ -142,13 +152,31 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
         if (timer) clearTimeout(timer);
       }
       if (next === null) {
+        // Byte-level liveness check before cutting: relays fronting slow
+        // upstreams often send SSE heartbeat comments while buffering, and
+        // the SDK swallows them, so at the part level the stream looks dead
+        // while bytes are still flowing. As long as raw chunks keep
+        // arriving, keep waiting — bounded by MAX_KEEPALIVE_SILENCE_MS of
+        // total part silence so a heartbeat-only zombie cannot hang a turn.
+        const activity = streamActivity(controller.signal);
+        const silentForMs = Date.now() - lastPartAt;
+        const lastChunkAgoMs = activity ? Date.now() - activity.lastChunkAt : undefined;
+        if (
+          lastChunkAgoMs !== undefined &&
+          lastChunkAgoMs < windowMs &&
+          silentForMs < MAX_KEEPALIVE_SILENCE_MS
+        ) {
+          debugStreamLog("keepalive", { seenContent, deltas, lastChunkAgoMs, silentForMs });
+          continue;
+        }
         // Note: the AI SDK holds the model's finish part until the source
         // stream closes, so a relay that stops sending without closing can
         // only be detected by this watchdog.
         debugStreamLog("idle-timeout", {
           seenContent,
           deltas,
-          waitedMs: seenContent ? idleTimeoutMs : firstPartTimeoutMs,
+          waitedMs: windowMs,
+          lastChunkAgoMs,
         });
         yield {
           type: "finish",
@@ -165,6 +193,7 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
         return;
       }
       const part = next.value;
+      lastPartAt = Date.now();
       if (GENERATION_PART_TYPES.has(part.type)) seenContent = true;
       switch (part.type) {
         case "text-delta":

@@ -3,6 +3,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModel } from "ai";
 import type { ProviderConfig, StarConfig } from "../config/schema";
+import { wrapFetchWithActivity } from "./activity";
 import { resolveModelConfig } from "./registry";
 import { createSseNormalizingFetch } from "./sse-normalize";
 
@@ -30,12 +31,17 @@ export function createModel(config: StarConfig, modelName?: string): LanguageMod
     );
   }
   const apiKey = resolveApiKey(provider);
+  // Every protocol goes through the activity-tracking fetch so the stream
+  // watchdog can see raw byte liveness (sse-normalize passes init through,
+  // so the AbortSignal key survives the composition).
+  const trackedFetch = wrapFetchWithActivity();
   switch (provider.protocol) {
     case "anthropic":
       return createAnthropic({
         baseURL: provider.baseURL,
         apiKey,
         headers: provider.headers,
+        fetch: trackedFetch,
       })(modelConfig.model);
     case "openai-compatible":
       // The per-model config asks the relay for a terminal usage chunk
@@ -47,6 +53,7 @@ export function createModel(config: StarConfig, modelName?: string): LanguageMod
         baseURL: provider.baseURL,
         apiKey,
         headers: provider.headers,
+        fetch: trackedFetch,
       })(modelConfig.model, {}, { includeUsage: true });
     case "openai-responses":
       return createOpenAI({
@@ -56,7 +63,7 @@ export function createModel(config: StarConfig, modelName?: string): LanguageMod
         // Relays fronting the Responses API sometimes batch several JSON
         // events into one SSE data payload, which the SDK's parser cannot
         // read; normalize the wire format back to one event per data line.
-        fetch: createSseNormalizingFetch(),
+        fetch: createSseNormalizingFetch(trackedFetch),
       }).responses(modelConfig.model);
   }
 }
