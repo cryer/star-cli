@@ -436,6 +436,17 @@ export class SessionStore {
     await this.flushMetaNow();
   }
 
+  // /model swaps the live loop mid-session; keep the recorded model in sync
+  // or the session list and /usage attribute the whole session to whichever
+  // model happened to be active at creation.
+  async setModel(model: string): Promise<void> {
+    await this.ensureInitialized();
+    const meta = await this.meta();
+    meta.model = model;
+    meta.updatedAt = Date.now();
+    await this.flushMetaNow();
+  }
+
   async appendCheckpoint(record: CheckpointRecord, content: string | null): Promise<void> {
     await this.ensureInitialized();
     await appendCheckpointRecord(this.dir, record, content);

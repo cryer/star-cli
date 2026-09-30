@@ -788,6 +788,7 @@ export function Repl({
         backendRef.current = loop;
         modelNameRef.current = name;
         setModelName(name);
+        await sessionStoreRef.current?.setModel(name);
         return `Switched to model "${name}".`;
       } catch (error) {
         return `Failed to switch model: ${error instanceof Error ? error.message : String(error)}`;
