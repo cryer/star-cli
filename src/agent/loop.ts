@@ -90,6 +90,13 @@ const AUTO_CONTINUE_NUDGE =
 const EMPTY_REPLY_NUDGE =
   "[auto-continue] Your previous reply was empty — no text and no tool calls. If the task is fully complete, reply with one short confirmation; otherwise continue NOW by calling tools.";
 
+// Sent after the idle watchdog cut a reply mid-generation: the partial text
+// stays committed, so the model resumes where it stopped instead of
+// regenerating from scratch (a resend would hit the same stalling relay and
+// re-bill the whole prompt).
+const TRUNCATED_CONTINUE_NUDGE =
+  "[auto-continue] Your previous reply was cut off mid-stream by a timeout — it is incomplete. Resume EXACTLY where you stopped: do not repeat or restate what you already wrote; continue with the next tool call or the remainder of the text.";
+
 // An empty reply the model finished with a content filter reproduces on every
 // identical resend (the filter judged the request itself), so it gets one
 // confirmation resend before steering changes the input. Any other empty
@@ -628,6 +635,10 @@ export class AgentLoop {
     let autoContinues = 0;
     let lastWasNudge = false;
     let usedToolsThisTurn = false;
+    // Continuations after a watchdog-truncated reply — a separate budget from
+    // autoContinues, since each cut is transport trouble (a stalling relay),
+    // not an unproductive reply.
+    let streamCutContinues = 0;
     // Open items from the latest todo_write this turn — a deterministic
     // "work still pending" signal that needs no text interpretation.
     let openTodos: string[] = [];
@@ -722,6 +733,10 @@ export class AgentLoop {
       // are steered early instead of spending the full retry budget.
       let lastUsage: { completionTokens: number } | undefined;
       let sawReasoning = false;
+      // The latest attempt's stream was cut by the idle watchdog after real
+      // content arrived — the reply is partial and worth resuming rather than
+      // accepting as complete.
+      let wasTruncated = false;
       // One free retry per step, outside the transient-retry budget: when the
       // provider rejects the request for an oversized image (a 4xx), the
       // offending images are stripped from the history and the request resent.
@@ -743,6 +758,7 @@ export class AgentLoop {
         lastFinishReason = undefined;
         lastUsage = undefined;
         sawReasoning = false;
+        wasTruncated = false;
         // Retried attempts get more patient stream timeouts (1x, 2x, 3x): a
         // relay that just timed out is overloaded, so re-asking with the same
         // deadline would hit the same wall.
@@ -761,6 +777,7 @@ export class AgentLoop {
               yield event;
             } else if (event.type === "finish") {
               lastFinishReason = event.finishReason;
+              if (event.truncated) wasTruncated = true;
               // The raw usage drives the empty-reply heuristic; the folded
               // copy (own + settled subagent usage) is what consumers meter.
               lastUsage = event.usage;
@@ -896,6 +913,34 @@ export class AgentLoop {
       await this.persist(assistantMessage);
 
       if (toolCalls.length === 0) {
+        // A watchdog cut mid-generation is a stream failure, not a model
+        // choice: resume where the reply stopped rather than judging the
+        // partial text with the unproductivity signals below (which would
+        // either accept a half answer or spend the auto-continue budget on
+        // what is really transport trouble). Budgeted separately by
+        // streamMaxRetries; plan mode is excluded like all nudges.
+        if (wasTruncated) {
+          if (config.permissionMode !== "plan" && streamCutContinues < config.streamMaxRetries) {
+            streamCutContinues++;
+            yield {
+              type: "notice",
+              message: `reply cut short by a stream timeout; asking the model to resume where it stopped (${streamCutContinues}/${config.streamMaxRetries}).`,
+            };
+            const nudge: CoreMessage = { role: "user", content: TRUNCATED_CONTINUE_NUDGE };
+            this.messages.push(nudge);
+            await this.persist(nudge);
+            continue;
+          }
+          if (config.permissionMode !== "plan") {
+            yield {
+              type: "notice",
+              message:
+                'reply was cut short by a stream timeout and resume attempts are exhausted, handing the turn back — reply "continue" to keep going.',
+            };
+          }
+          await this.runStopHooks("completed");
+          return;
+        }
         // A turn that ends in text only is suspect: weaker models announce
         // work ("我会…") instead of calling tools. Signals decide whether to
         // nudge the model onward (bounded by maxAutoContinues, never in plan

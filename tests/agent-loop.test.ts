@@ -836,6 +836,74 @@ describe("AgentLoop", () => {
     expect(retry.delayMs).toBeLessThanOrEqual(125);
   });
 
+  it("resumes a watchdog-truncated reply where it stopped instead of accepting it", async () => {
+    let call = 0;
+    const model = new MockLanguageModelV1({
+      doStream: async () => {
+        call++;
+        if (call === 1) {
+          // The relay-stall scenario: real content, then the stream hangs.
+          return {
+            stream: new ReadableStream({
+              start(c) {
+                c.enqueue({ type: "text-delta", textDelta: "partial answer, " });
+              },
+            }),
+            rawCall: { rawPrompt: null, rawSettings: {} },
+          };
+        }
+        return {
+          stream: convertArrayToReadableStream(textRound("the rest.")),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const loop = makeLoop(model, { streamIdleTimeoutSec: 0.05 });
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    const notices = events.flatMap((e) => (e.type === "notice" ? [e.message] : []));
+    expect(notices.some((m) => m.includes("cut short"))).toBe(true);
+    expect(notices.some((m) => m.includes("resume where it stopped"))).toBe(true);
+    const text = events.flatMap((e) => (e.type === "text-delta" ? [e.text] : [])).join("");
+    expect(text).toBe("partial answer, the rest.");
+
+    const messages = loop.getMessages();
+    // The partial reply stays committed, followed by the resume nudge and
+    // the continuation — no from-scratch resend.
+    const assistants = messages.filter((m) => m.role === "assistant");
+    expect(assistants).toHaveLength(2);
+    expect(
+      messages.some(
+        (m) =>
+          m.role === "user" &&
+          typeof m.content === "string" &&
+          m.content.includes("cut off mid-stream"),
+      ),
+    ).toBe(true);
+  });
+
+  it("accepts a truncated reply once the resume budget is exhausted", async () => {
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: new ReadableStream({
+          start(c) {
+            c.enqueue({ type: "text-delta", textDelta: "partial" });
+          },
+        }),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+    const loop = makeLoop(model, { streamIdleTimeoutSec: 0.05, streamMaxRetries: 0 });
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    const notices = events.flatMap((e) => (e.type === "notice" ? [e.message] : []));
+    expect(notices.some((m) => m.includes("resume where it stopped"))).toBe(false);
+    expect(notices.some((m) => m.includes("resume attempts are exhausted"))).toBe(true);
+    expect(events.some((e) => e.type === "error")).toBe(false);
+  });
+
   it("steers an empty stop reply with a nudge after the retry budget is spent", async () => {
     const emptyStop: Chunk[] = [
       {
