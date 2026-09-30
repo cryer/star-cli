@@ -1,7 +1,7 @@
 import { type LanguageModel, tool as aiTool, generateText } from "ai";
 import { type StarConfig, resolveCompactThreshold } from "../config/schema";
 import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
-import type { StreamEvent } from "../core/events";
+import type { StreamEvent, TokenUsage } from "../core/events";
 import { formatGitSummary, getGitSummaryCached } from "../core/git";
 import { isOversizedImageError, stripOversizedImages } from "../core/image";
 import {
@@ -12,6 +12,7 @@ import {
 } from "../core/messages";
 import { type HookEvent, type HookRunResult, runHooks } from "../hooks/runner";
 import { computeRetryDelayMs, isRetryableStreamError, summarizeStreamError } from "../llm/retry";
+import { streamChat } from "../llm/stream";
 import { checkPermission } from "../permissions/gate";
 import type { PermissionRequest } from "../permissions/types";
 import type { SessionStore } from "../session/store";
@@ -30,7 +31,7 @@ import type { ToolResult } from "../tools/types";
 import { defaultAgentTasks } from "./agent-tasks";
 import { readProjectMemory } from "./project-memory";
 import { createSkillTool, discoverSkills, formatSkillsBlock } from "./skills";
-import { MAX_SUBAGENT_DEPTH, createSubagentTool } from "./subagent";
+import { MAX_SUBAGENT_DEPTH, convertUsagePricing, createSubagentTool } from "./subagent";
 import { createRememberTool, readUserMemory } from "./user-memory";
 
 export interface AgentLoopOptions {
@@ -66,10 +67,13 @@ interface PendingToolCall {
 // Matches announcements of pending work ("我会保留…", "接下来我将…",
 // "开始执行转换…", "I will now convert…") in a text-only reply — the signature
 // of a model that ended its turn without doing what it just said it would do.
-// Keyword matching can never catch every phrasing, so this is only the first
-// line of defense: a text-only reply to a nudge is re-nudged unconditionally.
+// The lookaheads keep polite closers out: "Let me know if you need anything
+// else" / "让我知道" end a finished task, they don't announce work. Keyword
+// matching can never catch every phrasing, so for turns that used tools this
+// is only the fallback when the semantic completion check can't answer (see
+// the text-only branch in stream()).
 const PENDING_WORK_PATTERN =
-  /(?:我将|我会|我现在|接下来|下一步|下面(?:我|将)|稍后|随后|准备开始|现在开始|马上|即将|这就|待会|开始(?:执行|进行|处理|转换|动手|生成|写入|运行|创建)|(?:完成后|然后|接着)会|让我(?:们)?(?:来)?|I will|I'll|I am going to|I'm going to|I shall|let me|next,? I|I will now)/i;
+  /(?:我将|我会|我现在|接下来|下一步|下面(?:我|将)|稍后|随后|准备开始|现在开始|马上|即将|这就|待会|开始(?:执行|进行|处理|转换|动手|生成|写入|运行|创建)|(?:完成后|然后|接着)会|让我(?:们)?(?:来)?(?!知道)|I will|I'll|I am going to|I'm going to|I shall|\blet me(?!\s+know\b)|next,? I|I will now)/i;
 
 const AUTO_CONTINUE_NUDGE =
   "[auto-continue] You ended your turn with words instead of actions. Do not describe or restate the plan — continue the task NOW by calling tools. Reply with text only if the task is already fully complete.";
@@ -215,9 +219,19 @@ export class AgentLoop {
   // consumes it as the redo label right after retractLastTurn sets it.
   private lastUndoneLabel = "";
   // Doom-loop guard: signature of the most recent tool call and how many
-  // times in a row it has repeated. Any different call resets the count.
+  // times in a row it has repeated. Any different call resets the count, and
+  // each new user turn restarts the streak.
   private lastToolSignature: string | null = null;
   private repeatedToolCalls = 0;
+  // Token usage subagents consumed, waiting to fold into this loop's next
+  // finish event with usage: sync children report when their tool call
+  // settles, background ones whenever they finish (drained or not).
+  // Consumers meter only root-loop finish events, so folding here bills
+  // subagent spend with zero consumer changes — /cost, /usage and
+  // sessionBudgetUsd all cover it. A background child still running when the
+  // session's last finish has passed never reports (best effort, noted in
+  // agent-tasks cleanup paths).
+  private subagentUsage: TokenUsage | null = null;
   // Turn context of the in-flight stream() turn, stamped onto every tool
   // execution so file snapshots attribute root changes to a turn and mark
   // subagent changes as excluded from turn-level retraction.
@@ -274,6 +288,7 @@ export class AgentLoop {
           providerMetadata: opts.providerMetadata,
           depth,
           getConfirmHandler: () => this.confirmHandler,
+          onUsage: (usage, childModel) => this.addSubagentUsage(usage, childModel),
         }),
       );
     }
@@ -444,7 +459,10 @@ export class AgentLoop {
 
   // Truncates the history back to the given message index (the user message
   // at that index and everything after it is dropped) and persists the
-  // trimmed history, so /rewind stays consistent across resume.
+  // trimmed history, so /rewind stays consistent across resume. The redo
+  // stack dies with the rewound context: its entries describe pre-/undo
+  // working-tree states that no longer line up with this conversation, so
+  // restoring one would clobber the rewound tree.
   async retractFromIndex(index: number): Promise<number> {
     const cut = this.retractionCut(index);
     const removed = this.messages.length - cut;
@@ -452,6 +470,7 @@ export class AgentLoop {
     this.messages = this.messages.slice(0, cut);
     await this.opts.sessionStore?.replaceMessages([...this.messages]);
     this.turnMarkers = this.turnMarkers.filter((m) => m.userIndex < cut);
+    this.redoStack = [];
     return removed;
   }
 
@@ -587,6 +606,11 @@ export class AgentLoop {
 
     const { config, registry, cwd } = this.opts;
     const aiTools = this.buildAiTools();
+    // A new user turn restarts the doom-loop streak: the counter spans the
+    // steps of one turn only, so a legitimate repeat of a call that ended
+    // the previous turn isn't refused on sight.
+    this.lastToolSignature = null;
+    this.repeatedToolCalls = 0;
     let autoContinues = 0;
     let lastWasNudge = false;
     let usedToolsThisTurn = false;
@@ -613,6 +637,7 @@ export class AgentLoop {
               `Max steps (${maxSteps}) reached with no tool execution since the last checkpoint, stopping.`,
             ),
           };
+          await this.runStopHooks("max-steps");
           return;
         }
         toolExecutedSinceCheckpoint = false;
@@ -645,6 +670,12 @@ export class AgentLoop {
       );
       if (compacted.compacted) {
         this.messages = await this.applyCompactionSummary(compacted, signal);
+        // Persist the rewritten history like manual /compact does. Memory
+        // and disk must never diverge here: a later retractLastTurn /
+        // retractFromIndex replaceMessages would otherwise silently swap
+        // the full on-disk transcript for the compacted one as a side
+        // effect of what the user confirmed as a plain retraction.
+        await this.opts.sessionStore?.replaceMessages([...this.messages]);
         // Compaction rewrote the history wholesale, so recorded turn indices
         // no longer line up — drop the markers like loadMessages() does.
         // /undo then only retracts messages until new turns accumulate,
@@ -707,8 +738,10 @@ export class AgentLoop {
               yield event;
             } else if (event.type === "finish") {
               lastFinishReason = event.finishReason;
+              // The raw usage drives the empty-reply heuristic; the folded
+              // copy (own + settled subagent usage) is what consumers meter.
               lastUsage = event.usage;
-              yield event;
+              yield this.foldSubagentUsage(event);
             } else if (event.type === "error") {
               // Held back until retries are exhausted, so the UI shows retry
               // notices instead of an error for a turn that then recovers.
@@ -726,6 +759,7 @@ export class AgentLoop {
 
         if (signal.aborted) {
           yield* this.persistInterrupted(text, toolCalls);
+          await this.runStopHooks("aborted");
           return;
         }
         if (!failure && (text.length > 0 || toolCalls.length > 0)) break;
@@ -782,12 +816,14 @@ export class AgentLoop {
           // interrupt as Esc mid-stream: keep whatever this attempt already
           // produced instead of dropping it silently.
           yield* this.persistInterrupted(text, toolCalls);
+          await this.runStopHooks("aborted");
           return;
         }
       }
 
       if (failure) {
         yield { type: "error", error: failure };
+        await this.runStopHooks("error");
         return;
       }
       if (text.length === 0 && toolCalls.length === 0) {
@@ -818,6 +854,7 @@ export class AgentLoop {
           type: "error",
           error: new Error("The model returned an empty response after retries; ending the turn."),
         };
+        await this.runStopHooks("empty");
         return;
       }
 
@@ -838,13 +875,16 @@ export class AgentLoop {
 
       if (toolCalls.length === 0) {
         // A turn that ends in text only is suspect: weaker models announce
-        // work ("我会…") instead of calling tools. Escalating signals decide
-        // whether to nudge the model onward (bounded by maxAutoContinues,
-        // never in plan mode, where a text-only plan is the intended end):
-        // open todo items written this turn (deterministic), an ignored
-        // previous nudge (behavioral), announcement keywords (heuristic),
-        // and finally a semantic completion check by the model itself for
-        // turns that used tools but match no keyword.
+        // work ("我会…") instead of calling tools. Signals decide whether to
+        // nudge the model onward (bounded by maxAutoContinues, never in plan
+        // mode, where a text-only plan is the intended end): open todo items
+        // written this turn (deterministic), then — for turns that used
+        // tools — a semantic completion check by the model itself, whose
+        // DONE verdict also vetoes the weaker signals below (a closer like
+        // "let me know if…" must not re-trigger a nudge). Only when that
+        // check can't answer, or no tool ran so there is nothing to verify,
+        // do the heuristics decide: an ignored previous nudge (behavioral),
+        // then announcement keywords (heuristic).
         let reason: string | null = null;
         let nudgeText = AUTO_CONTINUE_NUDGE;
         if (openTodos.length > 0) {
@@ -854,13 +894,23 @@ export class AgentLoop {
             .join(
               ", ",
             )}. Complete them now with tool calls, or update the list with todo_write if they are no longer needed.`;
+        } else if (usedToolsThisTurn && !signal.aborted) {
+          const complete = await checkTaskComplete(this.opts.model, inputText, text, signal);
+          if (complete === false) {
+            reason = "completion check reports the task unfinished";
+          } else if (complete === null) {
+            // The check is unverifiable (network, timeout, unparseable):
+            // fall back to the heuristic signals.
+            if (lastWasNudge) {
+              reason = "reply still had no tool calls";
+            } else if (PENDING_WORK_PATTERN.test(text)) {
+              reason = "reply announced unfinished work";
+            }
+          }
         } else if (lastWasNudge) {
           reason = "reply still had no tool calls";
         } else if (PENDING_WORK_PATTERN.test(text)) {
           reason = "reply announced unfinished work";
-        } else if (usedToolsThisTurn && !signal.aborted) {
-          const complete = await checkTaskComplete(this.opts.model, inputText, text, signal);
-          if (complete === false) reason = "completion check reports the task unfinished";
         }
         if (
           reason !== null &&
@@ -889,7 +939,7 @@ export class AgentLoop {
             message: `${reason}; auto-continue limit reached, handing the turn back — reply "continue" to keep going.`,
           };
         }
-        await this.runEventHooks("Stop");
+        await this.runStopHooks("completed");
         return;
       }
       lastWasNudge = false;
@@ -969,7 +1019,10 @@ export class AgentLoop {
         }
       }
 
-      if (signal.aborted) return;
+      if (signal.aborted) {
+        await this.runStopHooks("aborted");
+        return;
+      }
       step++;
     }
   }
@@ -1003,7 +1056,10 @@ export class AgentLoop {
     const content = parts.join("\n\n");
     const head = this.messages[0];
     if (head?.role === "system" && typeof head.content === "string") {
-      if (head.content !== content) head.content = content;
+      // Replace rather than mutate in place: history messages are treated
+      // as immutable so the token estimator's per-object cache
+      // (context/tokens.ts) never serves a stale count for an edited one.
+      if (head.content !== content) this.messages[0] = { role: "system", content };
     } else if (head?.role !== "system") {
       this.messages.unshift({ role: "system", content });
     }
@@ -1037,7 +1093,6 @@ export class AgentLoop {
     signal: AbortSignal,
     timeoutScale = 1,
   ): AsyncGenerator<StreamEvent> {
-    const { streamChat } = await import("../llm/stream");
     for await (const event of streamChat({
       model: this.opts.model,
       messages: this.messages,
@@ -1076,6 +1131,15 @@ export class AgentLoop {
     return tools;
   }
 
+  // Fires the Stop hooks for a turn's end, on every termination path (normal
+  // completion, Esc abort, exhausted stream retries, terminal empty replies,
+  // the maxSteps no-progress stop). The reason rides in STAR_TOOL_INPUT as
+  // {"reason": ...}: Stop hooks ignore tool matchers and the variable was
+  // never set for Stop before, so existing hooks are unaffected.
+  private async runStopHooks(reason: string): Promise<void> {
+    await this.runEventHooks("Stop", undefined, { reason });
+  }
+
   private async runEventHooks(
     event: HookEvent,
     toolName?: string,
@@ -1096,6 +1160,54 @@ export class AgentLoop {
       // Hooks are best-effort by design: a broken hook must never crash a turn.
       return empty;
     }
+  }
+
+  // Accumulates a settled subagent's usage. When the child provably ran on a
+  // different, fully priced model, the counts are first converted into
+  // this-model-priced equivalents (convertUsagePricing): session cost is
+  // token totals × the active model's price, so the conversion keeps the $
+  // estimate accurate where raw sums would misprice.
+  private addSubagentUsage(usage: TokenUsage, childModel: LanguageModel): void {
+    const converted = convertUsagePricing(usage, childModel, this.opts.model, this.opts.config);
+    const pending = this.subagentUsage ?? {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+    };
+    pending.promptTokens += converted.promptTokens;
+    pending.completionTokens += converted.completionTokens;
+    pending.totalTokens += converted.totalTokens;
+    if (converted.cachedPromptTokens) {
+      pending.cachedPromptTokens = (pending.cachedPromptTokens ?? 0) + converted.cachedPromptTokens;
+    }
+    if (converted.cacheReadInputTokens) {
+      pending.cacheReadInputTokens =
+        (pending.cacheReadInputTokens ?? 0) + converted.cacheReadInputTokens;
+    }
+    this.subagentUsage = pending;
+  }
+
+  // Folds pending subagent usage into an outgoing finish event (and clears
+  // it). A finish without usage reports nothing to consumers, so the pending
+  // amount is kept for the next finish that carries usage instead.
+  private foldSubagentUsage(
+    event: Extract<StreamEvent, { type: "finish" }>,
+  ): Extract<StreamEvent, { type: "finish" }> {
+    const pending = this.subagentUsage;
+    if (!pending || !event.usage) return event;
+    this.subagentUsage = null;
+    const usage: TokenUsage = {
+      promptTokens: event.usage.promptTokens + pending.promptTokens,
+      completionTokens: event.usage.completionTokens + pending.completionTokens,
+      totalTokens: event.usage.totalTokens + pending.totalTokens,
+    };
+    const cachedPromptTokens =
+      (event.usage.cachedPromptTokens ?? 0) + (pending.cachedPromptTokens ?? 0);
+    const cacheReadInputTokens =
+      (event.usage.cacheReadInputTokens ?? 0) + (pending.cacheReadInputTokens ?? 0);
+    if (cachedPromptTokens > 0) usage.cachedPromptTokens = cachedPromptTokens;
+    if (cacheReadInputTokens > 0) usage.cacheReadInputTokens = cacheReadInputTokens;
+    return { ...event, usage };
   }
 
   // opencode's doom_loop guard: returns a refusal once the identical tool

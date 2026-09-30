@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { LanguageModel } from "ai";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -10,8 +11,9 @@ import {
   formatAgentTaskUpdate,
 } from "../src/agent/agent-tasks";
 import { AgentLoop, type AgentLoopOptions } from "../src/agent/loop";
-import type { StarConfig } from "../src/config/schema";
-import type { StreamEvent } from "../src/core/events";
+import { convertUsagePricing } from "../src/agent/subagent";
+import type { ModelConfig, StarConfig } from "../src/config/schema";
+import type { StreamEvent, TokenUsage } from "../src/core/events";
 import { createDefaultRegistry } from "../src/tools";
 import type { ToolRegistry } from "../src/tools";
 import { createTodoTools, resetTodos } from "../src/tools/todo";
@@ -328,6 +330,60 @@ describe("subagent tool", () => {
     }
   });
 
+  it("folds a synchronous subagent's usage into the parent's finish events", async () => {
+    const { loop } = makeLoop(
+      mockModel([
+        toolCallRound("call-1", "subagent", { prompt: "investigate the repo" }),
+        textRound("child report"),
+        textRound("parent done"),
+      ]),
+    );
+
+    const events = await collect(loop.stream("survey", new AbortController().signal));
+
+    const finishes = events.filter((e) => e.type === "finish");
+    expect(finishes).toHaveLength(2);
+    // The parent's own first step reports only its own usage…
+    expect(finishes[0]).toMatchObject({ usage: { promptTokens: 5, completionTokens: 3 } });
+    // …and the step after the subagent ran carries the child's 5/3 on top.
+    expect(finishes[1]).toMatchObject({ usage: { promptTokens: 10, completionTokens: 6 } });
+    const promptTotal = finishes.reduce(
+      (sum, e) => sum + (e.type === "finish" ? (e.usage?.promptTokens ?? 0) : 0),
+      0,
+    );
+    expect(promptTotal).toBe(15);
+  });
+
+  it("bills a background subagent that finishes after the parent turn ended", async () => {
+    const { loop } = makeLoop(
+      mockModel([
+        toolCallRound("call-1", "subagent", { prompt: "bg work", run_in_background: true }),
+        textRound("spawned"),
+        textRound("child report"),
+        textRound("turn two done"),
+      ]),
+    );
+
+    const events1 = await collect(loop.stream("turn one", new AbortController().signal));
+    for (let i = 0; i < 100 && defaultAgentTasks.runningCount() > 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(defaultAgentTasks.runningCount()).toBe(0);
+    const events2 = await collect(loop.stream("turn two", new AbortController().signal));
+
+    // The child's 5/3 landed after turn one's finishes had a chance to fold
+    // it, so it rides on turn two's first finish. Wherever it folded, the
+    // session total bills parent (3 steps) + child (1 step).
+    const finishes = [...events1, ...events2].filter((e) => e.type === "finish");
+    const promptTotal = finishes.reduce(
+      (sum, e) => sum + (e.type === "finish" ? (e.usage?.promptTokens ?? 0) : 0),
+      0,
+    );
+    expect(promptTotal).toBe(20);
+    const folded = finishes.filter((e) => e.type === "finish" && e.usage?.promptTokens === 10);
+    expect(folded).toHaveLength(1);
+  });
+
   it("reports an aborted synchronous subagent as an interrupted tool result", async () => {
     let call = 0;
     const model = new MockLanguageModelV1({
@@ -379,6 +435,97 @@ describe("subagent tool", () => {
     if (toolResult?.type === "tool-result") {
       expect(toolResult.content).toBe("Tool execution aborted.");
     }
+  });
+});
+
+describe("convertUsagePricing", () => {
+  const fakeModel = (modelId: string): LanguageModel => ({ modelId }) as LanguageModel;
+  const priced = (model: string, promptPrice: number, completionPrice: number): ModelConfig => ({
+    name: model,
+    provider: "p",
+    model,
+    promptPrice,
+    completionPrice,
+  });
+  const configWith = (models: ModelConfig[]): StarConfig => makeConfig({ models });
+  const usage: TokenUsage = { promptTokens: 100, completionTokens: 50, totalTokens: 150 };
+
+  it("passes usage through untouched when parent and child share the model", () => {
+    const m = fakeModel("same");
+    expect(convertUsagePricing(usage, m, m, configWith([]))).toBe(usage);
+  });
+
+  it("re-expresses tokens in parent-priced equivalents, preserving dollars", () => {
+    const config = configWith([priced("child", 4, 16), priced("parent", 2, 4)]);
+    const converted = convertUsagePricing(usage, fakeModel("child"), fakeModel("parent"), config);
+    // 100 prompt @4 → 200 @2; 50 completion @16 → 200 @4.
+    expect(converted).toEqual({ promptTokens: 200, completionTokens: 200, totalTokens: 400 });
+  });
+
+  it("converts cache token classes at their own price ratios", () => {
+    const child: ModelConfig = { ...priced("child", 2, 2), cacheReadPrice: 1 };
+    const parent: ModelConfig = { ...priced("parent", 2, 4), cacheReadPrice: 1 };
+    const config = configWith([child, parent]);
+    const withCache: TokenUsage = {
+      promptTokens: 100,
+      completionTokens: 50,
+      totalTokens: 160,
+      cachedPromptTokens: 40,
+      cacheReadInputTokens: 10,
+    };
+    const converted = convertUsagePricing(
+      withCache,
+      fakeModel("child"),
+      fakeModel("parent"),
+      config,
+    );
+    // uncached 60 @2 → 60 @2; cached 40 @1 → 40 @1; cache-read 10 @1 → 10 @1;
+    // completion 50 @2 → 25 @4.
+    expect(converted).toEqual({
+      promptTokens: 100,
+      completionTokens: 25,
+      totalTokens: 125,
+      cachedPromptTokens: 40,
+      cacheReadInputTokens: 10,
+    });
+  });
+
+  it("folds cache-read dollars into completion when the parent has no cache-read price", () => {
+    const child: ModelConfig = { ...priced("child", 2, 2), cacheReadPrice: 1 };
+    const config = configWith([child, priced("parent", 2, 2)]);
+    const withCache: TokenUsage = {
+      promptTokens: 100,
+      completionTokens: 50,
+      totalTokens: 160,
+      cachedPromptTokens: 40,
+      cacheReadInputTokens: 10,
+    };
+    const converted = convertUsagePricing(
+      withCache,
+      fakeModel("child"),
+      fakeModel("parent"),
+      config,
+    );
+    // cached 40 @1 → 20 @2 (parent effective cache price = promptPrice);
+    // cache-read 10 @1 unbillable on the parent → +5 completion tokens.
+    expect(converted).toEqual({
+      promptTokens: 80,
+      completionTokens: 55,
+      totalTokens: 135,
+      cachedPromptTokens: 20,
+    });
+  });
+
+  it("falls back to raw token sums when either side lacks full pricing", () => {
+    const config = configWith([
+      priced("child", 4, 16),
+      { name: "parent", provider: "p", model: "parent" },
+    ]);
+    expect(convertUsagePricing(usage, fakeModel("child"), fakeModel("parent"), config)).toBe(usage);
+    const zeroParent = configWith([priced("child", 4, 16), priced("parent", 0, 0)]);
+    expect(convertUsagePricing(usage, fakeModel("child"), fakeModel("parent"), zeroParent)).toBe(
+      usage,
+    );
   });
 });
 

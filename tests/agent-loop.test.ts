@@ -9,6 +9,7 @@ import { AgentLoop } from "../src/agent/loop";
 import { PROJECT_MEMORY_MAX_CHARS } from "../src/agent/project-memory";
 import type { StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
+import { SessionStore } from "../src/session/store";
 import { createDefaultRegistry } from "../src/tools";
 import type { Tool, ToolContext } from "../src/tools/types";
 
@@ -1238,6 +1239,60 @@ describe("AgentLoop", () => {
     expect(loop.getMessages().filter((m) => m.role === "user")).toHaveLength(1);
   });
 
+  it("does not nudge a tools-used turn that ends with a polite closer", async () => {
+    // "Let me know…" used to trip the `let me` keyword and re-nudge a
+    // finished turn; the tightened pattern must not match it, even when the
+    // semantic check is unavailable (plain mock — no doGenerate).
+    const loop = makeLoop(
+      mockModel([
+        toolCallRound("call-1", "todo_read", {}),
+        textRound("All done. Let me know if you need anything else."),
+      ]),
+    );
+
+    const events = await collect(loop.stream("summarize the repo", new AbortController().signal));
+
+    expect(events.some((e) => e.type === "notice")).toBe(false);
+    expect(loop.getMessages().filter((m) => m.role === "user")).toHaveLength(1);
+  });
+
+  it("lets a DONE verdict veto a keyword-matching reply after tools ran", async () => {
+    const loop = makeLoop(
+      judgeModel(
+        ["DONE"],
+        [toolCallRound("call-1", "todo_read", {}), textRound("我会持续关注后续变化。")],
+      ),
+    );
+
+    const events = await collect(loop.stream("check the logs", new AbortController().signal));
+
+    expect(events.some((e) => e.type === "notice")).toBe(false);
+  });
+
+  it("still nudges a text-only reply that announces work with let me", async () => {
+    const loop = makeLoop(
+      mockModel([
+        textRound("Let me run the tests now."),
+        toolCallRound("call-1", "todo_read", {}),
+        textRound("全部完成。"),
+      ]),
+    );
+
+    const events = await collect(loop.stream("test it", new AbortController().signal));
+
+    expect(events.filter((e) => e.type === "notice")).toHaveLength(1);
+    expect(events.filter((e) => e.type === "tool-call")).toHaveLength(1);
+  });
+
+  it("does not nudge a first reply that is only a let me know closer", async () => {
+    const loop = makeLoop(mockModel([textRound("Let me know if you need more detail.")]));
+
+    const events = await collect(loop.stream("explain this", new AbortController().signal));
+
+    expect(events.some((e) => e.type === "notice")).toBe(false);
+    expect(loop.getMessages().filter((m) => m.role === "user")).toHaveLength(1);
+  });
+
   it("refuses the third identical tool call in a row (doom loop)", async () => {
     const loop = makeLoop(
       mockModel([
@@ -1327,6 +1382,31 @@ describe("AgentLoop", () => {
     }
   });
 
+  it("restarts the doom-loop streak on a new user turn", async () => {
+    writeFileSync(path.join(cwd, "f.txt"), "x", "utf8");
+    const loop = makeLoop(
+      mockModel([
+        toolCallRound("c1", "read_file", { path: "f.txt" }),
+        toolCallRound("c2", "read_file", { path: "f.txt" }),
+        textRound("read it twice"),
+        toolCallRound("c3", "read_file", { path: "f.txt" }),
+        textRound("read it again"),
+      ]),
+    );
+
+    await collect(loop.stream("read twice", new AbortController().signal));
+    const events = await collect(loop.stream("read once more", new AbortController().signal));
+
+    // Two identical calls ended turn one; without a per-turn reset this
+    // third-in-a-row call would hit the threshold (3) and be refused.
+    const results = events.filter((e) => e.type === "tool-result");
+    expect(results).toHaveLength(1);
+    if (results[0]?.type === "tool-result") {
+      expect(results[0].content).not.toContain("Refused");
+      expect(results[0].isError).toBeFalsy();
+    }
+  });
+
   it("drops turn markers when compaction rewrites the history", async () => {
     const loop = makeLoop(mockModel([textRound("ok")]), {
       contextMaxTokens: 90,
@@ -1348,6 +1428,41 @@ describe("AgentLoop", () => {
     const preview = loop.previewLastTurnRetraction();
     expect(preview.removed).toBeGreaterThan(0);
     expect(preview.turn).toBeUndefined();
+  });
+
+  it("persists auto-compaction to the session store like manual /compact", async () => {
+    const store = await SessionStore.create(cwd, "test");
+    const loop = new AgentLoop({
+      model: mockModel([textRound("ok")]),
+      registry: createDefaultRegistry(),
+      config: makeConfig({ contextMaxTokens: 90, contextCompaction: "truncate" }),
+      cwd,
+      sessionStore: store,
+      retryDelayMs: 1,
+    });
+    await loop.loadMessages([
+      { role: "user", content: "x".repeat(400) },
+      { role: "user", content: "u2" },
+      { role: "assistant", content: "a2" },
+      { role: "user", content: "u3" },
+      { role: "assistant", content: "a3" },
+    ]);
+
+    await collect(loop.stream("hi", new AbortController().signal));
+
+    // The on-disk transcript is the compacted history, not the pre-compaction
+    // one: memory and disk must not diverge, or a later retraction's
+    // replaceMessages would silently swap the full transcript for this one.
+    const stored = await store.messages();
+    expect([...loop.getMessages()]).toEqual(stored);
+    expect(
+      stored.some(
+        (m) =>
+          m.role === "user" &&
+          typeof m.content === "string" &&
+          m.content.startsWith("[context compacted:"),
+      ),
+    ).toBe(true);
   });
 
   it("passes turn-scoped snapshot context to tool execution", async () => {

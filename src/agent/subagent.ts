@@ -1,6 +1,7 @@
 import type { LanguageModel } from "ai";
 import { z } from "zod";
 import type { StarConfig } from "../config/schema";
+import type { TokenUsage } from "../core/events";
 import type { PermissionRequest } from "../permissions/types";
 import { createDefaultRegistry } from "../tools";
 import type { Tool, ToolResult } from "../tools/types";
@@ -25,11 +26,82 @@ export interface SubagentDeps {
   providerMetadata?: Record<string, Record<string, unknown>>;
   depth: number;
   getConfirmHandler?: () => ((req: PermissionRequest) => Promise<boolean>) | undefined;
+  // Receives the child loop's accumulated token usage once the run settles
+  // (sync or background, success or failure), along with the model the
+  // child ran on. The parent loop folds it into its own finish events, so
+  // subagent spend flows into /cost, /usage and sessionBudgetUsd without
+  // those consumers changing.
+  onUsage?: (usage: TokenUsage, model: LanguageModel) => void;
 }
 
 interface SubagentArgs {
   prompt: string;
   description?: string;
+}
+
+// Session cost is computed by the consumers as token totals × the *active*
+// model's price (cli/cost.ts computeCostUsd, over the session usage built
+// from root-loop finish events). Folding a child's tokens straight into the
+// parent's totals would misprice them when the child ran on a differently
+// priced model, so each priced token class is converted into the number of
+// parent-priced tokens that bills the same dollars. A child on the same
+// model (the common case) short-circuits to the exact counts; when either
+// side lacks full pricing (or the parent prices a class at 0, making
+// dollars inexpressible as tokens) the raw counts pass through — the same
+// approximation the session total already makes.
+export function convertUsagePricing(
+  usage: TokenUsage,
+  from: LanguageModel,
+  to: LanguageModel,
+  config: StarConfig,
+): TokenUsage {
+  if (from === to) return usage;
+  const fromCfg = config.models.find((m) => m.model === from.modelId);
+  const toCfg = config.models.find((m) => m.model === to.modelId);
+  if (
+    fromCfg?.promptPrice === undefined ||
+    fromCfg.completionPrice === undefined ||
+    toCfg?.promptPrice === undefined ||
+    toCfg.completionPrice === undefined ||
+    toCfg.promptPrice <= 0 ||
+    toCfg.completionPrice <= 0
+  ) {
+    return usage;
+  }
+  // Dollars per token class under the child's pricing, mirroring
+  // computeCostUsd's cache rules (cached prompt tokens are a subset billed
+  // at cacheReadPrice ?? promptPrice; Anthropic-style cache reads come on
+  // top at cacheReadPrice ?? 0). The per-million divisor cancels in the
+  // ratio, so prices are used as-is.
+  const cached = Math.min(Math.max(usage.cachedPromptTokens ?? 0, 0), usage.promptTokens);
+  const promptUsd = (usage.promptTokens - cached) * fromCfg.promptPrice;
+  const cachedUsd = cached * (fromCfg.cacheReadPrice ?? fromCfg.promptPrice);
+  const cacheReadUsd = (usage.cacheReadInputTokens ?? 0) * (fromCfg.cacheReadPrice ?? 0);
+  const completionUsd = usage.completionTokens * fromCfg.completionPrice;
+
+  const scaledCached = cachedUsd / (toCfg.cacheReadPrice ?? toCfg.promptPrice);
+  const promptTokens = Math.round(promptUsd / toCfg.promptPrice + scaledCached);
+  const cachedPromptTokens = Math.round(scaledCached);
+  // A parent without a cache-read price bills that class at 0, so its
+  // dollars ride on the completion class instead of being dropped.
+  const toCacheReadPrice =
+    toCfg.cacheReadPrice !== undefined && toCfg.cacheReadPrice > 0
+      ? toCfg.cacheReadPrice
+      : undefined;
+  const completionTokens = Math.round(
+    completionUsd / toCfg.completionPrice +
+      (toCacheReadPrice === undefined ? cacheReadUsd / toCfg.completionPrice : 0),
+  );
+  const cacheReadInputTokens =
+    toCacheReadPrice === undefined ? 0 : Math.round(cacheReadUsd / toCacheReadPrice);
+  const result: TokenUsage = {
+    promptTokens,
+    completionTokens,
+    totalTokens: promptTokens + completionTokens,
+  };
+  if (cachedPromptTokens > 0) result.cachedPromptTokens = cachedPromptTokens;
+  if (cacheReadInputTokens > 0) result.cacheReadInputTokens = cacheReadInputTokens;
+  return result;
 }
 
 // Runs a child loop to completion and returns its formatted report; the
@@ -55,6 +127,7 @@ async function runSubagent(
 
   let toolCalls = 0;
   let error: string | null = null;
+  const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   try {
     for await (const event of child.stream(args.prompt, signal)) {
       if (event.type === "tool-result") {
@@ -62,10 +135,22 @@ async function runSubagent(
       } else if (event.type === "error") {
         error = event.error.message;
         break;
+      } else if (event.type === "finish" && event.usage) {
+        usage.promptTokens += event.usage.promptTokens;
+        usage.completionTokens += event.usage.completionTokens;
+        usage.totalTokens += event.usage.totalTokens;
+        usage.cachedPromptTokens =
+          (usage.cachedPromptTokens ?? 0) + (event.usage.cachedPromptTokens ?? 0);
+        usage.cacheReadInputTokens =
+          (usage.cacheReadInputTokens ?? 0) + (event.usage.cacheReadInputTokens ?? 0);
       }
     }
   } catch (e) {
     error = e instanceof Error ? e.message : String(e);
+  } finally {
+    // The child spent tokens even when it errored or was aborted — report
+    // whatever accumulated so the parent can bill it.
+    if (usage.totalTokens > 0) deps.onUsage?.(usage, deps.model);
   }
 
   // A user abort ends the child loop without an error event; surface it

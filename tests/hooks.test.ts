@@ -437,4 +437,124 @@ describe("Stop hooks", () => {
     expect(events.some((e) => e.type === "error")).toBe(false);
     expect(warnings).toHaveLength(1);
   });
+
+  it("carries the completion reason in STAR_TOOL_INPUT", async () => {
+    const warnings: string[] = [];
+    const loop = makeLoop(
+      mockModel([textRound("all done")]),
+      [
+        makeHook({
+          event: "Stop",
+          command:
+            "node -e \"require('fs').writeFileSync('stop-reason.json', process.env.STAR_TOOL_INPUT || '')\"",
+        }),
+      ],
+      warnings,
+    );
+
+    await collect(loop.stream("just chat", new AbortController().signal));
+
+    const payload = JSON.parse(fs.readFileSync(path.join(cwd, "stop-reason.json"), "utf8"));
+    expect(payload.reason).toBe("completed");
+  });
+});
+
+describe("Stop hooks on abnormal turn ends", () => {
+  const reasonHook = (file: string): HookConfig =>
+    makeHook({
+      event: "Stop",
+      command: `node -e "require('fs').writeFileSync('${file}', process.env.STAR_TOOL_INPUT || '')"`,
+    });
+
+  const readReason = (file: string): string =>
+    JSON.parse(fs.readFileSync(path.join(cwd, file), "utf8")).reason;
+
+  function makeLoopWith(
+    model: MockLanguageModelV1,
+    hooks: HookConfig[],
+    configOverrides: Partial<StarConfig> = {},
+  ): AgentLoop {
+    return new AgentLoop({
+      model,
+      registry: createDefaultRegistry(),
+      config: { ...makeConfig(hooks), ...configOverrides },
+      cwd,
+    });
+  }
+
+  it("fires with reason error when the stream fails for good", async () => {
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: convertArrayToReadableStream([{ type: "error", error: new Error("boom") }]),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+    const loop = makeLoopWith(model, [reasonHook("stop-error.json")], { streamMaxRetries: 0 });
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    expect(events.some((e) => e.type === "error")).toBe(true);
+    expect(readReason("stop-error.json")).toBe("error");
+  });
+
+  it("fires with reason empty on a terminal empty reply", async () => {
+    const loop = makeLoopWith(mockModel([[]]), [reasonHook("stop-empty.json")], {
+      streamMaxRetries: 0,
+      maxAutoContinues: 0,
+    });
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    expect(events.some((e) => e.type === "error")).toBe(true);
+    expect(readReason("stop-empty.json")).toBe("empty");
+  });
+
+  it("fires with reason aborted when the user interrupts the turn", async () => {
+    const model = new MockLanguageModelV1({
+      doStream: async (options) => ({
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "text-delta", textDelta: "partial" });
+            const cut = () => {
+              try {
+                controller.enqueue({
+                  type: "error",
+                  error: new Error("This operation was aborted"),
+                });
+                controller.close();
+              } catch {
+                // already closed
+              }
+            };
+            if (options.abortSignal?.aborted) cut();
+            else options.abortSignal?.addEventListener("abort", cut, { once: true });
+          },
+        }),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+    const loop = makeLoopWith(model, [reasonHook("stop-abort.json")]);
+
+    const controller = new AbortController();
+    for await (const event of loop.stream("hi", controller.signal)) {
+      if (event.type === "text-delta") controller.abort();
+    }
+
+    expect(readReason("stop-abort.json")).toBe("aborted");
+  });
+
+  it("fires with reason max-steps on the no-progress stop", async () => {
+    // doomLoopThreshold 1 refuses every call before it executes, so no step
+    // ever counts as progress and the checkpoint stop fires.
+    const loop = makeLoopWith(
+      mockModel([toolCallRound("c1", "todo_read", {})]),
+      [reasonHook("stop-steps.json")],
+      { maxSteps: 2, doomLoopThreshold: 1 },
+    );
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    expect(events.some((e) => e.type === "error")).toBe(true);
+    expect(readReason("stop-steps.json")).toBe("max-steps");
+  });
 });

@@ -368,6 +368,34 @@ describe("message retraction", () => {
     expect(removed).toBe(2);
     expect(loop.getMessages()).toHaveLength(2);
   });
+
+  it("retractFromIndex clears the redo stack", async () => {
+    writeFileSync(path.join(dir, "x.txt"), "before");
+    const loop = new AgentLoop({
+      model: mockModel([
+        toolCallRound("c1", "write_file", { path: "x.txt", content: "after" }),
+        textRound("turn one done"),
+        toolCallRound("c2", "write_file", { path: "y.txt", content: "two" }),
+        textRound("turn two done"),
+      ]),
+      registry: createDefaultRegistry(),
+      config: makeConfig(),
+      cwd: dir,
+    });
+    await collect(loop.stream("change x", new AbortController().signal));
+    await collect(loop.stream("change y", new AbortController().signal));
+
+    // A git-path /undo of turn two makes the pre-undo tree redoable…
+    const outcome = await loop.undoLastTurn();
+    expect(outcome.tree).toBeDefined();
+    expect(loop.peekRedo()).not.toBeNull();
+
+    // …but rewinding further invalidates it: restoring that tree now would
+    // clobber the rewound workspace with a stale conversation's state.
+    await loop.retractFromIndex(0);
+    expect(loop.peekRedo()).toBeNull();
+    expect(await loop.redoLastUndo()).toBeNull();
+  });
 });
 
 describe("rewind planning and formatting", () => {
