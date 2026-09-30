@@ -104,8 +104,8 @@ describe("ConnectWizard", () => {
     const { app, onCancel } = setup({ onSave });
 
     await tick();
-    // move past the 4 presets onto Custom
-    await typeText(app.stdin, DOWN, DOWN, DOWN, DOWN, ENTER);
+    // move past the 5 presets onto Custom
+    await typeText(app.stdin, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER);
     expect(frame(app)).toContain("API format (protocol)?");
     await typeText(app.stdin, ENTER); // openai-compatible (first option)
 
@@ -131,7 +131,7 @@ describe("ConnectWizard", () => {
     const { app } = setup({ onSave });
 
     await tick();
-    await typeText(app.stdin, DOWN, DOWN, DOWN, DOWN, ENTER); // Custom
+    await typeText(app.stdin, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER); // Custom
     await typeText(app.stdin, ENTER); // openai-compatible
     expect(frame(app)).toContain("baseURL:");
 

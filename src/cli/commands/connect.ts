@@ -32,8 +32,20 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     modelHint: "claude-sonnet-4-5",
   },
   {
+    key: "kimi-code",
+    label: "Kimi Code (membership)",
+    // Kimi Code membership endpoint (subscription billing); the moonshot.cn
+    // preset below is the separate pay-as-you-go platform. Supports the
+    // Responses API, which kimi-for-coding/k3 are served through — and note
+    // these models reject any temperature but 1, so set temperature = 1 in
+    // the model's [[models]] block.
+    baseURL: "https://api.kimi.com/coding/v1",
+    protocol: "openai-responses",
+    modelHint: "kimi-for-coding",
+  },
+  {
     key: "moonshot",
-    label: "Kimi (Moonshot)",
+    label: "Moonshot (pay-as-you-go)",
     baseURL: "https://api.moonshot.cn/v1",
     protocol: "openai-compatible",
     modelHint: "kimi-k2-0905-preview",
