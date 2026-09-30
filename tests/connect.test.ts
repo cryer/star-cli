@@ -123,6 +123,7 @@ describe("toml blocks", () => {
     });
     expect(block).toContain("[[models]]");
     expect(block).toContain("contextMaxTokens = 128000");
+    expect(block).toContain("temperature = 1");
     expect(block).toContain("promptPrice = 0");
     expect(block).toContain("completionPrice = 0");
     expect(block).toContain("BOTH");
@@ -213,6 +214,7 @@ describe("saveConnection", () => {
       provider: "openrouter",
       model: "gpt-4o",
       contextMaxTokens: 128000,
+      temperature: 1,
       promptPrice: 0,
       completionPrice: 0,
     });

@@ -37,8 +37,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     // Kimi Code membership endpoint (subscription billing); the moonshot.cn
     // preset below is the separate pay-as-you-go platform. Supports the
     // Responses API, which kimi-for-coding/k3 are served through — and note
-    // these models reject any temperature but 1, so set temperature = 1 in
-    // the model's [[models]] block.
+    // these models reject any temperature but 1, which is why /connect writes
+    // temperature = 1 into every new [[models]] block.
     baseURL: "https://api.kimi.com/coding/v1",
     protocol: "openai-responses",
     modelHint: "kimi-for-coding",
@@ -155,6 +155,10 @@ export function buildModelTomlBlock(model: ModelConfig): string {
     "# per-model context window in tokens — overrides the top-level",
     "# contextMaxTokens for compaction and the ctx % in the status bar",
     `contextMaxTokens = ${model.contextMaxTokens ?? CONNECT_DEFAULT_CONTEXT_TOKENS}`,
+    "# sampling temperature — unset falls back to the SDK default (0), which",
+    "# coding models like kimi-for-coding/k3 reject ('only 1 is allowed'), so",
+    "# new connections pin 1; lower it only for models that allow it",
+    `temperature = ${model.temperature ?? 1}`,
     "# pricing in USD per 1M tokens — set your provider's rates; BOTH",
     "# promptPrice and completionPrice are required together for the $",
     "# estimates in /cost and /usage (0 prices a token at $0)",
@@ -195,6 +199,7 @@ export function saveConnection(
     provider: answers.providerName,
     model: answers.modelId,
     contextMaxTokens: CONNECT_DEFAULT_CONTEXT_TOKENS,
+    temperature: 1,
     promptPrice: 0,
     completionPrice: 0,
   };
