@@ -4,8 +4,8 @@ import { readFile, stat, unlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { downsampleImageIfNeeded } from "../core/image-resize";
 import type { ImageInput } from "../core/messages";
-import { downsampleImageIfNeeded } from "./image";
 
 export const CLIPBOARD_TIMEOUT_MS = 5000;
 export const MAX_CLIPBOARD_IMAGE_BYTES = 10 * 1024 * 1024;

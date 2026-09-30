@@ -4,8 +4,8 @@ import { readFile, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { MAX_IMAGE_DIMENSION, probeImageDimensions } from "../core/image";
-import type { ImageInput } from "../core/messages";
+import { MAX_IMAGE_DIMENSION, probeImageDimensions } from "./image";
+import type { ImageInput } from "./messages";
 
 export const RESIZE_TIMEOUT_MS = 10_000;
 

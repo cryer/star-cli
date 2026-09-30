@@ -34,6 +34,7 @@ describe("registry", () => {
       "glob",
       "grep",
       "read_file",
+      "read_image",
       "task_kill",
       "task_list",
       "task_output",

@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { ImageInput } from "../core/messages";
 
 export type PermissionLevel = "read" | "write" | "exec";
 
@@ -21,6 +22,10 @@ export interface ToolContext {
 export interface ToolResult {
   content: string;
   isError?: boolean;
+  // Image attachments the model must actually see (read_image). The agent
+  // loop appends them to the history as a user message with image parts —
+  // tool results themselves are text-only on every protocol.
+  images?: ImageInput[];
 }
 
 export interface Tool<S extends z.ZodType = z.ZodType> {

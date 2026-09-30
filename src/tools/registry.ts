@@ -3,6 +3,7 @@ import { editFileTool } from "./fs/edit";
 import { globTool } from "./fs/glob";
 import { grepTool } from "./fs/grep";
 import { readFileTool } from "./fs/read";
+import { readImageTool } from "./fs/read-image";
 import { writeFileTool } from "./fs/write";
 import { taskKillTool, taskListTool, taskOutputTool } from "./tasks";
 import { type TodoStore, createTodoTools } from "./todo";
@@ -18,6 +19,7 @@ export class ToolRegistry {
   constructor(todoStore?: TodoStore) {
     for (const tool of [
       readFileTool,
+      readImageTool,
       writeFileTool,
       editFileTool,
       globTool,

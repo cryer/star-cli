@@ -1,5 +1,6 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
+import { downsampleImageIfNeeded } from "../core/image-resize";
 import type { ImageInput } from "../core/messages";
 import {
   type IgnorePredicate,
@@ -7,7 +8,6 @@ import {
   createIgnorePredicate,
   isSensitivePath,
 } from "../tools/fs/util";
-import { downsampleImageIfNeeded } from "./image";
 
 export const MAX_MENTION_BYTES = 100 * 1024;
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;

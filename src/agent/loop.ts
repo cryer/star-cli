@@ -1054,6 +1054,27 @@ export class AgentLoop {
           this.messages.push(toolMessage);
           await this.persist(toolMessage);
           answered.add(call.id);
+          // Tool-attached images (read_image) ride as a follow-up user message
+          // with real image parts — tool results are text-only on every
+          // protocol, and this is the same shape pasted images arrive in.
+          if (result.images && result.images.length > 0) {
+            const imageMessage: CoreMessage = {
+              role: "user",
+              content: [
+                ...result.images.map((img) => ({
+                  type: "image" as const,
+                  image: img.data,
+                  mimeType: img.mimeType,
+                })),
+                ...result.images.map((img) => ({
+                  type: "text" as const,
+                  text: `[image from ${call.name}: ${img.path}]`,
+                })),
+              ],
+            };
+            this.messages.push(imageMessage);
+            await this.persist(imageMessage);
+          }
           if (call.name === "todo_write" && !result.isError) {
             openTodos = pendingTodoTitles(call.args);
           }

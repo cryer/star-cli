@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { resizeImagePlan, windowsResizeScript } from "../src/cli/image";
 import {
   IMAGE_REMOVED_PLACEHOLDER,
   MAX_IMAGE_DIMENSION,
@@ -7,6 +6,7 @@ import {
   probeImageDimensions,
   stripOversizedImages,
 } from "../src/core/image";
+import { resizeImagePlan, windowsResizeScript } from "../src/core/image-resize";
 import type { CoreMessage } from "../src/core/messages";
 
 function pngBuffer(width: number, height: number): Buffer {
