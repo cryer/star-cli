@@ -120,8 +120,13 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
   // applies. Control parts (response-metadata et al.) never set it.
   let seenContent = false;
   let deltas = 0;
-  // Any visible content streamed (text, reasoning, or a tool call) — decides
-  // whether an idle-watchdog cutoff marks the finish event as truncated.
+  // Any visible reply content streamed (text or a completed tool call) —
+  // decides whether an idle-watchdog cutoff marks the finish event as
+  // truncated. Reasoning deliberately does not count: it is display-only and
+  // never persisted, so a reasoning-only cutoff loses nothing the user saw —
+  // flagging it "truncated" would show a scary notice for what is really a
+  // silent-stall retry (kimi pauses mid-thinking with zero bytes for tens of
+  // seconds).
   let hasContent = false;
   // Accumulated tool-call argument sizes, for coarse progress events while a
   // large payload (write_file content) streams in.
@@ -209,7 +214,6 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
           break;
         case "reasoning":
           deltas++;
-          hasContent = true;
           yield { type: "reasoning", text: part.textDelta };
           break;
         case "tool-call":

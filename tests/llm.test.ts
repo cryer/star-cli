@@ -430,6 +430,36 @@ describe("streamChat", () => {
     ]);
   });
 
+  it("does not mark a reasoning-only cutoff as truncated", async () => {
+    // Reasoning is display-only and never persisted, so a watchdog cut while
+    // only thinking streamed loses nothing the user saw — the loop retries it
+    // as an empty stall without the "reply may be incomplete" notice.
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "reasoning", textDelta: "thinking…" });
+            // never emits visible content, finish, or closes
+          },
+        }),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+
+    const events = await collect(
+      streamChat({
+        model,
+        messages: [{ role: "user", content: "hi" }],
+        idleTimeoutMs: 50,
+      }),
+    );
+
+    expect(events).toEqual([
+      { type: "reasoning", text: "thinking…" },
+      { type: "finish", finishReason: "idle-timeout", usage: undefined },
+    ]);
+  });
+
   it("suppresses stream error parts caused by a user-initiated abort", async () => {
     const model = new MockLanguageModelV1({
       doStream: async () => ({
