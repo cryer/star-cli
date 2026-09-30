@@ -314,6 +314,230 @@ describe("SessionStore", () => {
     }
   });
 
+  it("retries message appends past transient EPERM failures", async () => {
+    // The append path gets the same ride-out-the-AV-scan retries as meta
+    // writes; a transient lock must not lose the message or kill the turn.
+    const realAppendFile = fsPromises.appendFile;
+    let failuresLeft = 2;
+    const spy = vi
+      .spyOn(fsPromises, "appendFile")
+      .mockImplementation(async (file, data, options) => {
+        if (failuresLeft > 0 && String(file).endsWith("messages.jsonl")) {
+          failuresLeft--;
+          const error: NodeJS.ErrnoException = new Error("EPERM: operation not permitted, open");
+          error.code = "EPERM";
+          throw error;
+        }
+        return realAppendFile(file, data, options);
+      });
+    try {
+      const store = await SessionStore.create("/a", "m");
+      await store.append({ role: "user", content: "hi" });
+
+      expect(failuresLeft).toBe(0);
+      expect(await store.messages()).toEqual([{ role: "user", content: "hi" }]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("degrades to a warning instead of throwing when a message append keeps failing", async () => {
+    const spy = vi
+      .spyOn(fsPromises, "appendFile")
+      .mockRejectedValue(
+        Object.assign(new Error("EPERM: operation not permitted, open"), { code: "EPERM" }),
+      );
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const store = await SessionStore.create("/a", "m");
+      await expect(store.append({ role: "user", content: "lost" })).resolves.toBeUndefined();
+
+      // The failed line is dropped from disk but the turn survives: the store
+      // keeps working and later appends persist normally.
+      expect(await store.messages()).toEqual([]);
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("message append failed"));
+
+      spy.mockRestore();
+      await store.append({ role: "user", content: "kept" });
+      expect(await store.messages()).toEqual([{ role: "user", content: "kept" }]);
+    } finally {
+      spy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("replaceMessages rewrites messages.jsonl atomically via tmp + rename", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "user", content: "old" });
+    const writeFileSpy = vi.spyOn(fsPromises, "writeFile");
+    const renameSpy = vi.spyOn(fsPromises, "rename");
+    try {
+      await store.replaceMessages([
+        { role: "user", content: "new" },
+        { role: "assistant", content: "reply" },
+      ]);
+
+      // The rewrite never touches messages.jsonl directly: it writes a tmp
+      // sibling and renames over the original, so a crash mid-write cannot
+      // truncate the session's only durable record.
+      const tmpWrites = writeFileSpy.mock.calls.filter(([file]) =>
+        String(file).includes("messages.jsonl.tmp-"),
+      );
+      expect(tmpWrites).toHaveLength(1);
+      const tmpRenames = renameSpy.mock.calls.filter(
+        ([from, to]) =>
+          String(from).includes("messages.jsonl.tmp-") && String(to).endsWith("messages.jsonl"),
+      );
+      expect(tmpRenames).toHaveLength(1);
+      expect(await store.messages()).toEqual([
+        { role: "user", content: "new" },
+        { role: "assistant", content: "reply" },
+      ]);
+      expect(
+        fs.readdirSync(store.dir).filter((entry) => entry.startsWith("messages.jsonl.tmp-")),
+      ).toEqual([]);
+    } finally {
+      writeFileSpy.mockRestore();
+      renameSpy.mockRestore();
+    }
+  });
+
+  it("replaceMessages keeps the previous history when the rewrite keeps failing", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "user", content: "original" });
+    const spy = vi
+      .spyOn(fsPromises, "rename")
+      .mockRejectedValue(
+        Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" }),
+      );
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await expect(
+        store.replaceMessages([{ role: "user", content: "replacement" }]),
+      ).resolves.toBeUndefined();
+
+      // The failed rewrite is dropped with a warning; the old messages.jsonl
+      // stays intact and no tmp orphan is left behind.
+      expect(await store.messages()).toEqual([{ role: "user", content: "original" }]);
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("history rewrite failed"));
+      expect(
+        fs.readdirSync(store.dir).filter((entry) => entry.startsWith("messages.jsonl.tmp-")),
+      ).toEqual([]);
+    } finally {
+      spy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("debounces append meta bumps and flushes the latest meta on close", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "user", content: "one" });
+    const renameSpy = vi.spyOn(fsPromises, "rename");
+    try {
+      await store.append({ role: "assistant", content: "two" });
+      await store.append({ role: "user", content: "three" });
+      await store.append({ role: "assistant", content: "four" });
+
+      // The burst schedules one trailing flush instead of a full tmp+rename
+      // meta write per append, so nothing has hit disk since the initial write.
+      expect(renameSpy).not.toHaveBeenCalled();
+
+      await store.close();
+      expect(renameSpy).toHaveBeenCalledTimes(1);
+      expect(readMeta(store.dir).updatedAt).toBe((await store.meta()).updatedAt);
+    } finally {
+      renameSpy.mockRestore();
+    }
+  });
+
+  it("flushes the debounced meta write after the burst settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = await SessionStore.create("/a", "m");
+      await store.append({ role: "user", content: "one" });
+      const renameSpy = vi.spyOn(fsPromises, "rename");
+      try {
+        await store.append({ role: "user", content: "two" });
+        expect(renameSpy).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(2000);
+        // close() waits out the in-flight trailing flush without writing again.
+        await store.close();
+        expect(renameSpy).toHaveBeenCalledTimes(1);
+        expect(readMeta(store.dir).updatedAt).toBe((await store.meta()).updatedAt);
+      } finally {
+        renameSpy.mockRestore();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an immediate meta write (addUsage) cancels the pending debounced flush", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = await SessionStore.create("/a", "m");
+      await store.append({ role: "user", content: "one" });
+      const renameSpy = vi.spyOn(fsPromises, "rename");
+      try {
+        await store.append({ role: "user", content: "two" });
+        await store.addUsage({ promptTokens: 1, completionTokens: 1, totalTokens: 2 });
+        expect(renameSpy).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(5000);
+        await store.close();
+        // The addUsage flush already carried the latest cached meta, so the
+        // cancelled debounce timer must not produce a trailing rewrite.
+        expect(renameSpy).toHaveBeenCalledTimes(1);
+        expect(readMeta(store.dir).usage?.totalTokens).toBe(2);
+      } finally {
+        renameSpy.mockRestore();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("parses large multibyte messages spanning read chunk boundaries", async () => {
+    const store = await SessionStore.create("/a", "m");
+    // 150KB of CJK — multi-byte characters are split across the 64KB read
+    // chunks and must be stitched back by the decoder, not mangled.
+    const big = "界".repeat(50_000);
+    await store.append({ role: "user", content: big });
+    await store.append({ role: "assistant", content: "完成" });
+
+    expect(await store.messages()).toEqual([
+      { role: "user", content: big },
+      { role: "assistant", content: "完成" },
+    ]);
+  });
+
+  it("parses a final line without a trailing newline", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "user", content: "有换行" });
+    fs.appendFileSync(
+      path.join(store.dir, "messages.jsonl"),
+      JSON.stringify({ role: "assistant", content: "无换行" }),
+    );
+
+    expect(await store.messages()).toEqual([
+      { role: "user", content: "有换行" },
+      { role: "assistant", content: "无换行" },
+    ]);
+  });
+
+  it("sweeps orphaned messages.jsonl tmp files on open", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "user", content: "hi" });
+    const orphan = path.join(store.dir, "messages.jsonl.tmp-99999-0");
+    fs.writeFileSync(orphan, "partial");
+
+    const reopened = await SessionStore.open(store.id);
+
+    expect(reopened).not.toBeNull();
+    expect(fs.existsSync(orphan)).toBe(false);
+  });
+
   it("serializes concurrent checkpoint appends without losing records", async () => {
     const store = await SessionStore.create("/a", "m");
     await store.append({ role: "user", content: "hi" });

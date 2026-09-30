@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { sessionsDir } from "../config/paths";
 import type { CoreMessage } from "../core/messages";
 import {
@@ -52,15 +53,42 @@ function debugWarn(message: string): void {
   if (process.env.STAR_DEBUG === "1") process.stderr.write(`[star-cli] ${message}\n`);
 }
 
+// Persistent message-write failures surface unconditionally (unlike
+// debugWarn): a dropped append means the line is missing after a resume.
+function warn(message: string): void {
+  process.stderr.write(`[star-cli] ${message}\n`);
+}
+
 // Windows antivirus and search indexers briefly lock freshly written files,
-// so a rename right after the write can come back EPERM/EACCES/EBUSY; a few
-// short retries ride out the scan.
-const META_WRITE_MAX_ATTEMPTS = 5;
-const META_WRITE_RETRY_DELAY_MS = 25;
+// so a write or rename right after the touch can come back EPERM/EACCES/EBUSY;
+// a few short retries ride out the scan. Shared by meta writes, message
+// appends and history rewrites.
+const FS_WRITE_MAX_ATTEMPTS = 5;
+const FS_WRITE_RETRY_DELAY_MS = 25;
 
 function isTransientFsError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException).code;
   return code === "EPERM" || code === "EACCES" || code === "EBUSY";
+}
+
+async function withTransientFsRetry(operation: () => Promise<unknown>): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < FS_WRITE_MAX_ATTEMPTS; attempt++) {
+    try {
+      await operation();
+      return;
+    } catch (error) {
+      lastError = error;
+      if (isTransientFsError(error) && attempt + 1 < FS_WRITE_MAX_ATTEMPTS) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, FS_WRITE_RETRY_DELAY_MS * (attempt + 1)),
+        );
+      } else {
+        break;
+      }
+    }
+  }
+  throw lastError;
 }
 
 // Brands the fallback meta returned for a corrupt/unreadable meta.json so
@@ -71,6 +99,17 @@ const FALLBACK_META: unique symbol = Symbol("star.fallbackMeta");
 function isFallbackMeta(meta: SessionMeta): boolean {
   return (meta as unknown as Record<symbol, unknown>)[FALLBACK_META] === true;
 }
+
+// append() bumps only meta.updatedAt, so those writes are debounced: at most
+// one meta flush per window during a burst plus a trailing flush after it
+// settles (a 30-tool-call turn appends ~60 messages, and each used to land
+// its own atomic tmp+rename meta write). Substantive changes (title, usage,
+// history rewrites, the initial write) still flush immediately.
+const META_FLUSH_INTERVAL_MS = 2000;
+
+// messages.jsonl is read back in chunks of this size instead of buffering
+// the whole file (a resume used to peak at 3-4x the file size in memory).
+const MESSAGES_READ_CHUNK_BYTES = 64 * 1024;
 
 export function dayKey(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -85,7 +124,11 @@ export class SessionStore {
   private initialized = false;
   private cachedMeta: SessionMeta | null = null;
   private metaTmpSeq = 0;
+  private messagesTmpSeq = 0;
   private metaWriteQueue: Promise<void> = Promise.resolve();
+  private metaLastFlushAt = 0;
+  private metaFlushTimer: NodeJS.Timeout | null = null;
+  private metaDirty = false;
 
   private constructor(id: string) {
     this.id = id;
@@ -164,28 +207,65 @@ export class SessionStore {
     if (isFallbackMeta(meta)) return Promise.resolve();
     const tmp = `${this.metaPath()}.tmp-${process.pid}-${this.metaTmpSeq++}`;
     const run = this.metaWriteQueue.then(async () => {
-      for (let attempt = 0; attempt < META_WRITE_MAX_ATTEMPTS; attempt++) {
-        try {
+      try {
+        await withTransientFsRetry(async () => {
           await fs.writeFile(tmp, JSON.stringify(meta, null, 2));
           await fs.rename(tmp, this.metaPath());
-          return;
-        } catch (error) {
-          if (isTransientFsError(error) && attempt + 1 < META_WRITE_MAX_ATTEMPTS) {
-            await new Promise((resolve) =>
-              setTimeout(resolve, META_WRITE_RETRY_DELAY_MS * (attempt + 1)),
-            );
-            continue;
-          }
-          await fs.unlink(tmp).catch(() => {});
-          debugWarn(
-            `session ${this.id}: meta write failed (${(error as NodeJS.ErrnoException).code ?? String(error)}), skipping`,
-          );
-          return;
-        }
+        });
+      } catch (error) {
+        await fs.unlink(tmp).catch(() => {});
+        debugWarn(
+          `session ${this.id}: meta write failed (${(error as NodeJS.ErrnoException).code ?? String(error)}), skipping`,
+        );
       }
     });
     this.metaWriteQueue = run.catch(() => {});
     return run;
+  }
+
+  // Debounced flush for append-driven updatedAt bumps. The trailing timer is
+  // unref'd so a pending flush never keeps the process alive; close() flushes
+  // synchronously on a clean exit, and a hard exit simply drops the trailing
+  // bump — meta is bookkeeping.
+  private markMetaDirty(): void {
+    this.metaDirty = true;
+    if (this.metaFlushTimer) return;
+    const delay = Math.max(0, META_FLUSH_INTERVAL_MS - (Date.now() - this.metaLastFlushAt));
+    if (delay === 0) {
+      void this.flushMetaIfDirty();
+      return;
+    }
+    this.metaFlushTimer = setTimeout(() => {
+      this.metaFlushTimer = null;
+      void this.flushMetaIfDirty();
+    }, delay);
+    this.metaFlushTimer.unref();
+  }
+
+  private async flushMetaIfDirty(): Promise<void> {
+    if (!this.metaDirty) return;
+    await this.flushMetaNow();
+  }
+
+  // Immediate flush for substantive meta changes; cancels a pending debounced
+  // flush, which the write makes redundant either way (it serializes the live
+  // cached meta).
+  private async flushMetaNow(): Promise<void> {
+    if (this.metaFlushTimer) {
+      clearTimeout(this.metaFlushTimer);
+      this.metaFlushTimer = null;
+    }
+    this.metaDirty = false;
+    this.metaLastFlushAt = Date.now();
+    if (this.cachedMeta) await this.writeMeta(this.cachedMeta);
+  }
+
+  // Flushes a pending debounced meta write and waits for in-flight writes to
+  // settle; call when the store is dropped so a clean exit keeps the trailing
+  // updatedAt bump.
+  async close(): Promise<void> {
+    await this.flushMetaIfDirty();
+    await this.metaWriteQueue;
   }
 
   private async ensureInitialized(): Promise<void> {
@@ -209,11 +289,13 @@ export class SessionStore {
     };
     await this.writeMeta(meta);
     this.cachedMeta = meta;
+    this.metaLastFlushAt = Date.now();
     this.initialized = true;
   }
 
-  // Removes meta.json.tmp-* orphans left behind by a crashed meta write
-  // (tmp file + rename); best-effort, the directory may not even exist yet.
+  // Removes tmp orphans left behind by crashed atomic writes (both meta.json
+  // and messages.jsonl write tmp file + rename); best-effort, the directory
+  // may not even exist yet.
   private async sweepTmpFiles(): Promise<void> {
     let entries: string[];
     try {
@@ -223,46 +305,97 @@ export class SessionStore {
     }
     await Promise.all(
       entries
-        .filter((entry) => entry.startsWith("meta.json.tmp-"))
+        .filter(
+          (entry) => entry.startsWith("meta.json.tmp-") || entry.startsWith("messages.jsonl.tmp-"),
+        )
         .map((entry) => fs.unlink(path.join(this.dir, entry)).catch(() => {})),
     );
   }
 
   async append(message: CoreMessage): Promise<void> {
     await this.ensureInitialized();
-    await fs.appendFile(this.messagesPath(), `${JSON.stringify(message)}\n`);
+    // Appends get the same transient-failure retries as meta writes, and a
+    // failure that outlasts them degrades to a warning instead of throwing:
+    // the agent loop awaits append without a catch, so one AV-locked file
+    // must not kill the whole turn. The message still lives in the loop's
+    // in-memory history and later appends keep working; only this line is
+    // missing from messages.jsonl after a resume.
+    try {
+      await withTransientFsRetry(() =>
+        fs.appendFile(this.messagesPath(), `${JSON.stringify(message)}\n`),
+      );
+    } catch (error) {
+      warn(
+        `session ${this.id}: message append failed (${(error as NodeJS.ErrnoException).code ?? String(error)}), message kept in memory only`,
+      );
+    }
     const meta = await this.meta();
     meta.updatedAt = Date.now();
-    await this.writeMeta(meta);
+    this.markMetaDirty();
   }
 
   async replaceMessages(messages: CoreMessage[]): Promise<void> {
     await this.ensureInitialized();
     const content = messages.map((message) => JSON.stringify(message)).join("\n");
-    await fs.writeFile(this.messagesPath(), content ? `${content}\n` : "");
+    // tmp + rename like writeMeta: messages.jsonl is the session's only
+    // durable record, and a crash mid-writeFile must not leave it truncated.
+    // A rewrite that fails past its retries is dropped with a warning rather
+    // than thrown — the previous history stays intact on disk, which is the
+    // safer side to land on.
+    const tmp = `${this.messagesPath()}.tmp-${process.pid}-${this.messagesTmpSeq++}`;
+    try {
+      await withTransientFsRetry(async () => {
+        await fs.writeFile(tmp, content ? `${content}\n` : "");
+        await fs.rename(tmp, this.messagesPath());
+      });
+    } catch (error) {
+      await fs.unlink(tmp).catch(() => {});
+      warn(
+        `session ${this.id}: history rewrite failed (${(error as NodeJS.ErrnoException).code ?? String(error)}), kept the previous messages.jsonl`,
+      );
+    }
     const meta = await this.meta();
     meta.updatedAt = Date.now();
-    await this.writeMeta(meta);
+    await this.flushMetaNow();
   }
 
   async messages(): Promise<CoreMessage[]> {
-    let raw: string;
+    // Read in fixed-size chunks through a StringDecoder instead of buffering
+    // the whole file: a resume used to hold the raw string, the split line
+    // array and the parsed objects at once (3-4x the file size at peak). The
+    // parsed history is now the only large allocation. Corrupt lines are
+    // still skipped; an unreadable file still yields an empty history.
+    let handle: fs.FileHandle | null = null;
     try {
-      raw = await fs.readFile(this.messagesPath(), "utf8");
+      handle = await fs.open(this.messagesPath(), "r");
+      const messages: CoreMessage[] = [];
+      const decoder = new StringDecoder("utf8");
+      const buffer = Buffer.alloc(MESSAGES_READ_CHUNK_BYTES);
+      let tail = "";
+      const pushLine = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        try {
+          messages.push(JSON.parse(trimmed) as CoreMessage);
+        } catch {
+          debugWarn(`session ${this.id}: skipping corrupt messages.jsonl line`);
+        }
+      };
+      while (true) {
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+        if (bytesRead === 0) break;
+        const chunk = tail + decoder.write(buffer.subarray(0, bytesRead));
+        const lines = chunk.split("\n");
+        tail = lines.pop() ?? "";
+        for (const line of lines) pushLine(line);
+      }
+      pushLine(tail + decoder.end());
+      return messages;
     } catch {
       return [];
+    } finally {
+      await handle?.close().catch(() => {});
     }
-    const messages: CoreMessage[] = [];
-    for (const line of raw.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        messages.push(JSON.parse(trimmed) as CoreMessage);
-      } catch {
-        debugWarn(`session ${this.id}: skipping corrupt messages.jsonl line`);
-      }
-    }
-    return messages;
   }
 
   private fallbackMeta(): SessionMeta {
@@ -300,7 +433,7 @@ export class SessionStore {
     const meta = await this.meta();
     meta.title = title;
     meta.updatedAt = Date.now();
-    await this.writeMeta(meta);
+    await this.flushMetaNow();
   }
 
   async appendCheckpoint(record: CheckpointRecord, content: string | null): Promise<void> {
@@ -350,6 +483,6 @@ export class SessionStore {
     bucket.totalTokens += delta.totalTokens;
     byDay[day] = bucket;
     meta.usageByDay = byDay;
-    await this.writeMeta(meta);
+    await this.flushMetaNow();
   }
 }

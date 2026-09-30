@@ -101,6 +101,32 @@ describe("listSessionEntries", () => {
     const entries = await listSessionEntries();
     expect(entries[0]?.messageCount).toBe(0);
   });
+
+  it("skips blank lines and counts a final line without a trailing newline", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "user", content: "seed" });
+    fs.writeFileSync(
+      path.join(store.dir, "messages.jsonl"),
+      `${JSON.stringify({ role: "user", content: "a" })}\n\n   \n${JSON.stringify({ role: "assistant", content: "b" })}\n${JSON.stringify({ role: "user", content: "c" })}`,
+    );
+
+    const entries = await listSessionEntries();
+    expect(entries[0]?.messageCount).toBe(3);
+  });
+
+  it("counts a multibyte history spanning many read chunks", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "user", content: "seed" });
+    // ~300KB across several 64KB read chunks; "\n" never appears inside a
+    // multi-byte UTF-8 sequence, so the byte-level count stays exact.
+    const lines = Array.from({ length: 5000 }, (_, i) =>
+      JSON.stringify({ role: "user", content: `消息 ${i}` }),
+    ).join("\n");
+    fs.writeFileSync(path.join(store.dir, "messages.jsonl"), `${lines}\n`);
+
+    const entries = await listSessionEntries();
+    expect(entries[0]?.messageCount).toBe(5000);
+  });
 });
 
 describe("findLatestSession", () => {

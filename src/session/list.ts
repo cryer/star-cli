@@ -9,18 +9,41 @@ export interface SessionListEntry {
   messageCount: number;
 }
 
+// Counts newline-terminated records in fixed-size chunks instead of reading
+// the whole file: listSessionEntries runs this for every session, so
+// `star -r` and the /resume picker used to load every full history just for
+// the row's message count. "\n" (0x0A) never appears inside a multi-byte
+// UTF-8 sequence, so a raw byte scan is safe. Lines are written as compact
+// JSON (no raw whitespace), and a blank or whitespace-only fragment is not
+// counted — same semantics as the old readFile + split counter.
+const COUNT_CHUNK_BYTES = 64 * 1024;
+
 async function countMessages(id: string): Promise<number> {
-  let raw: string;
+  let handle: fs.FileHandle | null = null;
   try {
-    raw = await fs.readFile(path.join(sessionsDir(), id, "messages.jsonl"), "utf8");
+    handle = await fs.open(path.join(sessionsDir(), id, "messages.jsonl"), "r");
+    const buffer = Buffer.alloc(COUNT_CHUNK_BYTES);
+    let count = 0;
+    let lineHasContent = false;
+    while (true) {
+      const { bytesRead } = await handle.read(buffer, 0, COUNT_CHUNK_BYTES, null);
+      if (bytesRead === 0) break;
+      for (const byte of buffer.subarray(0, bytesRead)) {
+        if (byte === 0x0a) {
+          if (lineHasContent) count += 1;
+          lineHasContent = false;
+        } else if (byte !== 0x0d && byte !== 0x20 && byte !== 0x09) {
+          lineHasContent = true;
+        }
+      }
+    }
+    if (lineHasContent) count += 1;
+    return count;
   } catch {
     return 0;
+  } finally {
+    await handle?.close().catch(() => {});
   }
-  let count = 0;
-  for (const line of raw.split("\n")) {
-    if (line.trim()) count += 1;
-  }
-  return count;
 }
 
 export async function listSessionEntries(cwd?: string): Promise<SessionListEntry[]> {
