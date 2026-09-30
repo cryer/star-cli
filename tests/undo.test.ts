@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildUndoDiffs } from "../src/cli/commands/undo";
 import { editFileTool } from "../src/tools/fs/edit";
 import {
@@ -10,6 +10,7 @@ import {
   clearSnapshots,
   listSnapshots,
   listTurnSnapshots,
+  resolveSnapshotContent,
   snapshotCount,
   undoLastSnapshot,
   undoTurnSnapshots,
@@ -155,6 +156,70 @@ describe("turn-scoped snapshots", () => {
     expect(revertedSub).toHaveLength(1);
     expect(readFileSync(path.join(dir, "sub.txt"), "utf8")).toBe("s0");
     expect(snapshotCount()).toBe(0);
+  });
+});
+
+describe("snapshot content spill", () => {
+  it("keeps only metadata in memory and lazily restores spilled content", async () => {
+    writeFileSync(path.join(dir, "s.txt"), "old content");
+    await writeFileTool.execute({ path: "s.txt", content: "new content" }, ctx());
+
+    const [snapshot] = listSnapshots();
+    expect(snapshot?.content).toBeNull();
+    const spill = snapshot?.contentFile;
+    expect(spill).toBeDefined();
+    if (!snapshot || !spill) return;
+    expect(existsSync(spill)).toBe(true);
+    expect(readFileSync(spill, "utf8")).toBe("old content");
+    // the /undo preview resolves content lazily from the spill file
+    expect(await resolveSnapshotContent(snapshot)).toBe("old content");
+
+    const message = await undoLastSnapshot();
+    expect(message).toContain("Restored");
+    expect(readFileSync(path.join(dir, "s.txt"), "utf8")).toBe("old content");
+    // the spill file left the stack together with its snapshot
+    expect(existsSync(spill)).toBe(false);
+  });
+
+  it("deletes the spill file when a snapshot is evicted beyond the cap", async () => {
+    writeFileSync(path.join(dir, "e.txt"), "v0");
+    await writeFileTool.execute({ path: "e.txt", content: "v1" }, ctx());
+    const firstSpill = listSnapshots()[0]?.contentFile;
+    expect(firstSpill).toBeDefined();
+    if (!firstSpill) return;
+    expect(existsSync(firstSpill)).toBe(true);
+
+    for (let i = 2; i <= 51; i++) {
+      await writeFileTool.execute({ path: "e.txt", content: `v${i}` }, ctx());
+    }
+    expect(snapshotCount()).toBe(50);
+    expect(existsSync(firstSpill)).toBe(false);
+  });
+
+  it("removes spill files on turn-scoped undo and on clear", async () => {
+    writeFileSync(path.join(dir, "t.txt"), "v0");
+    const turn = beginTurn();
+    await writeFileTool.execute({ path: "t.txt", content: "v1" }, ctx());
+    await writeFileTool.execute({ path: "u.txt", content: "new" }, ctx());
+    const snapshots = listSnapshots();
+    // a file the turn created has no pre-change content and nothing to spill
+    expect(snapshots[1]?.contentFile).toBeUndefined();
+    const spill = snapshots[0]?.contentFile;
+    expect(spill).toBeDefined();
+    if (!spill) return;
+    expect(existsSync(spill)).toBe(true);
+
+    await undoTurnSnapshots(turn);
+    expect(existsSync(spill)).toBe(false);
+
+    await writeFileTool.execute({ path: "t.txt", content: "v2" }, ctx());
+    const clearSpill = listSnapshots()[0]?.contentFile;
+    expect(clearSpill).toBeDefined();
+    clearSnapshots();
+    // clearSnapshots is synchronous; the discard completes asynchronously
+    await vi.waitFor(() => {
+      expect(existsSync(clearSpill ?? "")).toBe(false);
+    });
   });
 });
 

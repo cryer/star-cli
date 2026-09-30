@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,6 +22,25 @@ import {
 
 let home: string;
 let dir: string;
+
+function git(args: string[]): string {
+  return execFileSync("git", args, { encoding: "utf8" }).trim();
+}
+
+function repoFiles(repoDir: string, workTree: string): string[] {
+  const out = git([`--git-dir=${repoDir}`, `--work-tree=${workTree}`, "ls-files"]);
+  return out === "" ? [] : out.split("\n").sort();
+}
+
+// Seeds the internal repo the way pre-exclusion star did: no info/exclude,
+// so likely-secret files were tracked into the tree.
+function seedPreExclusionRepo(): string {
+  const repoDir = treeRepoDir(dir);
+  mkdirSync(repoDir, { recursive: true });
+  git(["init", "--bare", repoDir]);
+  git([`--git-dir=${repoDir}`, `--work-tree=${dir}`, "add", "-A"]);
+  return git([`--git-dir=${repoDir}`, `--work-tree=${dir}`, "write-tree"]);
+}
 
 beforeEach(() => {
   home = mkdtempSync(path.join(os.tmpdir(), "star-gt-home-"));
@@ -105,6 +133,76 @@ describe("trackTree / restoreTree", () => {
       expect(await restoreTree(other, "0".repeat(40))).toBe(false);
     } finally {
       rmSync(other, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("sensitive file exclusion", () => {
+  it("keeps likely-secret files out of the tree and untouched by a restore", async () => {
+    writeFileSync(path.join(dir, ".env"), "SECRET=one");
+    writeFileSync(path.join(dir, ".env.local"), "LOCAL=1");
+    writeFileSync(path.join(dir, "id_rsa"), "PRIVATE KEY");
+    writeFileSync(path.join(dir, "cert.pem"), "PEM");
+    writeFileSync(path.join(dir, ".env.example"), "TEMPLATE=");
+    writeFileSync(path.join(dir, "tracked.txt"), "v1");
+    const tree = await trackTree(dir);
+    expect(tree).not.toBeNull();
+    if (!tree) return;
+
+    // excluded secrets never enter the index; templates stay trackable
+    expect(repoFiles(treeRepoDir(dir), dir)).toEqual([".env.example", "tracked.txt"]);
+
+    writeFileSync(path.join(dir, ".env"), "SECRET=rotated");
+    writeFileSync(path.join(dir, ".env.local"), "LOCAL=2");
+    writeFileSync(path.join(dir, "fresh.key"), "NEW KEY");
+    writeFileSync(path.join(dir, "tracked.txt"), "v2");
+    writeFileSync(path.join(dir, ".env.example"), "TEMPLATE=v2");
+
+    expect(await restoreTree(dir, tree)).toBe(true);
+    // checkout-index -a only writes index contents, and clean -fd skips
+    // ignored files: the rotated secrets survive the restore byte-for-byte
+    expect(readFileSync(path.join(dir, ".env"), "utf8")).toBe("SECRET=rotated");
+    expect(readFileSync(path.join(dir, ".env.local"), "utf8")).toBe("LOCAL=2");
+    expect(existsSync(path.join(dir, "fresh.key"))).toBe(true);
+    // ordinary files still restore, templates included
+    expect(readFileSync(path.join(dir, "tracked.txt"), "utf8")).toBe("v1");
+    expect(readFileSync(path.join(dir, ".env.example"), "utf8")).toBe("TEMPLATE=");
+  });
+
+  it("untracks secrets committed before the exclusion and never restores them", async () => {
+    writeFileSync(path.join(dir, ".env"), "SECRET=old");
+    writeFileSync(path.join(dir, "tracked.txt"), "v1");
+    const oldTree = seedPreExclusionRepo();
+    expect(repoFiles(treeRepoDir(dir), dir)).toContain(".env");
+
+    // the first track under the new rules scrubs the already-tracked secrets
+    const tree = await trackTree(dir);
+    expect(tree).not.toBeNull();
+    expect(repoFiles(treeRepoDir(dir), dir)).toEqual(["tracked.txt"]);
+
+    // the preview stays honest about what a restore would touch
+    writeFileSync(path.join(dir, ".env"), "SECRET=rotated");
+    writeFileSync(path.join(dir, ".env.production"), "NEW=1");
+    writeFileSync(path.join(dir, "tracked.txt"), "v2");
+    const names = await diffTreeNames(dir, oldTree);
+    expect(names).toContain("tracked.txt");
+    expect(names).not.toContain(".env");
+    expect(names).not.toContain(".env.production");
+
+    // restoring the pre-exclusion tree must not overwrite the rotated secret
+    expect(await restoreTree(dir, oldTree)).toBe(true);
+    expect(readFileSync(path.join(dir, ".env"), "utf8")).toBe("SECRET=rotated");
+    expect(readFileSync(path.join(dir, ".env.production"), "utf8")).toBe("NEW=1");
+    expect(readFileSync(path.join(dir, "tracked.txt"), "utf8")).toBe("v1");
+  });
+
+  it("creates the git-trees root directory owner-only", async () => {
+    const tree = await trackTree(dir);
+    expect(tree).not.toBeNull();
+    const root = gitTreesDir();
+    expect(existsSync(root)).toBe(true);
+    if (process.platform !== "win32") {
+      expect(statSync(root).mode & 0o777).toBe(0o700);
     }
   });
 });
