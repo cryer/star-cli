@@ -1,10 +1,10 @@
 import { Command } from "commander";
 import { defaultAgentTasks } from "./agent/agent-tasks";
 import { AgentLoop } from "./agent/loop";
+import { formatTokens } from "./cli/cost";
 import { formatStreamError } from "./cli/format";
 import { MAX_IMAGE_BYTES, imageMimeType, readImageInput, resolveMentions } from "./cli/mentions";
 import { UsageTracker, eventToJsonLine } from "./cli/print-json";
-import { renderRepl } from "./cli/repl";
 import { SYSTEM_PROMPT } from "./cli/system-prompt";
 import { loadConfigSync } from "./config/loader";
 import { type StarConfig, contextWindowTokens } from "./config/schema";
@@ -158,7 +158,7 @@ async function printMode(
     } else {
       const t = usage.totals;
       process.stderr.write(
-        `[usage] ${t.requests} requests, ${t.promptTokens} prompt + ${t.completionTokens} completion = ${t.totalTokens} tokens\n`,
+        `[usage] ${t.requests} requests, ${formatTokens(t.promptTokens)} prompt + ${formatTokens(t.completionTokens)} completion = ${formatTokens(t.totalTokens)} tokens\n`,
       );
     }
   }
@@ -322,6 +322,10 @@ program
       return;
     }
 
+    // The REPL pulls in Ink and every interactive component (~0.4s of module
+    // evaluation): load it only on the interactive path so -p, --version,
+    // --clear-sessions and session listing stay cheap.
+    const { renderRepl } = await import("./cli/repl");
     renderRepl(loop, {
       model: modelName,
       permissionMode: config.permissionMode,

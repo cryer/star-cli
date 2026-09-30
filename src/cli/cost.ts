@@ -20,6 +20,16 @@ export function formatDollars(cost: number): string {
   return s;
 }
 
+// User-facing token counts by magnitude: the raw number below 1K, otherwise
+// K/M with two decimals (842 → "842", 532_100 → "532.10K", 6_740_000 →
+// "6.74M"). Request counts and config values stay raw — this is for tokens.
+export function formatTokens(n: number): string {
+  if (!Number.isFinite(n)) return String(n);
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(2)}K`;
+  return `${(n / 1_000_000).toFixed(2)}M`;
+}
+
 // Numeric session cost in USD; null when the model has no pricing configured.
 // Cache pricing: OpenAI-style cached tokens are a subset of promptTokens, so
 // the uncached rest bills at promptPrice and the cached share at

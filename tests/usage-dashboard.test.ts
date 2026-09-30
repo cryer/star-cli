@@ -202,7 +202,7 @@ describe("formatUsageDashboard", () => {
 
     expect(text).toContain("Token usage across all sessions");
     expect(text).toContain("Total: 4 sessions (3 with usage)");
-    expect(text).toContain("1,250 prompt + 625 completion = 1,875 tokens");
+    expect(text).toContain("1.25K prompt + 625 completion = 1.88K tokens");
     expect(text).toContain("By day:");
     expect(text).toContain("2025-01-01");
     expect(text).toContain("2025-01-02");
@@ -222,6 +222,35 @@ describe("formatUsageDashboard", () => {
   it("reports unknown cost when no model has pricing", () => {
     const text = formatUsageDashboard(aggregateUsage(sampleMetas()), []);
     expect(text).toContain("Estimated cost: unknown (no per-model pricing configured)");
+  });
+
+  it("formats token counts with K/M units while requests stay grouped", () => {
+    const metas: SessionMeta[] = [
+      makeMeta({
+        id: "a",
+        model: "gpt-4o",
+        usage: {
+          requests: 12_345,
+          promptTokens: 6_000_000,
+          completionTokens: 740_000,
+          totalTokens: 6_740_000,
+        },
+        usageByDay: {
+          "2025-01-01": {
+            promptTokens: 6_000_000,
+            completionTokens: 740_000,
+            totalTokens: 6_740_000,
+          },
+        },
+      }),
+    ];
+    const text = formatUsageDashboard(aggregateUsage(metas), PRICED);
+    expect(text).toContain("12,345 requests");
+    expect(text).toContain("6.00M prompt + 740.00K completion = 6.74M tokens");
+    // The per-day K/M column stays right-aligned in its 12-char field.
+    expect(text).toMatch(/2025-01-01 {9}6\.74M {2}█+/);
+    // Per-model row: token columns in K/M, requests grouped.
+    expect(text).toMatch(/gpt-4o\s+12,345\s+6\.00M\s+740\.00K\s+6\.74M/);
   });
 
   it("caps the day list at maxDays", () => {

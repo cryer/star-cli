@@ -1,6 +1,6 @@
 import { Box, Text, useStdout } from "ink";
 import { memo } from "react";
-import { formatDollars } from "../cost";
+import { formatDollars, formatTokens } from "../cost";
 import { folderIcon } from "../icons";
 import { toTerminalSafe } from "../terminal-text";
 
@@ -67,7 +67,7 @@ export const StatusBar = memo(function StatusBar({
       {sessionCostUsd != null && sessionCostUsd > 0 && (
         <Text dimColor>${formatDollars(sessionCostUsd)}</Text>
       )}
-      <Text dimColor>{tokens} tokens</Text>
+      <Text dimColor>{formatTokens(tokens)} tokens</Text>
       <Text dimColor>mode: {permissionMode}</Text>
     </Box>
   );

@@ -1,4 +1,4 @@
-import { computeCostUsd, formatDollars } from "../cli/cost";
+import { computeCostUsd, formatDollars, formatTokens } from "../cli/cost";
 import type { ModelConfig } from "../config/schema";
 import { type SessionMeta, SessionStore } from "./store";
 
@@ -166,10 +166,11 @@ export function formatUsageDashboard(
   const lines: string[] = [
     "Token usage across all sessions",
     "",
+    // Request counts render grouped (fmt); token counts by magnitude.
     `Total: ${stats.sessions} sessions (${stats.sessionsWithUsage} with usage) · ` +
       `${fmt(stats.requests)} requests · ` +
-      `${fmt(stats.promptTokens)} prompt + ${fmt(stats.completionTokens)} completion = ` +
-      `${fmt(stats.totalTokens)} tokens`,
+      `${formatTokens(stats.promptTokens)} prompt + ${formatTokens(stats.completionTokens)} completion = ` +
+      `${formatTokens(stats.totalTokens)} tokens`,
   ];
 
   if (stats.sessionsWithUsage === 0) {
@@ -190,13 +191,17 @@ export function formatUsageDashboard(
     for (const day of recent) {
       const barLen =
         maxTotal > 0 ? Math.max(1, Math.round((day.totalTokens / maxTotal) * BAR_WIDTH)) : 0;
-      lines.push(`${day.date}  ${fmt(day.totalTokens).padStart(12)}  ${"█".repeat(barLen)}`);
+      // padStart(12) still right-aligns: K/M strings are shorter than the
+      // grouped numbers this column used to hold.
+      lines.push(
+        `${day.date}  ${formatTokens(day.totalTokens).padStart(12)}  ${"█".repeat(barLen)}`,
+      );
     }
   }
   if (stats.legacy) {
     lines.push(
-      `Earlier usage without per-day records: ${fmt(stats.legacy.totalTokens)} tokens ` +
-        `(${fmt(stats.legacy.promptTokens)} prompt + ${fmt(stats.legacy.completionTokens)} completion)`,
+      `Earlier usage without per-day records: ${formatTokens(stats.legacy.totalTokens)} tokens ` +
+        `(${formatTokens(stats.legacy.promptTokens)} prompt + ${formatTokens(stats.legacy.completionTokens)} completion)`,
     );
   }
 
@@ -211,9 +216,9 @@ export function formatUsageDashboard(
   const cells = rows.map(({ entry, cost }) => [
     entry.model,
     fmt(entry.requests),
-    fmt(entry.promptTokens),
-    fmt(entry.completionTokens),
-    fmt(entry.totalTokens),
+    formatTokens(entry.promptTokens),
+    formatTokens(entry.completionTokens),
+    formatTokens(entry.totalTokens),
     cost === null ? "—" : `$${formatDollars(cost)}`,
   ]);
   const widths = header.map((h, i) =>

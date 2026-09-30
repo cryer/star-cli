@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeCostUsd, estimateCost } from "../src/cli/cost";
+import { computeCostUsd, estimateCost, formatTokens } from "../src/cli/cost";
 import { ModelConfigSchema } from "../src/config/schema";
 
 describe("ModelConfigSchema pricing", () => {
@@ -179,5 +179,26 @@ describe("estimateCost", () => {
       contextMaxTokens: 272_000,
     });
     expect(model.contextMaxTokens).toBe(272_000);
+  });
+});
+
+describe("formatTokens", () => {
+  it("shows the raw number below 1K", () => {
+    expect(formatTokens(0)).toBe("0");
+    expect(formatTokens(842)).toBe("842");
+    expect(formatTokens(999)).toBe("999");
+  });
+
+  it("shows K with two decimals from 1K up to 1M", () => {
+    expect(formatTokens(1000)).toBe("1.00K");
+    expect(formatTokens(1500)).toBe("1.50K");
+    expect(formatTokens(532_100)).toBe("532.10K");
+    expect(formatTokens(999_950)).toBe("999.95K");
+  });
+
+  it("shows M with two decimals from 1M up", () => {
+    expect(formatTokens(1_000_000)).toBe("1.00M");
+    expect(formatTokens(6_740_000)).toBe("6.74M");
+    expect(formatTokens(128_000_000)).toBe("128.00M");
   });
 });
