@@ -576,6 +576,52 @@ describe("streamChat", () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(100);
   });
 
+  it("emits coarse progress while tool-call arguments stream", async () => {
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: convertArrayToReadableStream([
+          {
+            type: "tool-call-delta",
+            toolCallType: "function",
+            toolCallId: "c1",
+            toolName: "write_file",
+            argsTextDelta: "x".repeat(5000),
+          },
+          {
+            type: "tool-call-delta",
+            toolCallType: "function",
+            toolCallId: "c1",
+            toolName: "write_file",
+            argsTextDelta: "y".repeat(5000),
+          },
+          {
+            type: "tool-call",
+            toolCallType: "function",
+            toolCallId: "c1",
+            toolName: "write_file",
+            args: "{}",
+          },
+          {
+            type: "finish",
+            finishReason: "tool-calls",
+            usage: { promptTokens: 1, completionTokens: 1 },
+          },
+        ]),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+
+    const events = await collect(
+      streamChat({ model, messages: [{ role: "user", content: "hi" }] }),
+    );
+
+    // Boundaries double (4KB, 8KB, ...), so two 5KB deltas emit two events.
+    expect(events.filter((e) => e.type === "tool-call-progress")).toEqual([
+      { type: "tool-call-progress", name: "write_file", bytes: 5000 },
+      { type: "tool-call-progress", name: "write_file", bytes: 10000 },
+    ]);
+  });
+
   it("ends gracefully when the first part never arrives", async () => {
     const model = new MockLanguageModelV1({
       doStream: async () => ({

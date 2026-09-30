@@ -15,6 +15,10 @@ export type StreamEvent =
   | { type: "reasoning"; text: string }
   | { type: "tool-call"; id: string; name: string; args: unknown }
   | { type: "tool-result"; id: string; name: string; content: string; isError?: boolean }
+  // Coarse progress while a tool call's JSON arguments stream in (emitted at
+  // 4KB boundaries): large write_file payloads can stream for a while, and a
+  // byte counter beats a dead-looking spinner.
+  | { type: "tool-call-progress"; name: string; bytes: number }
   // `truncated` marks a stream that the idle watchdog ended gracefully while
   // it already had content — the reply may be cut off mid-thought.
   | { type: "finish"; finishReason: string; usage?: TokenUsage; truncated?: boolean }

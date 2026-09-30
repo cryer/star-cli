@@ -98,6 +98,9 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
     // the retry policy in agent/loop.ts + llm/retry.ts owns the full budget
     // and needs the raw error to classify.
     maxRetries: 0,
+    // Pass tool-call argument deltas through (instead of buffering until the
+    // complete call) so large write_file payloads report receive progress.
+    toolCallStreaming: true,
     experimental_providerMetadata: {
       // Only the openai provider (our responses-protocol path) reads these;
       // other providers ignore unknown metadata. The SDK's responses provider
@@ -120,6 +123,9 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
   // Any visible content streamed (text, reasoning, or a tool call) — decides
   // whether an idle-watchdog cutoff marks the finish event as truncated.
   let hasContent = false;
+  // Accumulated tool-call argument sizes, for coarse progress events while a
+  // large payload (write_file content) streams in.
+  const argsProgress = new Map<string, { name: string; chars: number; nextMark: number }>();
   // Last time ANY part arrived; the keepalive extension is bounded against
   // this, not against the last byte (bytes without parts can flow forever).
   let lastPartAt = Date.now();
@@ -215,6 +221,28 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
             args: part.args,
           };
           break;
+        case "tool-call-streaming-start": {
+          argsProgress.set(part.toolCallId, {
+            name: part.toolName,
+            chars: 0,
+            nextMark: 4096,
+          });
+          break;
+        }
+        case "tool-call-delta": {
+          const progress = argsProgress.get(part.toolCallId) ?? {
+            name: part.toolName,
+            chars: 0,
+            nextMark: 4096,
+          };
+          progress.chars += part.argsTextDelta.length;
+          argsProgress.set(part.toolCallId, progress);
+          if (progress.chars >= progress.nextMark) {
+            progress.nextMark *= 2;
+            yield { type: "tool-call-progress", name: progress.name, bytes: progress.chars };
+          }
+          break;
+        }
         case "finish": {
           const finite = (n: number) => (Number.isFinite(n) ? n : 0);
           const cache = extractCacheUsage(
