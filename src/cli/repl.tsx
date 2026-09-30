@@ -14,7 +14,7 @@ import { getGitSummaryCached } from "../core/git";
 import { MAX_IMAGE_DIMENSION } from "../core/image";
 import type { CoreMessage, ImageInput } from "../core/messages";
 import { createModel, reasoningEffortMetadata } from "../llm/provider";
-import { listModels } from "../llm/registry";
+import { listModels, resolveModelConfig } from "../llm/registry";
 import { buildAllowRule, isAllowedByRules } from "../permissions/allow";
 import type { PermissionRequest } from "../permissions/types";
 import { loadSessionSnapshots } from "../session/checkpoints";
@@ -769,6 +769,7 @@ export function Repl({
           sessionStore: sessionStoreRef.current,
           contextMaxTokens: contextWindowTokens(config, name),
           providerMetadata: reasoningEffortMetadata(config, name),
+          temperature: resolveModelConfig(config, name).temperature,
         });
         const prev = backendRef.current;
         if (prev instanceof AgentLoop) {

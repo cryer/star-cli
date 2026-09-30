@@ -11,6 +11,9 @@ export interface StreamChatOptions {
   tools?: Record<string, unknown>;
   abortSignal?: AbortSignal;
   maxTokens?: number;
+  // Per-model sampling temperature (config [[models]] temperature), resolved
+  // by the caller; undefined falls through to the SDK default (ai@4: 0).
+  temperature?: number;
   // Extra per-call provider metadata (e.g. reasoningEffort), keyed by provider
   // instance name. Merged into the request; the openai entry merges with the
   // strictSchemas/store defaults below instead of replacing them.
@@ -71,6 +74,7 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
     tools: opts.tools as ToolSet | undefined,
     abortSignal: controller.signal,
     maxTokens: opts.maxTokens,
+    temperature: opts.temperature,
     // Disable the SDK's own retries (ai@4 defaults to 2 internal attempts with
     // fixed backoff that ignores Retry-After and the abort signal, and
     // exhaustion throws an AI_RetryError stripped of status/headers/body) —

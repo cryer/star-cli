@@ -10,6 +10,7 @@ import { loadConfigSync } from "./config/loader";
 import { type StarConfig, contextWindowTokens } from "./config/schema";
 import { type CoreMessage, type ImageInput, reconcileToolCalls } from "./core/messages";
 import { createModel, reasoningEffortMetadata } from "./llm/provider";
+import { resolveModelConfig } from "./llm/registry";
 import { loadSessionSnapshots } from "./session/checkpoints";
 import { clearSessions } from "./session/clear";
 import {
@@ -42,6 +43,7 @@ async function createLoop(
     sessionStore,
     contextMaxTokens: contextWindowTokens(config, modelName),
     providerMetadata: reasoningEffortMetadata(config, modelName),
+    temperature: resolveModelConfig(config, modelName).temperature,
   });
 }
 

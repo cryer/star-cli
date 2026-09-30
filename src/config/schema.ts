@@ -31,6 +31,12 @@ export const ModelConfigSchema = z.object({
   // request carries no effort field and the server-side default applies.
   // Anthropic maps effort to a thinking budget instead — ignored there.
   reasoningEffort: z.string().min(1).optional(),
+  // Sampling temperature forwarded on every request. Unset = the AI SDK's
+  // own default applies (ai@4 sends 0 — it does NOT omit the field). Some
+  // endpoints reject anything but one explicit value (e.g. kimi-for-coding:
+  // "invalid temperature: only 1 is allowed") — set it here. No upper
+  // bound: ranges vary by provider and the server validates.
+  temperature: z.number().min(0).optional(),
   // Cost estimation needs BOTH prices (USD per 1M tokens); with only one set
   // the model is treated as unpriced.
   promptPrice: z.number().nonnegative().optional(),

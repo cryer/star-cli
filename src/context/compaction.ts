@@ -47,12 +47,16 @@ export async function summarizeMessages(
   messages: CoreMessage[],
   model: LanguageModelV1,
   signal?: AbortSignal,
+  // The calling model's configured sampling temperature, forwarded so
+  // endpoints that mandate one explicit value don't reject the summary call.
+  temperature?: number,
 ): Promise<string> {
   const transcript = messages.map(serializeMessage).join("\n");
   const { text } = await generateText({
     model,
     system: SUMMARY_SYSTEM_PROMPT,
     prompt: `Summarize this conversation so far:\n\n${transcript}`,
+    temperature,
     // A hung relay must not stall the whole turn on the summary: cap it at
     // 60s and let the caller's abort (Esc) cut it short as well; the caller
     // falls back to the truncation placeholder on any failure.

@@ -24,6 +24,8 @@ export interface SubagentDeps {
   // Inherited from the parent loop so the child requests carry the same
   // provider metadata (reasoningEffort).
   providerMetadata?: Record<string, Record<string, unknown>>;
+  // Inherited from the parent loop (the model's [[models]] temperature key).
+  temperature?: number;
   depth: number;
   getConfirmHandler?: () => ((req: PermissionRequest) => Promise<boolean>) | undefined;
   // Receives the child loop's accumulated token usage once the run settles
@@ -120,6 +122,7 @@ async function runSubagent(
     cwd,
     system: deps.system ? `${deps.system}\n\n${SUBAGENT_PROMPT}` : SUBAGENT_PROMPT,
     providerMetadata: deps.providerMetadata,
+    temperature: deps.temperature,
     subagentDepth: deps.depth + 1,
   });
   const confirmHandler = deps.getConfirmHandler?.();

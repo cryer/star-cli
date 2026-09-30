@@ -47,6 +47,10 @@ export interface AgentLoopOptions {
   // Per-call provider metadata (e.g. the model's reasoningEffort), resolved
   // by the caller via llm/provider.ts reasoningEffortMetadata.
   providerMetadata?: Record<string, Record<string, unknown>>;
+  // Per-model sampling temperature (the model's [[models]] temperature key),
+  // resolved by the caller; undefined falls through to the SDK default
+  // (ai@4: 0). Subagents inherit it.
+  temperature?: number;
   // Depth of this loop in the subagent chain (0 = main agent). At
   // MAX_SUBAGENT_DEPTH the subagent tool is not registered, so subagents
   // cannot spawn further subagents.
@@ -119,6 +123,7 @@ async function checkTaskComplete(
   request: string,
   finalReply: string,
   signal: AbortSignal,
+  temperature?: number,
 ): Promise<boolean | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), COMPLETION_CHECK_TIMEOUT_MS);
@@ -128,6 +133,7 @@ async function checkTaskComplete(
     const { text } = await generateText({
       model,
       maxTokens: 8,
+      temperature,
       abortSignal: controller.signal,
       prompt: [
         "An AI coding agent was given this task by the user:",
@@ -286,6 +292,7 @@ export class AgentLoop {
           cwd: opts.cwd,
           system: opts.system,
           providerMetadata: opts.providerMetadata,
+          temperature: opts.temperature,
           depth,
           getConfirmHandler: () => this.confirmHandler,
           onUsage: (usage, childModel) => this.addSubagentUsage(usage, childModel),
@@ -895,7 +902,13 @@ export class AgentLoop {
               ", ",
             )}. Complete them now with tool calls, or update the list with todo_write if they are no longer needed.`;
         } else if (usedToolsThisTurn && !signal.aborted) {
-          const complete = await checkTaskComplete(this.opts.model, inputText, text, signal);
+          const complete = await checkTaskComplete(
+            this.opts.model,
+            inputText,
+            text,
+            signal,
+            this.opts.temperature,
+          );
           if (complete === false) {
             reason = "completion check reports the task unfinished";
           } else if (complete === null) {
@@ -1076,7 +1089,7 @@ export class AgentLoop {
     const headCount = compacted.messages[0]?.role === "system" ? 1 : 0;
     const dropped = this.messages.slice(headCount, headCount + compacted.droppedCount);
     try {
-      const summary = await summarizeMessages(dropped, model, signal);
+      const summary = await summarizeMessages(dropped, model, signal, this.opts.temperature);
       const messages = compacted.messages.slice();
       messages[headCount] = {
         role: "user",
@@ -1101,6 +1114,7 @@ export class AgentLoop {
       providerMetadata: this.opts.providerMetadata,
       idleTimeoutMs: this.opts.config.streamIdleTimeoutSec * 1000 * timeoutScale,
       firstPartTimeoutMs: this.opts.config.streamFirstChunkTimeoutSec * 1000 * timeoutScale,
+      temperature: this.opts.temperature,
     })) {
       // The idle watchdog can end a stream gracefully after content already
       // arrived; surface the cut-off instead of letting a half sentence pass
