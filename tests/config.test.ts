@@ -285,7 +285,7 @@ command = "curl https://evil.example.com"
     writeFile(
       projectConfigPath(cwd),
       `defaultModel = "project-model"
-maxSteps = 20
+maxSteps = 8
 contextMaxTokens = 50000
 compactThresholdTokens = 40000
 streamIdleTimeoutSec = 30
@@ -296,8 +296,8 @@ contextCompaction = "truncate"
 sessionBudgetUsd = 1.5
 notifyBell = false
 notifyBellThresholdSec = 20
-doomLoopThreshold = 7
-gitSnapshots = false
+doomLoopThreshold = 2
+gitSnapshots = true
 
 [[models]]
 name = "proj"
@@ -307,7 +307,9 @@ model = "m"
     );
     const config = await loadConfig(cwd);
     expect(config.defaultModel).toBe("project-model");
-    expect(config.maxSteps).toBe(20);
+    // maxSteps/doomLoopThreshold are protective: the project may only tighten
+    // the global value (10 → 8, default 3 → 2), never relax it.
+    expect(config.maxSteps).toBe(8);
     expect(config.contextMaxTokens).toBe(50_000);
     expect(config.compactThresholdTokens).toBe(40_000);
     expect(config.streamIdleTimeoutSec).toBe(30);
@@ -318,8 +320,8 @@ model = "m"
     expect(config.sessionBudgetUsd).toBe(1.5);
     expect(config.notifyBell).toBe(false);
     expect(config.notifyBellThresholdSec).toBe(20);
-    expect(config.doomLoopThreshold).toBe(7);
-    expect(config.gitSnapshots).toBe(false);
+    expect(config.doomLoopThreshold).toBe(2);
+    expect(config.gitSnapshots).toBe(true);
     expect(config.models).toHaveLength(1);
     expect(stderrOutput()).toBe("");
   });
@@ -337,6 +339,103 @@ model = "m"
   it("still rejects schema violations in project config with a path-tagged error", async () => {
     writeFile(projectConfigPath(cwd), `maxSteps = "not-a-number"`);
     await expect(loadConfig(cwd)).rejects.toThrow(projectConfigPath(cwd));
+  });
+
+  it("takes the lower sessionBudgetUsd of global and project", async () => {
+    writeFile(globalConfigPath(), "sessionBudgetUsd = 5\n");
+    writeFile(projectConfigPath(cwd), "sessionBudgetUsd = 10\n");
+    expect((await loadConfig(cwd)).sessionBudgetUsd).toBe(5);
+    writeFile(projectConfigPath(cwd), "sessionBudgetUsd = 2\n");
+    expect((await loadConfig(cwd)).sessionBudgetUsd).toBe(2);
+    writeFile(globalConfigPath(), "");
+    expect((await loadConfig(cwd)).sessionBudgetUsd).toBe(2);
+  });
+
+  it("ignores gitSnapshots = false from a project but keeps an explicit global false", async () => {
+    writeFile(projectConfigPath(cwd), "gitSnapshots = false\n");
+    expect((await loadConfig(cwd)).gitSnapshots).toBe(true);
+    expect(stderrOutput()).toContain('ignoring "gitSnapshots = false"');
+    writeFile(globalConfigPath(), "gitSnapshots = false\n");
+    expect((await loadConfig(cwd)).gitSnapshots).toBe(false);
+    writeFile(projectConfigPath(cwd), "gitSnapshots = true\n");
+    expect((await loadConfig(cwd)).gitSnapshots).toBe(true);
+  });
+
+  it("lets projects tighten but never relax maxSteps and doomLoopThreshold", async () => {
+    writeFile(projectConfigPath(cwd), "maxSteps = 0\ndoomLoopThreshold = 0\n");
+    let config = await loadConfig(cwd);
+    expect(config.maxSteps).toBe(100);
+    expect(config.doomLoopThreshold).toBe(3);
+    const out = stderrOutput();
+    expect(out).toContain('ignoring "maxSteps = 0"');
+    expect(out).toContain('ignoring "doomLoopThreshold = 0"');
+
+    writeFile(projectConfigPath(cwd), "maxSteps = 500\ndoomLoopThreshold = 9\n");
+    config = await loadConfig(cwd);
+    expect(config.maxSteps).toBe(100);
+    expect(config.doomLoopThreshold).toBe(3);
+
+    writeFile(globalConfigPath(), "maxSteps = 40\ndoomLoopThreshold = 5\n");
+    writeFile(projectConfigPath(cwd), "maxSteps = 20\ndoomLoopThreshold = 2\n");
+    config = await loadConfig(cwd);
+    expect(config.maxSteps).toBe(20);
+    expect(config.doomLoopThreshold).toBe(2);
+  });
+
+  it("clamps project streaming retries/timeouts to safe ranges", async () => {
+    writeFile(
+      projectConfigPath(cwd),
+      "streamMaxRetries = 9999\nstreamIdleTimeoutSec = 0.5\nstreamFirstChunkTimeoutSec = 99999\n",
+    );
+    const config = await loadConfig(cwd);
+    expect(config.streamMaxRetries).toBe(10);
+    expect(config.streamIdleTimeoutSec).toBe(5);
+    expect(config.streamFirstChunkTimeoutSec).toBe(900);
+    expect(stderrOutput()).toContain("clamping");
+
+    writeFile(projectConfigPath(cwd), "streamMaxRetries = 0\nstreamIdleTimeoutSec = 30\n");
+    const ok = await loadConfig(cwd);
+    expect(ok.streamMaxRetries).toBe(0);
+    expect(ok.streamIdleTimeoutSec).toBe(30);
+  });
+
+  it("strips price fields from project models so /cost cannot be zeroed out", async () => {
+    writeFile(
+      globalConfigPath(),
+      `[[models]]
+name = "main"
+provider = "p"
+model = "m"
+promptPrice = 3
+completionPrice = 15
+`,
+    );
+    writeFile(
+      projectConfigPath(cwd),
+      `[[models]]
+name = "free"
+provider = "p"
+model = "m"
+promptPrice = 0
+completionPrice = 0
+cacheReadPrice = 0
+`,
+    );
+    const config = await loadConfig(cwd);
+    expect(config.models).toHaveLength(1);
+    expect(config.models[0]?.name).toBe("free");
+    expect(config.models[0]?.promptPrice).toBeUndefined();
+    expect(config.models[0]?.completionPrice).toBeUndefined();
+    expect(config.models[0]?.cacheReadPrice).toBeUndefined();
+    expect(stderrOutput()).toContain("price fields");
+  });
+
+  it("applies the protective merge in loadConfigSync too", () => {
+    writeFile(globalConfigPath(), "sessionBudgetUsd = 4\n");
+    writeFile(projectConfigPath(cwd), "sessionBudgetUsd = 9\ngitSnapshots = false\n");
+    const config = loadConfigSync(cwd);
+    expect(config.sessionBudgetUsd).toBe(4);
+    expect(config.gitSnapshots).toBe(true);
   });
 });
 
