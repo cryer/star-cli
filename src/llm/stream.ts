@@ -20,17 +20,28 @@ export interface StreamChatOptions {
   providerMetadata?: ProviderMetadata;
   // Idle watchdog: some relays deliver the final content but never send the
   // terminal chunks (or never close the socket). If no stream part arrives
-  // within this window once streaming has started, the stream is ended
-  // gracefully with what we have.
+  // within this window once content has started streaming, the stream is
+  // ended gracefully with what we have.
   idleTimeoutMs?: number;
-  // Separate, longer allowance for the very first part: thinking models and
-  // slow relays can take a while before producing anything, and a false
-  // timeout here would kill a healthy request.
+  // Separate, longer allowance before the first CONTENT part: thinking
+  // models and slow relays can sit silent for minutes after accepting the
+  // request, and a false timeout here would kill a healthy request. Control
+  // parts (response-metadata, tool-call-streaming-start, ...) do not count
+  // as content — the responses protocol emits response-metadata the moment
+  // the server sends response.created, long before any thinking output.
   firstPartTimeoutMs?: number;
 }
 
 const DEFAULT_IDLE_TIMEOUT_MS = 20_000;
 const DEFAULT_FIRST_PART_TIMEOUT_MS = 120_000;
+
+// Parts that mark real generation. Control/metadata parts (response-metadata,
+// tool-call-streaming-start, reasoning-signature, source, file) only prove
+// the connection is alive — they must not demote the generous first-part
+// allowance to the short idle one, or a model that thinks in silence (kimi
+// thinking, buffered function-call arguments) dies as a spurious
+// idle-timeout and burns the whole retry budget on a deterministic stall.
+const GENERATION_PART_TYPES = new Set(["text-delta", "reasoning", "tool-call", "tool-call-delta"]);
 
 const CACHE_READ_KEYS = ["cacheReadInputTokens", "cache_read_input_tokens"];
 const CACHED_PROMPT_KEYS = ["cachedPromptTokens", "cached_prompt_tokens", "cachedTokens"];
@@ -96,7 +107,9 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
   const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
   const firstPartTimeoutMs = opts.firstPartTimeoutMs ?? DEFAULT_FIRST_PART_TIMEOUT_MS;
   const iterator = result.fullStream[Symbol.asyncIterator]();
-  let seenPart = false;
+  // True once a GENERATION part arrived — controls which watchdog window
+  // applies. Control parts (response-metadata et al.) never set it.
+  let seenContent = false;
   let deltas = 0;
   // Any visible content streamed (text, reasoning, or a tool call) — decides
   // whether an idle-watchdog cutoff marks the finish event as truncated.
@@ -110,14 +123,14 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
     for (;;) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const idle = new Promise<null>((resolve) => {
-        timer = setTimeout(() => resolve(null), seenPart ? idleTimeoutMs : firstPartTimeoutMs);
+        timer = setTimeout(() => resolve(null), seenContent ? idleTimeoutMs : firstPartTimeoutMs);
       });
       let next: Awaited<ReturnType<typeof iterator.next>> | null;
       try {
         next = await Promise.race([iterator.next(), idle]);
       } catch (error) {
         debugStreamLog("stream-throw", {
-          seenPart,
+          seenContent,
           deltas,
           error: error instanceof Error ? summarizeStreamError(error) : String(error),
         });
@@ -133,9 +146,9 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
         // stream closes, so a relay that stops sending without closing can
         // only be detected by this watchdog.
         debugStreamLog("idle-timeout", {
-          seenPart,
+          seenContent,
           deltas,
-          waitedMs: seenPart ? idleTimeoutMs : firstPartTimeoutMs,
+          waitedMs: seenContent ? idleTimeoutMs : firstPartTimeoutMs,
         });
         yield {
           type: "finish",
@@ -148,11 +161,11 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
         return;
       }
       if (next.done) {
-        debugStreamLog("end", { seenPart, deltas });
+        debugStreamLog("end", { seenContent, deltas });
         return;
       }
-      seenPart = true;
       const part = next.value;
+      if (GENERATION_PART_TYPES.has(part.type)) seenContent = true;
       switch (part.type) {
         case "text-delta":
           deltas++;
@@ -201,7 +214,7 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
           // A user-initiated abort surfacing as a stream error is not a failure.
           if (opts.abortSignal?.aborted) return;
           const error = part.error instanceof Error ? part.error : new Error(String(part.error));
-          debugStreamLog("error-part", { seenPart, deltas, error: summarizeStreamError(error) });
+          debugStreamLog("error-part", { seenContent, deltas, error: summarizeStreamError(error) });
           yield { type: "error", error };
           break;
         }

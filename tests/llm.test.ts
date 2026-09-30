@@ -494,6 +494,88 @@ describe("streamChat", () => {
     ]);
   });
 
+  it("does not count metadata parts as content for the watchdog window", async () => {
+    // The responses protocol emits response-metadata the instant the server
+    // accepts the request (response.created); a thinking model can then sit
+    // silent well past the idle window. The generous first-part allowance
+    // must still apply — demoting on the metadata part kills healthy slow
+    // streams as spurious idle-timeouts (kimi-for-coding).
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: new ReadableStream({
+          async start(controller) {
+            controller.enqueue({
+              type: "response-metadata",
+              id: "r1",
+              timestamp: new Date(),
+              modelId: "x",
+            });
+            await new Promise((resolve) => setTimeout(resolve, 80));
+            controller.enqueue({ type: "text-delta", textDelta: "late" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "stop",
+              usage: { promptTokens: 1, completionTokens: 1 },
+            });
+            controller.close();
+          },
+        }),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+
+    const events = await collect(
+      streamChat({
+        model,
+        messages: [{ role: "user", content: "hi" }],
+        idleTimeoutMs: 30,
+        firstPartTimeoutMs: 500,
+      }),
+    );
+
+    expect(events).toEqual([
+      { type: "text-delta", text: "late" },
+      {
+        type: "finish",
+        finishReason: "stop",
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      },
+    ]);
+  });
+
+  it("waits the full first-part allowance when only metadata parts arrived", async () => {
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({
+              type: "response-metadata",
+              id: "r1",
+              timestamp: new Date(),
+              modelId: "x",
+            });
+            // then silence, forever
+          },
+        }),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+
+    const started = Date.now();
+    const events = await collect(
+      streamChat({
+        model,
+        messages: [{ role: "user", content: "hi" }],
+        idleTimeoutMs: 20,
+        firstPartTimeoutMs: 120,
+      }),
+    );
+
+    expect(events).toEqual([{ type: "finish", finishReason: "idle-timeout", usage: undefined }]);
+    // Demoted-to-idle behavior would have fired at ~20ms.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(100);
+  });
+
   it("ends gracefully when the first part never arrives", async () => {
     const model = new MockLanguageModelV1({
       doStream: async () => ({

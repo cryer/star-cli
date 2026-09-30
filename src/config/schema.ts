@@ -92,10 +92,12 @@ export const ConfigSchema = z.object({
   compactThresholdTokens: z.number().int().positive().optional(),
   // Seconds without any stream part before a stalled response is ended
   // gracefully (some relays never send the terminal chunks). Applies once
-  // streaming has started; the first part gets a longer, fixed allowance.
+  // content has started streaming; the wait for the first content part gets
+  // a longer allowance (control/metadata parts don't count as content).
   streamIdleTimeoutSec: z.number().positive().default(20),
-  // Seconds to wait for the very first stream part before giving up; slow
-  // thinking-model relays can buffer for minutes before sending anything.
+  // Seconds to wait for the very first content part before giving up; slow
+  // thinking-model endpoints can stay silent for minutes after accepting
+  // the request.
   streamFirstChunkTimeoutSec: z.number().positive().default(300),
   // Extra attempts per model request when a stream fails transiently
   // (network error, 429/5xx, idle watchdog cutoff) or comes back empty, so a
