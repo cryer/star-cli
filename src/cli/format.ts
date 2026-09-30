@@ -19,6 +19,12 @@ export function previewLines(text: string, maxLines = 10): { text: string; trunc
   return { text: lines.slice(0, maxLines).join("\n"), truncated: true };
 }
 
+export function formatByteCount(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
 // Splits a streaming buffer into a committable head (complete lines) and a
 // remainder, once the buffer holds at least minCompleteLines complete lines.
 // The last line is always kept in the remainder: it may still be growing.

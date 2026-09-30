@@ -1,3 +1,4 @@
+import type { DiffLine } from "../diff-preview";
 import { previewLines } from "../format";
 import { toolIcon } from "../icons";
 import { toTerminalSafe } from "../terminal-text";
@@ -8,6 +9,10 @@ export interface ToolCardData {
   argsSummary: string;
   result?: string;
   isError?: boolean;
+  // Pre-write diff preview for write_file/edit_file, captured at tool-call
+  // time (after execution the file already holds the new content, so an
+  // overwrite would diff empty). Rendered under the card.
+  diff?: DiffLine[];
 }
 
 export function formatToolCard(card: ToolCardData): string {

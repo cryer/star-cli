@@ -88,11 +88,12 @@ import {
 import { TodoPanel } from "./components/TodoPanel";
 import { type ToolCardData, formatToolCard } from "./components/ToolCallCard";
 import { computeCostUsd, estimateCost, formatDollars, formatTokens } from "./cost";
-import { type DiffPreview, generateDiffPreview } from "./diff-preview";
+import { type DiffLine, type DiffPreview, generateDiffPreview } from "./diff-preview";
 import { isDoubleEscape } from "./double-esc";
 import {
   buildDisplayMessages,
   coreMessageText,
+  formatByteCount,
   formatStreamError,
   splitCommittableLines,
   summarizeArgs,
@@ -260,6 +261,7 @@ export function Repl({
   // would clobber any turn that ran concurrently with it.
   const busyCommandRef = useRef<string | null>(null);
   const streamedRef = useRef("");
+  const turnStartedAtRef = useRef(0);
   // Chars of streamedRef already committed to static history by the ticker.
   // The live region renders only the suffix past this point, and a stream
   // retry rolls the buffer back to it (the resend re-streams from scratch).
@@ -331,9 +333,13 @@ export function Repl({
       note?: string,
       tight?: boolean,
       interrupted?: boolean,
+      diff?: DiffLine[],
     ) => {
       setMessages((prev) => {
-        const next = [...prev, { id: nextIdRef.current++, role, text, note, tight, interrupted }];
+        const next = [
+          ...prev,
+          { id: nextIdRef.current++, role, text, note, tight, interrupted, diff },
+        ];
         messagesRef.current = next;
         return next;
       });
@@ -905,6 +911,7 @@ export function Repl({
       const controller = new AbortController();
       abortRef.current = controller;
       const turnStartedAt = Date.now();
+      turnStartedAtRef.current = turnStartedAt;
       streamedRef.current = "";
       lastCommittedLenRef.current = 0;
       thinkingRef.current = true;
@@ -978,17 +985,34 @@ export function Repl({
             // Flush the text spoken before this call into history first, so the
             // card lands in chronological order instead of after the whole turn.
             commitStreamed(true);
-            toolCardsRef.current.set(event.id, {
+            const card: ToolCardData = {
               id: event.id,
               name: event.name,
               argsSummary: summarizeArgs(event.args),
-            });
+            };
+            // Capture the write/edit diff preview now: by the time the result
+            // arrives the file already holds the new content and an overwrite
+            // would diff empty. Awaiting pauses the event stream for a local
+            // file read only; the preview is best-effort.
+            if (event.name === "write_file" || event.name === "edit_file") {
+              try {
+                const preview = await generateDiffPreview(event.name, event.args, cwd);
+                if (preview) card.diff = preview.lines;
+              } catch {
+                // Preview failure must not block the tool call.
+              }
+            }
+            toolCardsRef.current.set(event.id, card);
             if (event.name === "todo_write") {
               const list = parseTodoArgs(event.args);
               if (list) setTodos(list);
             }
             setActivity(
               `${toolIcon(event.name)} running ${event.name}: ${summarizeArgs(event.args, 60)}`,
+            );
+          } else if (event.type === "tool-call-progress") {
+            setActivity(
+              `${toolIcon(event.name)} receiving ${event.name} arguments… ${formatByteCount(event.bytes)}`,
             );
           } else if (event.type === "tool-result") {
             const card = toolCardsRef.current.get(event.id) ?? {
@@ -1006,6 +1030,10 @@ export function Repl({
                 result: event.content,
                 isError: event.isError ?? false,
               }),
+              undefined,
+              undefined,
+              undefined,
+              event.isError ? undefined : card.diff,
             );
             setActivity(null);
             thinkingRef.current = true;
@@ -1818,6 +1846,7 @@ export function Repl({
           reasoning={thinkingText}
           frame={spinnerTick}
           activity={activity ?? undefined}
+          elapsedSec={Math.max(0, Math.floor((Date.now() - turnStartedAtRef.current) / 1000))}
         />
       )}
       {!thinking && activity === null && thoughtSummary !== null && (

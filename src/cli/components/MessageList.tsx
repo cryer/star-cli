@@ -72,6 +72,7 @@ export const MessageList = memo(function MessageList({ messages }: { messages: D
           return (
             <Box key={message.id} flexDirection="column" marginBottom={marginBottom}>
               <Text color="magenta">{message.text}</Text>
+              {message.diff && <DiffLines lines={message.diff} />}
             </Box>
           );
         }

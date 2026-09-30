@@ -19,16 +19,21 @@ export function ThinkingIndicator({
   reasoning,
   frame = 0,
   activity,
-}: { reasoning?: string; frame?: number; activity?: string }) {
+  elapsedSec,
+}: { reasoning?: string; frame?: number; activity?: string; elapsedSec?: number }) {
   const tail = reasoning ? truncateTail(reasoning, REASONING_TAIL_LENGTH) : "";
   const spinner = SPINNER_FRAMES[frame % SPINNER_FRAMES.length];
   // Tool-running activities carry their own per-tool icon in the label
   // (see repl.tsx), so the 💭 prefix only applies while thinking.
   const label = activity ?? `${thinkingIcon} star is thinking…`;
+  // Long buffered waits (slow relays) look dead without a clock; show the
+  // elapsed time once it becomes relevant.
+  const elapsed = elapsedSec !== undefined && elapsedSec >= 3 ? ` (${elapsedSec}s)` : "";
   return (
     <Box flexDirection="column">
       <Text dimColor>
         {spinner} {label}
+        {elapsed}
       </Text>
       {tail !== "" && (
         <Text dimColor>
