@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -12,6 +12,7 @@ import type { StreamEvent } from "../src/core/events";
 import { SessionStore } from "../src/session/store";
 import { createDefaultRegistry } from "../src/tools";
 import type { Tool, ToolContext } from "../src/tools/types";
+import { rmWithRetry } from "./test-fs";
 
 type Chunk =
   | { type: "text-delta"; textDelta: string }
@@ -136,10 +137,10 @@ describe("AgentLoop", () => {
     vi.stubEnv("STAR_HOME", home);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllEnvs();
-    rmSync(cwd, { recursive: true, force: true });
-    rmSync(home, { recursive: true, force: true });
+    await rmWithRetry(cwd);
+    await rmWithRetry(home);
   });
 
   function makeLoop(

@@ -12,6 +12,7 @@ import {
   shortSessionId,
 } from "../src/session/list";
 import { SessionStore } from "../src/session/store";
+import { rmWithRetry } from "./test-fs";
 
 let home: string;
 
@@ -20,9 +21,9 @@ beforeEach(() => {
   vi.stubEnv("STAR_HOME", home);
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllEnvs();
-  fs.rmSync(home, { recursive: true, force: true });
+  await rmWithRetry(home);
 });
 
 function bumpUpdatedAt(dir: string, updatedAt: number): void {

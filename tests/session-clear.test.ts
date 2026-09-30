@@ -6,6 +6,7 @@ import { gitTreesDir, sessionsDir } from "../src/config/paths";
 import { clearSessions } from "../src/session/clear";
 import { SessionStore } from "../src/session/store";
 import { treeRepoDir } from "../src/snapshot/git-tree";
+import { rmWithRetry } from "./test-fs";
 
 let home: string;
 
@@ -14,9 +15,9 @@ beforeEach(() => {
   vi.stubEnv("STAR_HOME", home);
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllEnvs();
-  fs.rmSync(home, { recursive: true, force: true });
+  await rmWithRetry(home);
 });
 
 async function makeSession(cwd: string): Promise<SessionStore> {

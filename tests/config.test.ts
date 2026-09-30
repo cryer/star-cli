@@ -7,6 +7,7 @@ import { loadConfig, loadConfigSync } from "../src/config/loader";
 import { globalConfigPath, projectConfigPath, sessionsDir, starHome } from "../src/config/paths";
 import type { ProviderConfig } from "../src/config/schema";
 import { contextWindowTokens, resolveCompactThreshold } from "../src/config/schema";
+import { rmWithRetry } from "./test-fs";
 
 let home: string;
 let cwd: string;
@@ -17,10 +18,10 @@ beforeEach(() => {
   vi.stubEnv("STAR_HOME", home);
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllEnvs();
-  fs.rmSync(home, { recursive: true, force: true });
-  fs.rmSync(cwd, { recursive: true, force: true });
+  await rmWithRetry(home);
+  await rmWithRetry(cwd);
 });
 
 function writeFile(filePath: string, content: string) {

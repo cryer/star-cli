@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
@@ -9,6 +9,7 @@ import type { StreamEvent } from "../src/core/events";
 import { IMAGE_REMOVED_PLACEHOLDER, MAX_IMAGE_DIMENSION } from "../src/core/image";
 import { SessionStore } from "../src/session/store";
 import { createDefaultRegistry } from "../src/tools";
+import { rmWithRetry } from "./test-fs";
 
 type Chunk =
   | { type: "text-delta"; textDelta: string }
@@ -87,10 +88,10 @@ describe("oversized image retry", () => {
     vi.stubEnv("STAR_HOME", home);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllEnvs();
-    rmSync(cwd, { recursive: true, force: true });
-    rmSync(home, { recursive: true, force: true });
+    await rmWithRetry(cwd);
+    await rmWithRetry(home);
   });
 
   function makeLoop(

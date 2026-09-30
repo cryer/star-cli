@@ -7,6 +7,7 @@ import { sessionsDir } from "../src/config/paths";
 import type { CoreMessage } from "../src/core/messages";
 import { resumeSession } from "../src/session/resume";
 import { type SessionMeta, SessionStore } from "../src/session/store";
+import { rmWithRetry } from "./test-fs";
 
 let home: string;
 
@@ -15,9 +16,9 @@ beforeEach(() => {
   vi.stubEnv("STAR_HOME", home);
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllEnvs();
-  fs.rmSync(home, { recursive: true, force: true });
+  await rmWithRetry(home);
 });
 
 function readMeta(dir: string): SessionMeta {

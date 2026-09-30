@@ -11,6 +11,7 @@ import type { StreamEvent } from "../src/core/events";
 import { SessionStore } from "../src/session/store";
 import { createDefaultRegistry } from "../src/tools";
 import { clearSnapshots, setSnapshotHooks } from "../src/tools/fs/snapshots";
+import { rmWithRetry } from "./test-fs";
 
 type Chunk =
   | { type: "text-delta"; textDelta: string }
@@ -109,12 +110,12 @@ beforeEach(() => {
   vi.stubEnv("STAR_HOME", home);
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllEnvs();
   setSnapshotHooks(null);
   clearSnapshots();
-  fs.rmSync(home, { recursive: true, force: true });
-  fs.rmSync(cwd, { recursive: true, force: true });
+  await rmWithRetry(home);
+  await rmWithRetry(cwd);
 });
 
 function makeLoop(

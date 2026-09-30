@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +8,7 @@ import { sessionsDir } from "../src/config/paths";
 import type { CoreMessage } from "../src/core/messages";
 import { formatSearchResults, searchSessions } from "../src/session/search";
 import { SessionStore } from "../src/session/store";
+import { rmWithRetry } from "./test-fs";
 
 describe("session search", () => {
   let home: string;
@@ -17,9 +18,9 @@ describe("session search", () => {
     vi.stubEnv("STAR_HOME", home);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllEnvs();
-    rmSync(home, { recursive: true, force: true });
+    await rmWithRetry(home);
   });
 
   async function makeSession(cwd: string, messages: CoreMessage[]): Promise<SessionStore> {

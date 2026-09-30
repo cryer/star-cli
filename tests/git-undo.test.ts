@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
@@ -9,6 +9,7 @@ import type { StreamEvent } from "../src/core/events";
 import { SessionStore } from "../src/session/store";
 import { createDefaultRegistry } from "../src/tools";
 import { clearSnapshots, setSnapshotHooks, snapshotCount } from "../src/tools/fs/snapshots";
+import { rmWithRetry } from "./test-fs";
 
 type Chunk =
   | { type: "text-delta"; textDelta: string }
@@ -104,12 +105,12 @@ beforeEach(() => {
   clearSnapshots();
 });
 
-afterEach(() => {
+afterEach(async () => {
   setSnapshotHooks(null);
   clearSnapshots();
   vi.unstubAllEnvs();
-  rmSync(home, { recursive: true, force: true });
-  rmSync(dir, { recursive: true, force: true });
+  await rmWithRetry(home);
+  await rmWithRetry(dir);
 });
 
 // A turn that changes files twice: x.txt through write_file (snapshotted) and

@@ -12,6 +12,7 @@ import type { StarConfig } from "../src/config/schema";
 import type { CoreMessage } from "../src/core/messages";
 import { SessionStore } from "../src/session/store";
 import { createDefaultRegistry } from "../src/tools";
+import { rmWithRetry } from "./test-fs";
 
 const pad = (n: number) => "x".repeat(n);
 const user = (text: string): CoreMessage => ({ role: "user", content: text });
@@ -70,10 +71,10 @@ describe("slash /compact and /export", () => {
     vi.stubEnv("STAR_HOME", home);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllEnvs();
-    fs.rmSync(home, { recursive: true, force: true });
-    fs.rmSync(cwd, { recursive: true, force: true });
+    await rmWithRetry(home);
+    await rmWithRetry(cwd);
   });
 
   function makeLoop(

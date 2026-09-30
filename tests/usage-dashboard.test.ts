@@ -8,6 +8,7 @@ import { sessionsDir } from "../src/config/paths";
 import type { ModelConfig } from "../src/config/schema";
 import { type SessionMeta, SessionStore } from "../src/session/store";
 import { aggregateUsage, collectUsageStats, formatUsageDashboard } from "../src/session/usage";
+import { rmWithRetry } from "./test-fs";
 
 let home: string;
 
@@ -16,10 +17,10 @@ beforeEach(() => {
   vi.stubEnv("STAR_HOME", home);
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
-  fs.rmSync(home, { recursive: true, force: true });
+  await rmWithRetry(home);
 });
 
 function makeMeta(partial: Partial<SessionMeta> & { id: string }): SessionMeta {

@@ -10,6 +10,7 @@ import { type CoreMessage, retractLastTurn } from "../src/core/messages";
 import { SessionStore } from "../src/session/store";
 import { createDefaultRegistry } from "../src/tools";
 import { clearSnapshots, undoTurnSnapshots } from "../src/tools/fs/snapshots";
+import { rmWithRetry } from "./test-fs";
 
 function makeConfig(): StarConfig {
   return {
@@ -153,9 +154,9 @@ describe("AgentLoop.retractLastTurn", () => {
     vi.stubEnv("STAR_HOME", home);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllEnvs();
-    fs.rmSync(home, { recursive: true, force: true });
+    await rmWithRetry(home);
   });
 
   it("trims history and persists it to the session store", async () => {
@@ -205,9 +206,9 @@ describe("AgentLoop.previewLastTurnRetraction", () => {
     clearSnapshots();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     clearSnapshots();
-    fs.rmSync(cwd, { recursive: true, force: true });
+    await rmWithRetry(cwd);
   });
 
   it("matches retractLastTurn without mutating messages or turn markers", async () => {
@@ -269,9 +270,9 @@ describe("turn-scoped undo (end to end)", () => {
     clearSnapshots();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     clearSnapshots();
-    fs.rmSync(cwd, { recursive: true, force: true });
+    await rmWithRetry(cwd);
   });
 
   it("reverts only the retracted turn's file changes", async () => {

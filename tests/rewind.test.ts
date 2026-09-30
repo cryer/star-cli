@@ -20,6 +20,7 @@ import {
   snapshotCount,
 } from "../src/tools/fs/snapshots";
 import { writeFileTool } from "../src/tools/fs/write";
+import { rmWithRetry } from "./test-fs";
 
 type Chunk =
   | { type: "text-delta"; textDelta: string }
@@ -118,12 +119,12 @@ beforeEach(() => {
   clearSnapshots();
 });
 
-afterEach(() => {
+afterEach(async () => {
   setSnapshotHooks(null);
   clearSnapshots();
   vi.unstubAllEnvs();
-  rmSync(home, { recursive: true, force: true });
-  rmSync(dir, { recursive: true, force: true });
+  await rmWithRetry(home);
+  await rmWithRetry(dir);
 });
 
 describe("checkpoint persistence", () => {

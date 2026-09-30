@@ -15,6 +15,7 @@ import type { PermissionRequest } from "../src/permissions/types";
 import { SessionStore } from "../src/session/store";
 import { createDefaultRegistry } from "../src/tools";
 import { renderApp, stripAnsi, tick, typeText } from "./ink-harness";
+import { rmWithRetry } from "./test-fs";
 
 process.env.STAR_NO_UPDATE_CHECK = "1";
 const { Repl, BUSY_BLOCKED_COMMANDS, REPL_RENDER_OPTIONS } = await import("../src/cli/repl");
@@ -80,11 +81,10 @@ describe("REPL turn guards", () => {
     vi.stubEnv("STAR_HOME", home);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllEnvs();
     defaultAgentTasks.cleanup();
-    fs.rmSync(cwd, { recursive: true, force: true });
-    fs.rmSync(home, { recursive: true, force: true });
+    for (const dir of [cwd, home]) await rmWithRetry(dir);
   });
 
   it("lists /redo among the busy-blocked commands", () => {
@@ -280,12 +280,17 @@ describe("REPL turn guards", () => {
       { timeout: 15_000 },
     );
     // The new turn must land in the resumed session, not the previous one.
-    await vi.waitFor(async () => {
-      const targetMessages = await targetStore.messages();
-      expect(targetMessages.some((m) => m.role === "user" && coreMessageText(m) === "hello")).toBe(
-        true,
-      );
-    });
+    // Slow CI disks (windows runners especially) can push the append past the
+    // default 1s waitFor budget; give it the same allowance as the UI waits.
+    await vi.waitFor(
+      async () => {
+        const targetMessages = await targetStore.messages();
+        expect(
+          targetMessages.some((m) => m.role === "user" && coreMessageText(m) === "hello"),
+        ).toBe(true);
+      },
+      { timeout: 15_000 },
+    );
     const oldMessages = await oldStore.messages();
     expect(oldMessages.some((m) => coreMessageText(m) === "hello")).toBe(false);
     app.unmount();

@@ -16,6 +16,7 @@ import { resumeSession } from "../src/session/resume";
 import { SessionStore } from "../src/session/store";
 import { createDefaultRegistry } from "../src/tools";
 import type { Tool } from "../src/tools/types";
+import { rmWithRetry } from "./test-fs";
 
 type Chunk =
   | { type: "text-delta"; textDelta: string }
@@ -210,10 +211,10 @@ describe("AgentLoop tool-call completion", () => {
     vi.stubEnv("STAR_HOME", home);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllEnvs();
-    fs.rmSync(cwd, { recursive: true, force: true });
-    fs.rmSync(home, { recursive: true, force: true });
+    await rmWithRetry(cwd);
+    await rmWithRetry(home);
   });
 
   function makeLoop(
@@ -352,9 +353,9 @@ describe("resumeSession repair", () => {
     vi.stubEnv("STAR_HOME", home);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllEnvs();
-    fs.rmSync(home, { recursive: true, force: true });
+    await rmWithRetry(home);
   });
 
   it("repairs a poisoned session on resume and persists the fix", async () => {

@@ -14,6 +14,7 @@ import { SessionStore } from "../src/session/store";
 import { createDefaultRegistry } from "../src/tools";
 import type { Tool } from "../src/tools/types";
 import { renderApp, stripAnsi, tick, typeText } from "./ink-harness";
+import { rmWithRetry } from "./test-fs";
 
 process.env.STAR_NO_UPDATE_CHECK = "1";
 const { Repl } = await import("../src/cli/repl");
@@ -125,10 +126,10 @@ describe("AgentLoop interrupt persistence", () => {
     vi.stubEnv("STAR_HOME", home);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllEnvs();
-    fs.rmSync(cwd, { recursive: true, force: true });
-    fs.rmSync(home, { recursive: true, force: true });
+    await rmWithRetry(cwd);
+    await rmWithRetry(home);
   });
 
   it("keeps the partial reply in history and the session store on abort", async () => {
@@ -290,10 +291,10 @@ describe("REPL interrupt display", () => {
     vi.stubEnv("STAR_HOME", home);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllEnvs();
-    fs.rmSync(cwd, { recursive: true, force: true });
-    fs.rmSync(home, { recursive: true, force: true });
+    await rmWithRetry(cwd);
+    await rmWithRetry(home);
   });
 
   it(

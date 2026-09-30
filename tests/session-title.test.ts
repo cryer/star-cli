@@ -10,6 +10,7 @@ import type { StreamEvent } from "../src/core/events";
 import { SessionStore } from "../src/session/store";
 import { generateSessionTitle } from "../src/session/title";
 import { createDefaultRegistry } from "../src/tools";
+import { rmWithRetry } from "./test-fs";
 
 let home: string;
 let cwd: string;
@@ -20,10 +21,10 @@ beforeEach(() => {
   vi.stubEnv("STAR_HOME", home);
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllEnvs();
-  fs.rmSync(home, { recursive: true, force: true });
-  fs.rmSync(cwd, { recursive: true, force: true });
+  await rmWithRetry(home);
+  await rmWithRetry(cwd);
 });
 
 function generateRound(text: string): LanguageModelV1["doGenerate"] {

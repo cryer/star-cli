@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
@@ -8,6 +8,7 @@ import { AgentLoop } from "../src/agent/loop";
 import type { StarConfig } from "../src/config/schema";
 import { createDefaultRegistry } from "../src/tools";
 import { renderApp, stripAnsi, tick, typeText } from "./ink-harness";
+import { rmWithRetry } from "./test-fs";
 
 process.env.STAR_NO_UPDATE_CHECK = "1";
 const { Repl } = await import("../src/cli/repl");
@@ -53,8 +54,8 @@ describe("StatusBar context percent", () => {
     cwd = mkdtempSync(path.join(tmpdir(), "star-ctx-"));
   });
 
-  afterEach(() => {
-    rmSync(cwd, { recursive: true, force: true });
+  afterEach(async () => {
+    await rmWithRetry(cwd);
   });
 
   it(
