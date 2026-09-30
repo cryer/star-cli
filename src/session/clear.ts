@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { sessionsDir } from "../config/paths";
+import { pruneTreeReposExcept, removeTreeRepo } from "../snapshot/git-tree";
 import { SessionStore } from "./store";
 
 // Deletes stored sessions and returns how many were removed. With a cwd only
@@ -8,6 +9,12 @@ import { SessionStore } from "./store";
 // meta.json cannot be matched and stay); without it every session directory
 // under sessionsDir is removed. excludeId keeps the caller's live session on
 // disk (the REPL's /clear-sessions must not pull its own store away).
+//
+// Snapshot cleanup rides along: per-file checkpoints live inside the session
+// dir and go with it, while the per-project git-tree repos outlive sessions
+// on purpose (/undo across restarts). Once a project's last session is gone
+// its tree repo is unreachable, so it is removed here too — repos whose
+// project still has a surviving session (e.g. the excluded live one) stay.
 export async function clearSessions(cwd?: string, excludeId?: string): Promise<number> {
   if (cwd !== undefined) {
     const metas = await SessionStore.list(cwd);
@@ -16,6 +23,9 @@ export async function clearSessions(cwd?: string, excludeId?: string): Promise<n
       if (meta.id === excludeId) continue;
       await fs.rm(path.join(sessionsDir(), meta.id), { recursive: true, force: true });
       removed += 1;
+    }
+    if ((await SessionStore.list(cwd)).length === 0) {
+      await removeTreeRepo(cwd);
     }
     return removed;
   }
@@ -31,5 +41,7 @@ export async function clearSessions(cwd?: string, excludeId?: string): Promise<n
     await fs.rm(path.join(sessionsDir(), entry), { recursive: true, force: true });
     removed += 1;
   }
+  const survivors = await SessionStore.list();
+  await pruneTreeReposExcept(survivors.map((meta) => meta.cwd));
   return removed;
 }

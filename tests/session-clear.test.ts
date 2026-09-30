@@ -2,9 +2,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { sessionsDir } from "../src/config/paths";
+import { gitTreesDir, sessionsDir } from "../src/config/paths";
 import { clearSessions } from "../src/session/clear";
 import { SessionStore } from "../src/session/store";
+import { treeRepoDir } from "../src/snapshot/git-tree";
 
 let home: string;
 
@@ -70,5 +71,43 @@ describe("clearSessions", () => {
   it("returns 0 when the sessions directory does not exist", async () => {
     expect(await clearSessions()).toBe(0);
     expect(await clearSessions("/work/here")).toBe(0);
+  });
+
+  it("removes the project's git-tree repo once its last session is gone", async () => {
+    const here = await makeSession("/work/here");
+    const there = await makeSession("/work/there");
+    fs.mkdirSync(treeRepoDir("/work/here"), { recursive: true });
+    fs.mkdirSync(treeRepoDir("/work/there"), { recursive: true });
+
+    await clearSessions("/work/here");
+
+    expect(fs.existsSync(treeRepoDir("/work/here"))).toBe(false);
+    expect(fs.existsSync(treeRepoDir("/work/there"))).toBe(true);
+    expect(fs.existsSync(there.dir)).toBe(true);
+  });
+
+  it("keeps the git-tree repo while the project still has the excluded live session", async () => {
+    const live = await makeSession("/work/here");
+    await makeSession("/work/here");
+    fs.mkdirSync(treeRepoDir("/work/here"), { recursive: true });
+
+    await clearSessions("/work/here", live.id);
+
+    expect(fs.existsSync(treeRepoDir("/work/here"))).toBe(true);
+  });
+
+  it("prunes every orphaned git-tree repo on a full clear", async () => {
+    const a = await makeSession("/work/a");
+    const live = await makeSession("/work/live");
+    fs.mkdirSync(treeRepoDir("/work/a"), { recursive: true });
+    fs.mkdirSync(treeRepoDir("/work/live"), { recursive: true });
+    fs.mkdirSync(path.join(gitTreesDir(), "stale-no-session"), { recursive: true });
+
+    await clearSessions(undefined, live.id);
+
+    expect(fs.existsSync(a.dir)).toBe(false);
+    expect(fs.existsSync(treeRepoDir("/work/a"))).toBe(false);
+    expect(fs.existsSync(path.join(gitTreesDir(), "stale-no-session"))).toBe(false);
+    expect(fs.existsSync(treeRepoDir("/work/live"))).toBe(true);
   });
 });

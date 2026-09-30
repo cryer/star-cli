@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { gitTreesDir } from "../config/paths";
@@ -98,6 +98,42 @@ export function resetGitTreeCaches(): void {
 export function treeRepoDir(cwd: string): string {
   const key = Buffer.from(path.resolve(cwd), "utf8").toString("base64url");
   return path.join(gitTreesDir(), key);
+}
+
+// Removes a project's internal snapshot repo. Called when the project's last
+// session is cleared: the captured trees only make sense as /undo//redo
+// targets for session turns, and with no session left they are unreachable
+// disk usage. In-memory bookkeeping goes too, or a later session in the same
+// process would trust a failure cache / gc counter for a repo that no longer
+// exists.
+export async function removeTreeRepo(cwd: string): Promise<void> {
+  const dir = treeRepoDir(cwd);
+  trackFailureUntil.delete(path.resolve(cwd));
+  trackCounts.delete(dir);
+  scrubbedRepos.delete(dir);
+  await rm(dir, { recursive: true, force: true }).catch(() => {});
+}
+
+// Deletes every tree repo whose owning project has no surviving session.
+// remainingCwds are the cwd values of the sessions still on disk; repos are
+// keyed by resolved path (see treeRepoDir), so a basename compare keeps
+// exactly those.
+export async function pruneTreeReposExcept(remainingCwds: Iterable<string>): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await readdir(gitTreesDir());
+  } catch {
+    return;
+  }
+  const keep = new Set<string>();
+  for (const cwd of remainingCwds) keep.add(path.basename(treeRepoDir(cwd)));
+  await Promise.all(
+    entries
+      .filter((entry) => !keep.has(entry))
+      .map((entry) =>
+        rm(path.join(gitTreesDir(), entry), { recursive: true, force: true }).catch(() => {}),
+      ),
+  );
 }
 
 // Snapshotting the home directory or a filesystem root would track an entire
