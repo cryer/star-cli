@@ -720,6 +720,15 @@ export class AgentLoop {
       // offending images are stripped from the history and the request resent.
       let oversizedImagesStripped = false;
 
+      // Whitespace-only text counts as NO output: buffering relays often
+      // stream one leading space delta the moment the request lands, then go
+      // silent until the whole response is ready. If the idle watchdog cuts
+      // such a stream, treating the space as content would skip the entire
+      // retry budget and persist a junk " " reply (which then lures the
+      // auto-continue nudges). Classifying it as empty routes it into the
+      // retry path with its growing timeout windows instead.
+      const hasOutput = () => text.trim().length > 0 || toolCalls.length > 0;
+
       for (let attempt = 0; ; attempt++) {
         text = "";
         toolCalls.length = 0;
@@ -769,7 +778,7 @@ export class AgentLoop {
           await this.runStopHooks("aborted");
           return;
         }
-        if (!failure && (text.length > 0 || toolCalls.length > 0)) break;
+        if (!failure && hasOutput()) break;
         if (failure && !oversizedImagesStripped && isOversizedImageError(failure)) {
           oversizedImagesStripped = true;
           const removed = await this.stripOversizedImages();
@@ -796,8 +805,7 @@ export class AgentLoop {
         // the history.
         if (
           !failure &&
-          text.length === 0 &&
-          toolCalls.length === 0 &&
+          !hasOutput() &&
           attempt >= 1 &&
           (isFilteredEmptyFinish(lastFinishReason) ||
             sawReasoning ||
@@ -833,7 +841,7 @@ export class AgentLoop {
         await this.runStopHooks("error");
         return;
       }
-      if (text.length === 0 && toolCalls.length === 0) {
+      if (!hasOutput()) {
         // Steering beats repeating: a nudge changes the model's input, which
         // breaks a deterministic empty reply where an identical resend would
         // not. Shares the auto-continue budget, so a model that keeps

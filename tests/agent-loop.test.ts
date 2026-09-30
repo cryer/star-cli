@@ -686,6 +686,36 @@ describe("AgentLoop", () => {
     expect(assistant?.content).toEqual([{ type: "text", text: "ok" }]);
   });
 
+  it("retries a whitespace-only reply instead of persisting it", async () => {
+    // Buffering relays stream one leading space delta the moment the request
+    // lands, then go silent until the whole response is ready. An
+    // idle-watchdog cutoff (or a bare stop) must not turn that space into a
+    // persisted junk reply — it is empty output and gets the retry budget.
+    const loop = makeLoop(
+      mockModel([
+        [
+          { type: "text-delta", textDelta: " " },
+          {
+            type: "finish",
+            finishReason: "stop",
+            usage: { promptTokens: 5, completionTokens: 0 },
+          },
+        ],
+        textRound("real reply"),
+      ]),
+    );
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    const retry = events.find((e) => e.type === "retry");
+    expect(retry).toBeDefined();
+    if (retry?.type === "retry") {
+      expect(retry.reason).toContain("empty response");
+    }
+    const assistant = loop.getMessages().find((m) => m.role === "assistant");
+    expect(assistant?.content).toEqual([{ type: "text", text: "real reply" }]);
+  });
+
   it("retries an empty response instead of silently ending the turn", async () => {
     const loop = makeLoop(mockModel([[], textRound("recovered")]));
 
