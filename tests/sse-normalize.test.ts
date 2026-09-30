@@ -51,6 +51,34 @@ describe("SseNormalizeTransform", () => {
       'data: {"a":1}\n\ndata: {"b":2}\n\n',
     );
   });
+
+  it("splits a JSON payload glued to the next event line without a newline", async () => {
+    // Observed on a relay fronting gpt-6-astra: a complete event followed
+    // directly by the next event's `event:` line inside one data payload.
+    const input = 'data: {"a":1}event: response.output_text.delta.\ndata: {"b":2}\n\n';
+    expect(await runTransform([input])).toBe(
+      'data: {"a":1}\n\nevent: response.output_text.delta.\ndata: {"b":2}\n\n',
+    );
+  });
+
+  it("splits JSON objects glued without any separator", async () => {
+    expect(await runTransform(['data: {"a":1}{"b":2}\n\n'])).toBe(
+      'data: {"a":1}\n\ndata: {"b":2}\n\n',
+    );
+  });
+
+  it("splits a JSON payload glued to a nested data: field", async () => {
+    expect(await runTransform(['data: {"a":1}data: {"b":2}\n\n'])).toBe(
+      'data: {"a":1}\n\ndata: {"b":2}\n\n',
+    );
+  });
+
+  it("does not split on brace-looking text inside JSON string values", async () => {
+    // The glue marker '}event:' inside a string value must not end the
+    // object — only string-aware brace counting gets this right.
+    const input = 'data: {"a":"}event: fake"}\n\ndata: [DONE]\n\n';
+    expect(await runTransform([input])).toBe(input);
+  });
 });
 
 describe("createSseNormalizingFetch", () => {
