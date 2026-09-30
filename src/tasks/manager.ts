@@ -55,6 +55,9 @@ export class TaskManager extends EventEmitter {
     const child = spawn(spec.shell, spec.wrap(opts.command), {
       cwd: opts.cwd,
       windowsHide: true,
+      // No stdin: background commands that read it would hang until the
+      // (much longer) task timeout; give them EOF immediately.
+      stdio: ["ignore", "pipe", "pipe"],
       // POSIX: the child leads its own process group so killTree can SIGKILL
       // the whole tree with a negative pid (Windows uses taskkill /t).
       detached: process.platform !== "win32",

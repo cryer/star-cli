@@ -32,6 +32,16 @@ const schema = z.object({
   path: z.string().optional().describe("Directory to search, defaults to the working directory"),
 });
 
+// A ".." segment would walk above the requested root (the literal-prefix
+// optimization resolves it against the search root), escaping the cwd
+// boundary the permission gate enforces on the path argument.
+function hasParentSegment(pattern: string): boolean {
+  return pattern
+    .replace(/\\/g, "/")
+    .split("/")
+    .some((segment) => segment === "..");
+}
+
 export const globTool: Tool<typeof schema> = {
   name: "glob",
   description:
@@ -39,6 +49,12 @@ export const globTool: Tool<typeof schema> = {
   permission: "read",
   parameters: schema,
   async execute(args, ctx) {
+    if (hasParentSegment(args.pattern)) {
+      return {
+        content: `Refused glob pattern with '..' segment: ${args.pattern}`,
+        isError: true,
+      };
+    }
     const root = path.resolve(ctx.cwd, args.path ?? ".");
     const prefixSegments = literalDirPrefix(args.pattern);
     const walkRoot = prefixSegments.length > 0 ? path.join(root, ...prefixSegments) : root;

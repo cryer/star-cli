@@ -45,11 +45,19 @@ function resolveShellUncached(): ShellSpec {
       return { shell: sibling, wrap: (c) => ["-c", c], label: "bash" };
     }
   }
-  for (const candidate of [
-    "C:\\Program Files\\Git\\bin\\bash.exe",
-    "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
-    "D:\\Git\\bin\\bash.exe",
+  // Portable fallback: the standard Git for Windows install locations, built
+  // from the Program Files environment variables instead of hardcoded drives.
+  const seen = new Set<string>();
+  for (const root of [
+    process.env.ProgramFiles,
+    process.env["ProgramFiles(x86)"],
+    process.env.ProgramW6432,
   ]) {
+    if (!root) continue;
+    const candidate = path.join(root, "Git", "bin", "bash.exe");
+    const key = candidate.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
     if (existsSync(candidate)) {
       return { shell: candidate, wrap: (c) => ["-c", c], label: "bash" };
     }
@@ -172,6 +180,9 @@ export const bashTool: Tool<typeof schema> = {
         cwd: ctx.cwd,
         windowsHide: true,
         detached: process.platform !== "win32",
+        // No stdin: a command that reads it (cat, read, input()) must get
+        // EOF immediately instead of hanging until the timeout.
+        stdio: ["ignore", "pipe", "pipe"],
       });
       const output = new BoundedOutput();
       let settled = false;

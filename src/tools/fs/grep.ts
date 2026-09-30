@@ -1,4 +1,4 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { Tool } from "../types";
@@ -61,7 +61,10 @@ export const grepTool: Tool<typeof schema> = {
     try {
       const st = await stat(root);
       if (st.isFile()) {
-        if (isSensitivePath(root)) {
+        // Symlink targets are checked too: a link named notes.txt can point
+        // at a sensitive file whose resolved basename is on the blocklist.
+        const resolved = await realpath(root).catch(() => null);
+        if (isSensitivePath(root) || (resolved !== null && isSensitivePath(resolved))) {
           return {
             content: `Refused to grep sensitive file: ${args.path ?? "."}`,
             isError: true,

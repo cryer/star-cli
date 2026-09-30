@@ -10,6 +10,12 @@ import {
   pushSnapshot,
 } from "./snapshots";
 
+// Same heuristic as read_file: a NUL in the first 8KB marks a binary file.
+// edit_file writes back as UTF-8, so an ASCII old_string that happens to
+// match inside a binary file would corrupt it irreversibly (U+FFFD
+// replacement on undecodable bytes), and snapshots cannot restore it.
+const BINARY_PROBE_BYTES = 8192;
+
 const schema = z.object({
   path: z.string().describe("File path, absolute or relative to the working directory"),
   old_string: z.string().min(1).describe("Exact text to replace"),
@@ -23,7 +29,7 @@ const schema = z.object({
 export const editFileTool: Tool<typeof schema> = {
   name: "edit_file",
   description:
-    "Replace an exact string in a file. Fails if old_string is not found or matches multiple locations unless replace_all is set.",
+    "Replace an exact string in a file. Fails if old_string is not found or matches multiple locations unless replace_all is set. Refuses binary files and files over 5MB.",
   permission: "write",
   parameters: schema,
   async execute(args, ctx) {
@@ -31,8 +37,21 @@ export const editFileTool: Tool<typeof schema> = {
     let content: string;
     let readMtimeMs: number;
     try {
-      content = await readFile(filePath, "utf8");
-      readMtimeMs = (await stat(filePath)).mtimeMs;
+      const st = await stat(filePath);
+      // Past the snapshot content cap /undo keeps only metadata, so an edit
+      // would be unrecoverable — refuse instead of writing blind.
+      if (st.size > MAX_SNAPSHOT_CONTENT_BYTES) {
+        return {
+          content: `Refused to edit ${args.path}: file is ${st.size} bytes, over the 5MB limit (edits past it could not be restored by /undo)`,
+          isError: true,
+        };
+      }
+      readMtimeMs = st.mtimeMs;
+      const buf = await readFile(filePath);
+      if (buf.subarray(0, BINARY_PROBE_BYTES).includes(0)) {
+        return { content: `Refused to edit binary file: ${args.path}`, isError: true };
+      }
+      content = buf.toString("utf8");
     } catch (err) {
       return { content: `Failed to read ${args.path}: ${(err as Error).message}`, isError: true };
     }

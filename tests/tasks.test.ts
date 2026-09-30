@@ -116,6 +116,19 @@ describe("TaskManager", () => {
     expect(finished.status).toBe("timed_out");
   }, 15000);
 
+  it("closes stdin so stdin-reading tasks finish instead of hanging", async () => {
+    const manager = new TaskManager();
+    const started = manager.start({
+      command:
+        "node -e \"process.stdin.on('data',()=>{});process.stdin.on('end',()=>console.log('bg-stdin-eof'));process.stdin.resume()\"",
+      cwd,
+      timeoutSeconds: 30,
+    });
+    const finished = await waitForTerminal(manager, started.id);
+    expect(finished.status).toBe("completed");
+    expect(finished.output).toContain("bg-stdin-eof");
+  }, 15000);
+
   it("truncates output to the tail cap with a marker", async () => {
     const manager = new TaskManager();
     const started = manager.start({

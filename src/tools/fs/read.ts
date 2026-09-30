@@ -1,4 +1,4 @@
-import { open, stat } from "node:fs/promises";
+import { open, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { Tool } from "../types";
@@ -59,7 +59,11 @@ export const readFileTool: Tool<typeof schema> = {
   parameters: schema,
   async execute(args, ctx) {
     const filePath = path.resolve(ctx.cwd, args.path);
-    if (isSensitivePath(filePath)) {
+    // Check both the given path and its symlink target: a repo can plant a
+    // harmless-looking link (notes.txt -> ~/.ssh/id_rsa) whose resolved name
+    // is on the sensitive list. Unresolvable paths keep the raw-path check.
+    const resolvedPath = await realpath(filePath).catch(() => null);
+    if (isSensitivePath(filePath) || (resolvedPath !== null && isSensitivePath(resolvedPath))) {
       return { content: `Refused to read sensitive file: ${args.path}`, isError: true };
     }
     const st = await stat(filePath).catch(() => null);

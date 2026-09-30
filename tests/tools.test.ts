@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -114,6 +114,27 @@ describe("read_file", () => {
     expect(res.content).toBe("1\tone\n2\ttwo\n3\tthree");
   });
 
+  it("refuses a symlink whose resolved target is a sensitive file", async () => {
+    const outside = await mkdtemp(path.join(tmpdir(), "star-readlink-outside-"));
+    try {
+      await writeFile(path.join(outside, "id_rsa"), "PRIVATE KEY");
+      // A junction (dir symlink) inside the cwd pointing at the outside dir:
+      // the link's own name is harmless, the resolved basename is not.
+      await symlink(outside, path.join(dir, "notes-link"), "junction");
+      const res = await run("read_file", { path: "notes-link/id_rsa" });
+      expect(res.isError).toBe(true);
+      expect(res.content).toContain("sensitive");
+      // A benign file reached through the same link still reads fine.
+      await writeFile(path.join(outside, "public.txt"), "hello");
+      const ok = await run("read_file", { path: "notes-link/public.txt" });
+      expect(ok.isError).toBeUndefined();
+      expect(ok.content).toBe("1\thello");
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+      await rm(path.join(dir, "notes-link"), { force: true });
+    }
+  });
+
   it("refuses binary files", async () => {
     await writeFile(path.join(dir, "bin.dat"), Buffer.from([0x41, 0x00, 0x42]));
     const res = await run("read_file", { path: "bin.dat" });
@@ -213,6 +234,39 @@ describe("edit_file", () => {
     expect(res.isError).toBeUndefined();
     expect(await readFile(path.join(dir, "dollar.txt"), "utf8")).toBe(replacement);
   });
+
+  it("refuses binary files instead of corrupting them with a UTF-8 rewrite", async () => {
+    const bytes = Buffer.from([0x41, 0x00, 0x42, 0x43]);
+    await writeFile(path.join(dir, "bin-edit.dat"), bytes);
+    const res = await run("edit_file", { path: "bin-edit.dat", old_string: "A", new_string: "z" });
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain("binary");
+    expect(await readFile(path.join(dir, "bin-edit.dat"))).toEqual(bytes);
+  });
+
+  it("refuses files over the 5MB snapshot cap because /undo could not restore them", async () => {
+    await writeFile(path.join(dir, "huge-edit.txt"), Buffer.alloc(5 * 1024 * 1024 + 1, 0x61));
+    const res = await run("edit_file", {
+      path: "huge-edit.txt",
+      old_string: "aa",
+      new_string: "bb",
+    });
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain("5MB");
+    expect(res.content).toContain("Refused");
+  });
+
+  it("still edits a file just under the cap", async () => {
+    const body = `marker${"a".repeat(1024)}`;
+    await writeFile(path.join(dir, "ok-edit.txt"), body);
+    const res = await run("edit_file", {
+      path: "ok-edit.txt",
+      old_string: "marker",
+      new_string: "done",
+    });
+    expect(res.isError).toBeUndefined();
+    expect((await readFile(path.join(dir, "ok-edit.txt"), "utf8")).startsWith("done")).toBe(true);
+  });
 });
 
 describe("glob", () => {
@@ -281,6 +335,14 @@ describe("glob", () => {
     const missing = await run("glob", { pattern: "no-such-dir/deeper/*.ts" });
     expect(missing.content).toContain("No files matched");
   });
+
+  it("refuses patterns with '..' segments that would escape the search root", async () => {
+    for (const pattern of ["../../**/*.ts", "../*.ts", "src/../../**/*.ts", "..\\..\\*.ts"]) {
+      const res = await run("glob", { pattern });
+      expect(res.isError).toBe(true);
+      expect(res.content).toContain("'..' segment");
+    }
+  });
 });
 
 describe("grep", () => {
@@ -320,6 +382,20 @@ describe("grep", () => {
     expect(refused.content).toContain("sensitive");
     const walked = await run("grep", { pattern: "GREPSECRET" });
     expect(walked.content).toContain("No matches");
+  });
+
+  it("refuses a single-file target whose symlink target is sensitive", async () => {
+    const outside = await mkdtemp(path.join(tmpdir(), "star-greplink-outside-"));
+    try {
+      await writeFile(path.join(outside, ".env"), "LINKSECRET=1");
+      await symlink(outside, path.join(dir, "grep-link"), "junction");
+      const res = await run("grep", { pattern: "LINKSECRET", path: "grep-link/.env" });
+      expect(res.isError).toBe(true);
+      expect(res.content).toContain("sensitive");
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+      await rm(path.join(dir, "grep-link"), { force: true });
+    }
   });
 
   it("truncates long matching lines to 500 characters", async () => {
@@ -372,6 +448,16 @@ describe("bash", () => {
     });
     expect(res.isError).toBe(true);
     expect(res.content).toContain("timed out");
+  }, 15000);
+
+  it("gives stdin-reading commands immediate EOF instead of hanging", async () => {
+    const res = await run("bash", {
+      command:
+        "node -e \"process.stdin.on('data',()=>{});process.stdin.on('end',()=>console.log('stdin-eof'));process.stdin.resume()\"",
+      timeout: 10,
+    });
+    expect(res.isError).toBeUndefined();
+    expect(res.content).toContain("stdin-eof");
   }, 15000);
 
   it("bounds very large output with a truncation marker", async () => {
