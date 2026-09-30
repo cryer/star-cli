@@ -46,59 +46,81 @@ star -p "hi"             # non-interactive print mode
 
 ## 配置
 
-配置文件：`~/.star-cli/config.toml`（项目级覆盖：当前目录下的 `.star/config.toml`；CLI 参数优先于两者）。
+配置文件：`~/.star-cli/config.toml`（可用环境变量 `STAR_HOME` 把数据目录改为 `~/.star-cli` 以外的位置；项目级覆盖：当前目录下的 `.star/config.toml`，经过沙箱过滤只保留安全键；CLI 参数优先于两者）。
 
 ```toml
-defaultModel = "gpt"
-permissionMode = "ask"   # ask | auto | readonly | yolo | plan
-contextMaxTokens = 100000
+defaultModel = "gpt"              # 默认使用的 [[models]] 块名称
+permissionMode = "ask"            # ask | auto | readonly | yolo | plan
+contextMaxTokens = 100000         # 上下文窗口（token 数，下方可按模型覆盖）
+# compactThresholdTokens = 80000  # 可选的自动压缩触发阈值（token 数）；默认为上下文窗口本身，
+                                  # 且会被钳制到窗口以内（仅顶层键——没有按模型覆盖）。
+                                  # /compact 无视此阈值，总是执行压缩。
 # 每回合在进度检查点之间允许的最大模型往返（"step"）数——一个 step 是
 # 一次回复加上它请求的所有工具调用；重试和 auto-continue nudge 不占 step。
 # 到达上限时若工具仍在执行，会发提示并重置额度而不是终止回合；0 表示完全不限。
 maxSteps = 100
-# compactThresholdTokens = 80000   # optional auto-compaction trigger in tokens; defaults to the
-                                  # context window. /compact always compacts, regardless of this.
-contextCompaction = "summary"   # summary | truncate — how over-budget history is compacted
-# Seconds with no stream output before a stalled response is ended gracefully
-# (some relays never close the stream). The first token gets a fixed 120s allowance.
-streamIdleTimeoutSec = 20
-# sessionBudgetUsd = 5          # optional per-session cost cap in USD; unset = no cap
-notifyBell = true              # ring the terminal bell when a long turn finishes (REPL only)
-notifyBellThresholdSec = 10    # turns shorter than this stay silent
+contextCompaction = "summary"     # summary | truncate —— 历史超出预算时的压缩方式
+streamMaxRetries = 5              # 单次模型请求在瞬时失败（网络错误、429/5xx、idle 截断、
+                                  # 空回复）时的额外重试次数；0 表示禁用
+streamIdleTimeoutSec = 20         # 流没有任何输出的秒数，超过后将停滞的响应优雅结束
+                                  #（有些中转站从不关闭流）
+streamFirstChunkTimeoutSec = 300  # 等待第一个内容分片的秒数——慢速思考模型端点在接受请求后
+                                  # 可能静默数分钟
+maxAutoContinues = 2              # 连续无产出的纯文本回复在被 nudge 多少次后交还回合；
+                                  # 工具调用会重置计数；0 表示禁用
+doomLoopThreshold = 3             # 连续相同工具调用达到此次数后，循环拒绝执行该重复调用
+                                  # 并要求模型换思路；0 表示禁用
+gitSnapshots = true               # 每回合用内部 git 仓库（位于你的 .git 之外）跟踪整个工作树，
+                                  # 使 /undo 和 /redo 也能覆盖 bash 造成的改动
+# sessionBudgetUsd = 5            # 可选的每会话成本上限（美元）；不设置 = 无上限
+notifyBell = true                 # 长回合结束时响终端铃（仅 REPL）
+notifyBellThresholdSec = 10       # 短于此耗时的回合不响铃
 
 [permissions]
-# persistent allow-rules, written automatically when you pick "a" (always) on a permission prompt
-allow = ["bash(npm test)", "read_file"]   # <tool> or <tool(<pattern>)>, * is a glob wildcard
-# persistent deny-rules — checked after the hard safety rules; they beat auto mode
-# and allow-rules (yolo still bypasses everything)
+# 持久 allow 规则——在权限提示上选择 "a"（始终允许）时自动写入。
+# 语法：<tool> 或 <tool(<pattern>)>，* 是 glob 通配符。bash 规则按命令分段匹配
+#（命令行先按 shell 分隔符切分）：allow 规则必须匹配每一段，且命令中含有命令替换
+# 或文件重定向时完全不会自动放行。
+allow = ["bash(npm test)", "read_file"]
+# 持久 deny 规则——在硬性安全规则之后检查；deny 命中任意一段即优先于 auto 模式和
+# allow 规则（yolo 仍然绕过一切）
 deny = ["bash(rm -rf *)"]
 
 [[providers]]
 name = "openai"
-protocol = "openai-compatible"
+protocol = "openai-compatible"    # openai-compatible | anthropic | openai-responses
 baseURL = "https://api.openai.com/v1"
-apiKeyEnv = "OPENAI_API_KEY"
-# protocol = "openai-responses"  # for relays exposing only /v1/responses
+apiKeyEnv = "OPENAI_API_KEY"      # 推荐：存放密钥的环境变量名——密钥本体放在
+                                  # ~/.star-cli/.env（由 /connect 写入），绝不出现在本文件
+# apiKey = "sk-..."               # 不用 apiKeyEnv 而直接内联密钥（不推荐）
+# headers = { "X-Title" = "star-cli" }   # 随每次请求发送的额外 HTTP 头
+# protocol = "openai-responses"   # 适用于只暴露 /v1/responses 的中转站
 
 [[models]]
-name = "gpt"
-provider = "openai"
-model = "gpt-4o"
-# optional per-model context window — overrides the top-level contextMaxTokens
-# for compaction and the ctx % in the status bar
-# contextMaxTokens = 272000
-# 可选的推理强度（思考模型用）——每次请求原样以 reasoning_effort 发送。
-# 档位命名因服务商/模型而异（常见 low/medium/high，部分还有 minimal/max 等），
-# 因此接受任意字符串，由服务端校验。不设置 = 服务端默认。
-# /model 选完模型后也会接着让你选择推理强度。
-# reasoningEffort = "high"
-# optional per-model pricing in USD per 1M tokens — enables the $ estimate in
-# /cost and /usage. promptPrice prices input tokens (system prompt, history,
-# @file contents, tool results — resent every turn, so the bulk of usage);
-# completionPrice prices output tokens (the model's replies and tool calls —
-# less volume, usually the pricier rate). BOTH fields are required together.
+name = "gpt"                      # 被 defaultModel 和 -m 引用
+provider = "openai"               # 某个 [[providers]] 块的 name
+model = "gpt-4o"                  # 发送给 API 的模型 id
+# maxTokens = 8192                # 单次回复的生成 token 上限
+# contextMaxTokens = 272000       # 按模型的上下文窗口——覆盖顶层 contextMaxTokens，
+                                  # 用于压缩和状态栏的 ctx 百分比
+# temperature = 1                 # 采样温度，随每次请求发送。不设置 = 应用 AI SDK 默认值
+                                  #（ai@4 会发送 0——它不会省略该字段），所以只接受某个固定值的
+                                  # 端点（kimi-for-coding/k3 只接受 1）必须在此显式设置。
+# reasoningEffort = "high"        # 思考模型的推理强度，每次请求原样以 reasoning_effort 发送。
+                                  # 档位命名因服务商/模型而异（常见 low/medium/high，部分还有
+                                  # minimal/max 等），因此接受任意字符串，由服务端校验。
+                                  # 不设置 = 服务端默认。anthropic 协议下忽略。
+                                  # /model 选完模型后也会接着让你选择推理强度。
+# streamIdleTimeoutSec = 60       # 按模型覆盖全局的流看门狗超时
+# streamFirstChunkTimeoutSec = 600
+# 可选的按模型定价（美元/1M token）——启用 /cost 和 /usage 中的美元估算。
+# promptPrice 为输入 token 定价（系统提示词、历史、@file 内容、工具结果——每回合重发，
+# 是用量的大头）；completionPrice 为输出 token 定价（模型的回复和工具调用——量较少，
+# 通常单价更贵）。两个字段必须同时设置。
 promptPrice = 2.5
 completionPrice = 10
+# cacheReadPrice = 0.25           # 可选的缓存读取输入 token 价格；不设置 = OpenAI 风格的缓存
+                                  # token 按 promptPrice 计费，Anthropic 风格的缓存读取不计费
 
 [[providers]]
 name = "claude"
@@ -113,14 +135,45 @@ model = "claude-sonnet-4-20250514"
 
 [[hooks]]
 event = "PostToolUse"                  # PreToolUse | PostToolUse | Stop
-matcher = "edit_file|write_file"       # optional regex on the tool name; matches all tools when omitted
-command = "biome check --write ."
-# timeoutSec = 30                      # optional per-hook timeout
+matcher = "edit_file|write_file"       # 可选的工具名正则；省略时匹配所有工具
+command = "biome check --write ."      # PreToolUse 以退出码 2 退出会阻止该工具
+                                       #（stderr 成为工具结果）；Stop 在每回合结束时触发
+# timeoutSec = 30                      # 可选的单钩子超时（默认 30；超时 = 放行并警告）
 ```
 
 API 密钥优先从环境变量解析（`apiKeyEnv`），其次是配置文件中的 `apiKey` 字段。启动时 Star CLI 还会把 `~/.star-cli/.env`（dotenv 风格的 `KEY=VALUE` 行）加载进环境变量，且不会覆盖已存在的变量——`/connect` 收集的密钥就存放在这里，因此 `config.toml` 只引用变量名，永远不会包含密钥本身。
 
-配置服务商最快的方式是 REPL 内的 `/connect` 向导：选择预设（OpenAI、Anthropic、Kimi/Moonshot、DeepSeek）或自定义端点，粘贴 API 密钥（输入时掩码显示），命名一个模型，它会把 `[[providers]]`/`[[models]]` 块追加到 `config.toml`（保留已有内容与注释），把密钥写入 `~/.star-cli/.env`（以 `STAR_API_KEY_<NAME>` 为名，在支持的平台上文件权限为 600），并可选择将新模型设为默认——全程无需重启。
+配置服务商最快的方式是 REPL 内的 `/connect` 向导：选择预设（OpenAI、Anthropic、Kimi/Moonshot、DeepSeek）或自定义端点，粘贴 API 密钥（输入时掩码显示），命名一个模型，它会把 `[[providers]]`/`[[models]]` 块追加到 `config.toml`（保留已有内容与注释），把密钥写入 `~/.star-cli/.env`（以 `STAR_API_KEY_<NAME>` 为名，在支持的平台上文件权限为 600），并可选择将新模型设为默认——全程无需重启。写入的 `[[models]]` 块默认带 `contextMaxTokens = 128000` 和 `temperature = 1`（稳妥的默认值——kimi-for-coding/k3 这类 coding 模型拒绝任何其他取值；仅在模型允许时才调低它），另有占位的零价格——可按需改成真实的限额与费率。
+
+### 使用中转站（relay）
+
+第三方中转站通常前置某种标准线路格式：中转支持 Responses API（`/responses`）时把 `protocol` 设为 `openai-responses`，否则用 `openai-compatible`（`/chat/completions`）。
+
+很多中转站会把整段生成缓冲起来再一次性下发——几十秒到几分钟可能没有任何 SSE 分片，看起来像流已死亡。Star CLI 会对每次请求的原始响应字节做时间戳检测：只要还有字节在流动（包括 SDK 自己会吞掉的 SSE 心跳注释），流看门狗就会延长等待而不是中途掐断正在缓冲生成的中转站，并以 10 分钟的总分片静默上限兜底，避免只剩心跳的僵尸连接挂住整个回合。如果某个中转站仍频繁触发 idle 超时，可以调大该模型自己的看门狗：
+
+```toml
+[[providers]]
+name = "kimi"
+protocol = "openai-responses"
+baseURL = "https://api.kimi.com/coding/v1"   # Kimi 官方 coding 端点
+apiKeyEnv = "STAR_API_KEY_KIMI"
+
+[[models]]
+name = "kimi"
+provider = "kimi"
+model = "kimi-for-coding"
+temperature = 1        # 此处必须设置——该端点拒绝任何其他取值
+contextMaxTokens = 128000
+# 中转站长时间缓冲整段生成时可调大：
+# streamIdleTimeoutSec = 60        # 默认 20
+# streamFirstChunkTimeoutSec = 600 # 默认 300
+```
+
+### 环境变量
+
+- `STAR_HOME` —— 把数据目录从 `~/.star-cli` 改为其他位置（配置、会话、`.env`、记忆、调试日志）。
+- `STAR_DEBUG` —— 任意非空值即启用流诊断日志，追加写入 `~/.star-cli/debug.log`，每行一个 JSON 对象。
+- `STAR_NO_NOTIFY=1` —— 不改配置即可禁用终端响铃。
 
 
 ## CLI 参数

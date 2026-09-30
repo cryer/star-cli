@@ -46,60 +46,84 @@ Without `npm link` you can run the bundle directly: `node dist/main.js` (re-run 
 
 ## Configuration
 
-Config file: `~/.star-cli/config.toml` (project-level override: `.star/config.toml` in cwd; CLI flags win over both).
+Config file: `~/.star-cli/config.toml` (set the `STAR_HOME` environment variable to use a different home than `~/.star-cli`; project-level override: `.star/config.toml` in cwd, sandboxed to safe keys only; CLI flags win over both).
 
 ```toml
-defaultModel = "gpt"
-permissionMode = "ask"   # ask | auto | readonly | yolo | plan
-contextMaxTokens = 100000
+defaultModel = "gpt"              # name of the [[models]] block used by default
+permissionMode = "ask"            # ask | auto | readonly | yolo | plan
+contextMaxTokens = 100000         # context window in tokens (per-model override below)
+# compactThresholdTokens = 80000  # optional auto-compaction trigger in tokens; defaults to the
+                                  # context window and is clamped to it (top-level only — there is
+                                  # no per-model override). /compact always compacts, regardless.
 # Max model round-trips ("steps") per turn between progress checkpoints — one
 # step is a reply plus the tool calls it asked for; retries and auto-continue
 # nudges don't count. Reaching the cap while tools still execute resets it
 # with a notice instead of stopping the turn; 0 disables the cap entirely.
 maxSteps = 100
-# compactThresholdTokens = 80000   # optional auto-compaction trigger in tokens; defaults to the
-                                  # context window. /compact always compacts, regardless of this.
-contextCompaction = "summary"   # summary | truncate — how over-budget history is compacted
-# Seconds with no stream output before a stalled response is ended gracefully
-# (some relays never close the stream). The first token gets a fixed 120s allowance.
-streamIdleTimeoutSec = 20
-# sessionBudgetUsd = 5          # optional per-session cost cap in USD; unset = no cap
-notifyBell = true              # ring the terminal bell when a long turn finishes (REPL only)
-notifyBellThresholdSec = 10    # turns shorter than this stay silent
+contextCompaction = "summary"     # summary | truncate — how over-budget history is compacted
+streamMaxRetries = 5              # extra attempts per model request on transient failures
+                                  # (network error, 429/5xx, idle cutoff, empty reply); 0 disables
+streamIdleTimeoutSec = 20         # seconds with no stream output before a stalled response is
+                                  # ended gracefully (some relays never close the stream)
+streamFirstChunkTimeoutSec = 300  # seconds to wait for the very first content part — slow
+                                  # thinking-model endpoints can stay silent for minutes
+maxAutoContinues = 2              # nudges for consecutive unproductive text-only replies before
+                                  # the turn is handed back; tool calls reset the count; 0 disables
+doomLoopThreshold = 3             # consecutive identical tool calls before the loop refuses the
+                                  # repeat and tells the model to change approach; 0 disables
+gitSnapshots = true               # track the whole working tree each turn (internal repo outside
+                                  # your .git) so /undo and /redo also cover bash-made changes
+# sessionBudgetUsd = 5            # optional per-session cost cap in USD; unset = no cap
+notifyBell = true                 # ring the terminal bell when a long turn finishes (REPL only)
+notifyBellThresholdSec = 10       # turns shorter than this stay silent
 
 [permissions]
-# persistent allow-rules, written automatically when you pick "a" (always) on a permission prompt
-allow = ["bash(npm test)", "read_file"]   # <tool> or <tool(<pattern>)>, * is a glob wildcard
-# persistent deny-rules — checked after the hard safety rules; they beat auto mode
-# and allow-rules (yolo still bypasses everything)
+# persistent allow-rules, written automatically when you pick "a" (always) on a permission prompt.
+# Syntax: <tool> or <tool(<pattern>)>, * is a glob wildcard. A bash rule is matched per command
+# segment (the command line is split on shell separators): an allow rule must match EVERY segment,
+# and any command substitution or file redirection disables auto-allow entirely.
+allow = ["bash(npm test)", "read_file"]
+# persistent deny-rules — checked after the hard safety rules; a deny matching ANY segment beats
+# auto mode and allow-rules (yolo still bypasses everything)
 deny = ["bash(rm -rf *)"]
 
 [[providers]]
 name = "openai"
-protocol = "openai-compatible"
+protocol = "openai-compatible"    # openai-compatible | anthropic | openai-responses
 baseURL = "https://api.openai.com/v1"
-apiKeyEnv = "OPENAI_API_KEY"
-# protocol = "openai-responses"  # for relays exposing only /v1/responses
+apiKeyEnv = "OPENAI_API_KEY"      # recommended: name of the env var holding the key — keys live in
+                                  # ~/.star-cli/.env (written by /connect), never in this file
+# apiKey = "sk-..."               # inline key instead of apiKeyEnv (not recommended)
+# headers = { "X-Title" = "star-cli" }   # extra HTTP headers sent with every request
+# protocol = "openai-responses"   # for relays exposing only /v1/responses
 
 [[models]]
-name = "gpt"
-provider = "openai"
-model = "gpt-4o"
-# optional per-model context window — overrides the top-level contextMaxTokens
-# for compaction and the ctx % in the status bar
-# contextMaxTokens = 272000
-# optional reasoning intensity for thinking models — forwarded verbatim as
-# reasoning_effort on every request. Level naming varies by provider
-# (low/medium/high are common; some add minimal/max...). Unset = server
-# default. The /model picker also offers these levels after a model pick.
-# reasoningEffort = "high"
-# optional per-model pricing in USD per 1M tokens — enables the $ estimate in
-# /cost and /usage. promptPrice prices input tokens (system prompt, history,
-# @file contents, tool results — resent every turn, so the bulk of usage);
-# completionPrice prices output tokens (the model's replies and tool calls —
-# less volume, usually the pricier rate). BOTH fields are required together.
+name = "gpt"                      # referenced by defaultModel and -m
+provider = "openai"               # name of a [[providers]] block
+model = "gpt-4o"                  # model id sent to the API
+# maxTokens = 8192                # cap on generated tokens per reply
+# contextMaxTokens = 272000       # per-model context window — overrides the top-level
+                                  # contextMaxTokens for compaction and the ctx % in the status bar
+# temperature = 1                 # sampling temperature forwarded on every request. Unset = the AI
+                                  # SDK default applies (ai@4 sends 0 — it does NOT omit the field),
+                                  # so endpoints that mandate one explicit value (kimi-for-coding/k3
+                                  # accept only 1) MUST set it here.
+# reasoningEffort = "high"        # reasoning intensity for thinking models, forwarded verbatim as
+                                  # reasoning_effort on every request. Level naming varies by
+                                  # provider (low/medium/high are common; some add minimal/max...).
+                                  # Unset = server default. Ignored for anthropic. The /model
+                                  # picker also offers these levels after a model pick.
+# streamIdleTimeoutSec = 60       # per-model overrides of the global stream watchdog timeouts
+# streamFirstChunkTimeoutSec = 600
+# optional per-model pricing in USD per 1M tokens — enables the $ estimate in /cost and /usage.
+# promptPrice prices input tokens (system prompt, history, @file contents, tool results — resent
+# every turn, so the bulk of usage); completionPrice prices output tokens (the model's replies and
+# tool calls — less volume, usually the pricier rate). BOTH fields are required together.
 promptPrice = 2.5
 completionPrice = 10
+# cacheReadPrice = 0.25           # optional price for cache-read prompt tokens; unset = OpenAI-style
+                                  # cached tokens bill at promptPrice and Anthropic-style cache
+                                  # reads are not billed
 
 [[providers]]
 name = "claude"
@@ -115,13 +139,45 @@ model = "claude-sonnet-4-20250514"
 [[hooks]]
 event = "PostToolUse"                  # PreToolUse | PostToolUse | Stop
 matcher = "edit_file|write_file"       # optional regex on the tool name; matches all tools when omitted
-command = "biome check --write ."
-# timeoutSec = 30                      # optional per-hook timeout
+command = "biome check --write ."      # PreToolUse exiting with code 2 blocks the tool (stderr
+                                       # becomes its result); Stop fires on every turn end
+# timeoutSec = 30                      # optional per-hook timeout (default 30; on timeout the hook
+                                       # is allowed through with a warning)
 ```
 
 API keys resolve from the environment variable first (`apiKeyEnv`), then the `apiKey` field in the config file. On startup Star CLI also loads `~/.star-cli/.env` (dotenv-style `KEY=VALUE` lines) into the environment without overwriting variables that are already set — this is where `/connect` stores the keys it collects, so `config.toml` only ever references the variable name, never the key itself.
 
-The fastest way to set up a provider is the `/connect` wizard inside the REPL: pick a preset (OpenAI, Anthropic, Kimi/Moonshot, DeepSeek) or a custom endpoint, paste the API key (masked while typing), name a model, and it appends the `[[providers]]`/`[[models]]` blocks to `config.toml` (existing content and comments preserved), writes the key to `~/.star-cli/.env` (as `STAR_API_KEY_<NAME>`, file mode 600 where the platform honors it), and optionally makes the new model the default — all without restarting.
+The fastest way to set up a provider is the `/connect` wizard inside the REPL: pick a preset (OpenAI, Anthropic, Kimi/Moonshot, DeepSeek) or a custom endpoint, paste the API key (masked while typing), name a model, and it appends the `[[providers]]`/`[[models]]` blocks to `config.toml` (existing content and comments preserved), writes the key to `~/.star-cli/.env` (as `STAR_API_KEY_<NAME>`, file mode 600 where the platform honors it), and optionally makes the new model the default — all without restarting. The written `[[models]]` block comes with `contextMaxTokens = 128000` and `temperature = 1` (a safe default — coding models like kimi-for-coding/k3 reject any other value; lower it only for models that allow it) plus zero placeholder prices — edit all three to the real limits and rates as needed.
+
+### Using a relay (中转站)
+
+Third-party relays usually front one of the standard wire formats: set `protocol` to `openai-responses` when the relay exposes the Responses API (`/responses`), otherwise `openai-compatible` (`/chat/completions`).
+
+Many relays buffer a whole generation before flushing — tens of seconds to minutes can pass without a single SSE chunk, which looks like a dead stream. Star CLI timestamps the raw response bytes of every request: as long as bytes keep flowing (including SSE heartbeat comments the SDK itself swallows) the stream watchdog is extended instead of cutting the relay off mid-generation, bounded by a 10-minute cap on total part silence so a heartbeat-only zombie can't hang a turn. If a relay still triggers frequent idle timeouts, raise the model's own watchdogs:
+
+```toml
+[[providers]]
+name = "kimi"
+protocol = "openai-responses"
+baseURL = "https://api.kimi.com/coding/v1"   # official Kimi coding endpoint
+apiKeyEnv = "STAR_API_KEY_KIMI"
+
+[[models]]
+name = "kimi"
+provider = "kimi"
+model = "kimi-for-coding"
+temperature = 1        # mandatory here — the endpoint rejects any other value
+contextMaxTokens = 128000
+# raise these when the relay buffers long generations:
+# streamIdleTimeoutSec = 60        # default 20
+# streamFirstChunkTimeoutSec = 600 # default 300
+```
+
+### Environment variables
+
+- `STAR_HOME` — overrides `~/.star-cli` as the data home (config, sessions, `.env`, memory, debug log).
+- `STAR_DEBUG` — any non-empty value enables stream diagnostics appended to `~/.star-cli/debug.log`, one JSON object per line.
+- `STAR_NO_NOTIFY=1` — disables the terminal bell without touching the config.
 
 
 ## CLI flags
