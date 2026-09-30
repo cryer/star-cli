@@ -37,6 +37,11 @@ export const ModelConfigSchema = z.object({
   // "invalid temperature: only 1 is allowed") — set it here. No upper
   // bound: ranges vary by provider and the server validates.
   temperature: z.number().min(0).optional(),
+  // Per-model overrides of the top-level stream watchdog timeouts (unset =
+  // the global values apply). Raise streamIdleTimeoutSec for relays that
+  // buffer long generations and stall mid-stream between flushes.
+  streamIdleTimeoutSec: z.number().positive().optional(),
+  streamFirstChunkTimeoutSec: z.number().positive().optional(),
   // Cost estimation needs BOTH prices (USD per 1M tokens); with only one set
   // the model is treated as unpriced.
   promptPrice: z.number().nonnegative().optional(),

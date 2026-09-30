@@ -34,6 +34,7 @@ async function createLoop(
 ) {
   const model = createModel(config, modelName);
   const registry = createDefaultRegistry();
+  const modelConfig = resolveModelConfig(config, modelName);
   return new AgentLoop({
     model,
     registry,
@@ -43,7 +44,9 @@ async function createLoop(
     sessionStore,
     contextMaxTokens: contextWindowTokens(config, modelName),
     providerMetadata: reasoningEffortMetadata(config, modelName),
-    temperature: resolveModelConfig(config, modelName).temperature,
+    temperature: modelConfig.temperature,
+    streamIdleTimeoutSec: modelConfig.streamIdleTimeoutSec,
+    streamFirstChunkTimeoutSec: modelConfig.streamFirstChunkTimeoutSec,
   });
 }
 

@@ -1,6 +1,8 @@
 import { MockLanguageModelV1 } from "ai/test";
 import { describe, expect, it } from "vitest";
+import { ConfigSchema } from "../src/config/schema";
 import { registerStreamActivity, streamActivity, wrapFetchWithActivity } from "../src/llm/activity";
+import { resolveModelConfig } from "../src/llm/registry";
 import { streamChat } from "../src/llm/stream";
 
 describe("wrapFetchWithActivity", () => {
@@ -85,3 +87,28 @@ describe("streamChat byte-level keepalive", () => {
   });
 });
 
+describe("per-model stream timeout config", () => {
+  it("parses per-model watchdog overrides and resolves them", () => {
+    const config = ConfigSchema.parse({
+      defaultModel: "m",
+      providers: [],
+      models: [
+        { name: "m", provider: "p", model: "x", streamIdleTimeoutSec: 90 },
+        { name: "plain", provider: "p", model: "y" },
+      ],
+    });
+    expect(resolveModelConfig(config, "m").streamIdleTimeoutSec).toBe(90);
+    expect(resolveModelConfig(config, "plain").streamIdleTimeoutSec).toBeUndefined();
+    expect(resolveModelConfig(config, "plain").streamFirstChunkTimeoutSec).toBeUndefined();
+  });
+
+  it("rejects non-positive per-model timeouts", () => {
+    expect(() =>
+      ConfigSchema.parse({
+        defaultModel: "m",
+        providers: [],
+        models: [{ name: "m", provider: "p", model: "x", streamFirstChunkTimeoutSec: 0 }],
+      }),
+    ).toThrow();
+  });
+});

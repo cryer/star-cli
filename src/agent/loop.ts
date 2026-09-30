@@ -51,6 +51,11 @@ export interface AgentLoopOptions {
   // resolved by the caller; undefined falls through to the SDK default
   // (ai@4: 0). Subagents inherit it.
   temperature?: number;
+  // Per-model stream watchdog overrides (the model's [[models]] keys),
+  // resolved by the caller; fall back to the top-level config values when
+  // unset. Subagents inherit them.
+  streamIdleTimeoutSec?: number;
+  streamFirstChunkTimeoutSec?: number;
   // Depth of this loop in the subagent chain (0 = main agent). At
   // MAX_SUBAGENT_DEPTH the subagent tool is not registered, so subagents
   // cannot spawn further subagents.
@@ -293,6 +298,8 @@ export class AgentLoop {
           system: opts.system,
           providerMetadata: opts.providerMetadata,
           temperature: opts.temperature,
+          streamIdleTimeoutSec: opts.streamIdleTimeoutSec,
+          streamFirstChunkTimeoutSec: opts.streamFirstChunkTimeoutSec,
           depth,
           getConfirmHandler: () => this.confirmHandler,
           onUsage: (usage, childModel) => this.addSubagentUsage(usage, childModel),
@@ -1120,8 +1127,14 @@ export class AgentLoop {
       tools: aiTools,
       abortSignal: signal,
       providerMetadata: this.opts.providerMetadata,
-      idleTimeoutMs: this.opts.config.streamIdleTimeoutSec * 1000 * timeoutScale,
-      firstPartTimeoutMs: this.opts.config.streamFirstChunkTimeoutSec * 1000 * timeoutScale,
+      idleTimeoutMs:
+        (this.opts.streamIdleTimeoutSec ?? this.opts.config.streamIdleTimeoutSec) *
+        1000 *
+        timeoutScale,
+      firstPartTimeoutMs:
+        (this.opts.streamFirstChunkTimeoutSec ?? this.opts.config.streamFirstChunkTimeoutSec) *
+        1000 *
+        timeoutScale,
       temperature: this.opts.temperature,
     })) {
       // The idle watchdog can end a stream gracefully after content already

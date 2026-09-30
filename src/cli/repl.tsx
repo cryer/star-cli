@@ -760,6 +760,7 @@ export function Repl({
     async (name: string): Promise<string> => {
       try {
         const newModel = createModel(config, name);
+        const modelConfig = resolveModelConfig(config, name);
         const loop = new AgentLoop({
           model: newModel,
           registry: createDefaultRegistry(),
@@ -769,7 +770,9 @@ export function Repl({
           sessionStore: sessionStoreRef.current,
           contextMaxTokens: contextWindowTokens(config, name),
           providerMetadata: reasoningEffortMetadata(config, name),
-          temperature: resolveModelConfig(config, name).temperature,
+          temperature: modelConfig.temperature,
+          streamIdleTimeoutSec: modelConfig.streamIdleTimeoutSec,
+          streamFirstChunkTimeoutSec: modelConfig.streamFirstChunkTimeoutSec,
         });
         const prev = backendRef.current;
         if (prev instanceof AgentLoop) {

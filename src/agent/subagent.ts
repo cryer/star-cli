@@ -26,6 +26,10 @@ export interface SubagentDeps {
   providerMetadata?: Record<string, Record<string, unknown>>;
   // Inherited from the parent loop (the model's [[models]] temperature key).
   temperature?: number;
+  // Inherited from the parent loop (the model's [[models]] stream watchdog
+  // overrides); unset falls back to the top-level config values.
+  streamIdleTimeoutSec?: number;
+  streamFirstChunkTimeoutSec?: number;
   depth: number;
   getConfirmHandler?: () => ((req: PermissionRequest) => Promise<boolean>) | undefined;
   // Receives the child loop's accumulated token usage once the run settles
@@ -123,6 +127,8 @@ async function runSubagent(
     system: deps.system ? `${deps.system}\n\n${SUBAGENT_PROMPT}` : SUBAGENT_PROMPT,
     providerMetadata: deps.providerMetadata,
     temperature: deps.temperature,
+    streamIdleTimeoutSec: deps.streamIdleTimeoutSec,
+    streamFirstChunkTimeoutSec: deps.streamFirstChunkTimeoutSec,
     subagentDepth: deps.depth + 1,
   });
   const confirmHandler = deps.getConfirmHandler?.();
