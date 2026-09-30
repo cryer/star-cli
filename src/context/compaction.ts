@@ -1,6 +1,6 @@
 import { type LanguageModelV1, generateText } from "ai";
 import type { CoreMessage } from "../core/messages";
-import { estimateTokens } from "./tokens";
+import { estimateMessageTokens, estimateTokens } from "./tokens";
 
 export interface CompactionResult {
   messages: CoreMessage[];
@@ -87,27 +87,38 @@ export function compactMessages(
   const head = hasSystem && first ? [first] : [];
   const rest = hasSystem ? messages.slice(1) : messages.slice();
 
-  const turns: CoreMessage[][] = [];
-  for (const message of rest) {
+  // Sum each turn's tokens once and subtract incrementally while dropping:
+  // rebuilding the candidate array and re-estimating it whole after every
+  // dropped turn made forced /compact O(n²) on long histories. Per-message
+  // estimates are cached (tokens.ts), so the placeholder's tiny string is
+  // the only fresh work per iteration.
+  const messageTokens = rest.map((message) => estimateMessageTokens(message));
+  const turns: { length: number; tokens: number }[] = [];
+  for (let i = 0; i < rest.length; i++) {
     const current = turns[turns.length - 1];
-    if (message.role === "user" || !current) {
-      turns.push([message]);
+    if (rest[i]?.role === "user" || !current) {
+      turns.push({ length: 1, tokens: messageTokens[i] ?? 0 });
     } else {
-      current.push(message);
+      current.length += 1;
+      current.tokens += messageTokens[i] ?? 0;
     }
   }
 
+  const headTokens = estimateTokens(head);
+  const restTokens = estimateTokens(rest);
   let droppedCount = 0;
-  let turnIndex = 0;
-  while (turnIndex < turns.length) {
-    const turn = turns[turnIndex] as CoreMessage[];
+  let droppedTokens = 0;
+  for (const turn of turns) {
     if (rest.length - droppedCount - turn.length < MIN_KEPT_MESSAGES) {
       break;
     }
     droppedCount += turn.length;
-    turnIndex += 1;
-    const candidate = [...head, placeholderMessage(droppedCount), ...rest.slice(droppedCount)];
-    if (estimateTokens(candidate) <= limit) {
+    droppedTokens += turn.tokens;
+    const candidateTokens =
+      headTokens +
+      estimateMessageTokens(placeholderMessage(droppedCount)) +
+      (restTokens - droppedTokens);
+    if (candidateTokens <= limit) {
       break;
     }
   }

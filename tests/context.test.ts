@@ -52,6 +52,12 @@ describe("estimateTokens", () => {
     // 400 CJK chars ≈ 400 tokens; the same length of Latin ≈ 100 tokens.
     expect(cjk).toBeGreaterThan(latin * 3);
   });
+
+  it("counts CJK by code point even alongside surrogate pairs", () => {
+    // "中" is one UTF-16 unit, "🙂" two: weight = 3 units + 1 CJK × 3 = 6,
+    // ⌈6/4⌉ = 2 + 4 overhead = 6 — the astral char is never CJK-weighted.
+    expect(estimateMessageTokens(user("中🙂"))).toBe(6);
+  });
 });
 
 describe("compactMessages", () => {
@@ -141,6 +147,33 @@ describe("compactMessages", () => {
     const placeholder = result.messages[1];
     expect(placeholder?.role).toBe("user");
     expect(placeholder?.content).toBe("[context compacted: 2 earlier messages dropped]");
+  });
+
+  it("drops multiple turns incrementally until the budget is met", () => {
+    const messages = [
+      system("sys"),
+      user(pad(400)),
+      assistant(pad(400)),
+      user(pad(400)),
+      assistant(pad(400)),
+      user("u3"),
+      assistant("a3"),
+      user("u4"),
+      assistant("a4"),
+    ];
+    // Dropping only the first big turn still exceeds 100; both must go, and
+    // the last 4 messages stay.
+    const result = compactMessages(messages, 100);
+    expect(result.compacted).toBe(true);
+    expect(result.droppedCount).toBe(4);
+    expect(result.messages).toEqual([
+      system("sys"),
+      { role: "user", content: "[context compacted: 4 earlier messages dropped]" },
+      user("u3"),
+      assistant("a3"),
+      user("u4"),
+      assistant("a4"),
+    ]);
   });
 
   it("force compacts even when under budget, keeping the last 4 messages", () => {
