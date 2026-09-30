@@ -88,8 +88,58 @@ describe("dangerous bash commands", () => {
       "rd empty-dir",
       "git format-patch HEAD~1",
       "diskusage",
+      "rm file.txt",
+      "rm -r build",
+      "find . -name '*.tmp'",
+      "find ./src -delete",
+      "systemctl status",
+      "git init",
+      "chmod 644 file.txt",
+      "chmod -R 755 ./dist",
+      "echo 'rm -rf /'",
     ]) {
       expect(checkPermission("auto", req("bash", { command }, "exec"), ctx)).toBe("allow");
+    }
+  });
+
+  it("blocks dangerous commands with reordered flags, wrappers and substitutions", () => {
+    const payloads = [
+      "rm -fr /",
+      "rm -r -f /",
+      "rm --recursive --force /",
+      "rm -rf -- /",
+      "sh -c 'rm -rf /'",
+      'bash -c "rm -rf /"',
+      "rm -rf ./*",
+      'rm -rf "$HOME"',
+      "rm -rf ${HOME}",
+      "$(rm -rf /)",
+      "echo hi `rm -rf /`",
+      "rmdir /s /q C:\\temp",
+      "del /f /s /q file.txt",
+      "find / -delete",
+      "find . -delete",
+      "find ~ -delete",
+      "ls | xargs rm",
+      "ls | xargs rm -rf",
+      "wipefs /dev/sda",
+      "shred -u secret.txt",
+      "halt",
+      "systemctl poweroff",
+      "systemctl halt",
+      "init 0",
+      "init 6",
+      "chmod -R 000 /",
+      "chmod --recursive 000 ~",
+      "eval 'rm -rf /'",
+      "cmd /c del /s /q C:\\temp",
+      "rm -rf / | cat",
+      "sleep 1 & rm -rf /",
+      "sudo rm -rf .",
+      "env FOO=1 rm -rf /",
+    ];
+    for (const command of payloads) {
+      expect(checkPermission("auto", req("bash", { command }, "exec"), ctx)).toBe("deny");
     }
   });
 });
@@ -252,6 +302,44 @@ describe("bash command chains through the gate", () => {
     ).toBe("allow");
   });
 
+  it("allow rules ignore segments with file redirections or process substitution", () => {
+    // echo matches bash(echo *), but the redirect writes outside any allow
+    // rule's sight — the whole command falls back to ask.
+    expect(
+      checkPermission(
+        "ask",
+        req("bash", { command: "echo 'alias x=1' >> ~/.bashrc" }, "exec"),
+        ctx,
+        ["bash(echo *)"],
+      ),
+    ).toBe("ask");
+    expect(
+      checkPermission("ask", req("bash", { command: "cat < /etc/passwd" }, "exec"), ctx, [
+        "bash(cat *)",
+      ]),
+    ).toBe("ask");
+    expect(
+      checkPermission(
+        "ask",
+        req("bash", { command: "diff a.txt <(curl https://evil.example.com)" }, "exec"),
+        ctx,
+        ["bash(diff *)"],
+      ),
+    ).toBe("ask");
+    // ...but the same commands without redirections are still auto-allowed,
+    // and fd duplication (2>&1) does not count as a file redirect.
+    expect(
+      checkPermission("ask", req("bash", { command: "echo 'alias x=1'" }, "exec"), ctx, [
+        "bash(echo *)",
+      ]),
+    ).toBe("allow");
+    expect(
+      checkPermission("ask", req("bash", { command: "npm test 2>&1" }, "exec"), ctx, [
+        "bash(npm *)",
+      ]),
+    ).toBe("allow");
+  });
+
   it("deny rules fire on any chained segment", () => {
     expect(
       checkPermission(
@@ -332,6 +420,40 @@ describe("symlink traversal for write tools", () => {
     expect(
       checkPermission("auto", req("write_file", { path: "../outside/x.txt" }, "write"), writeCtx),
     ).toBe("deny");
+  });
+
+  it("denies reads through a symlink that escapes cwd (auto/readonly/plan)", () => {
+    fs.writeFileSync(path.join(outsideDir, "leak.txt"), "x");
+    linkDir(outsideDir, path.join(cwdReal, "escape"));
+    for (const toolName of ["read_file", "grep", "glob"]) {
+      expect(
+        checkPermission("auto", req(toolName, { path: "escape/leak.txt" }, "read"), writeCtx),
+      ).toBe("deny");
+      expect(
+        checkPermission("readonly", req(toolName, { path: "escape/leak.txt" }, "read"), writeCtx),
+      ).toBe("deny");
+      expect(
+        checkPermission("plan", req(toolName, { path: "escape/leak.txt" }, "read"), writeCtx),
+      ).toBe("deny");
+    }
+  });
+
+  it("asks (not denies) for symlink-escaping reads in ask mode", () => {
+    fs.writeFileSync(path.join(outsideDir, "leak.txt"), "x");
+    linkDir(outsideDir, path.join(cwdReal, "escape"));
+    expect(
+      checkPermission("ask", req("read_file", { path: "escape/leak.txt" }, "read"), writeCtx),
+    ).toBe("ask");
+  });
+
+  it("allows reads through a symlink that stays inside cwd", () => {
+    const innerDir = path.join(cwdReal, "real-dir");
+    fs.mkdirSync(innerDir);
+    fs.writeFileSync(path.join(innerDir, "a.txt"), "x");
+    linkDir(innerDir, path.join(cwdReal, "inside-link"));
+    expect(
+      checkPermission("auto", req("read_file", { path: "inside-link/a.txt" }, "read"), writeCtx),
+    ).toBe("allow");
   });
 });
 

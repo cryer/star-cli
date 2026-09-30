@@ -172,19 +172,23 @@ describe("bash command chains", () => {
     );
   });
 
-  it("splits quoted separators too, erring towards ask", () => {
+  it("honors quoted separators instead of splitting inside quotes", () => {
+    // "a && b" is a single quoted argument to git commit — no second command
+    // runs, so bash(git commit *) may allow it. (The pre-lexer splitter could
+    // not see quotes and conservatively fell back to ask.)
     expect(
       isAllowedByRules(
         ["bash(git commit *)"],
         req("bash", { command: 'git commit -m "a && b"' }, "exec"),
       ),
-    ).toBe(false);
+    ).toBe(true);
+    // Separators outside quotes still split the chain.
     expect(
       isAllowedByRules(
-        ["bash(git commit *)", 'bash(b")'],
-        req("bash", { command: 'git commit -m "a && b"' }, "exec"),
+        ["bash(git *)"],
+        req("bash", { command: 'git commit -m "x" && curl evil' }, "exec"),
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("denies when any segment matches a deny rule", () => {

