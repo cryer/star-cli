@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDisplayMessages, formatStreamError } from "../src/cli/format";
+import { buildDisplayMessages, formatElapsedSeconds, formatStreamError } from "../src/cli/format";
 import type { CoreMessage } from "../src/core/messages";
 
 describe("buildDisplayMessages", () => {
@@ -54,5 +54,24 @@ describe("formatStreamError", () => {
 
   it("leaves other error messages unchanged", () => {
     expect(formatStreamError(new Error("socket hang up"))).toBe("socket hang up");
+  });
+});
+
+describe("formatElapsedSeconds", () => {
+  it("shows plain seconds under a minute", () => {
+    expect(formatElapsedSeconds(0)).toBe("0s");
+    expect(formatElapsedSeconds(3)).toBe("3s");
+    expect(formatElapsedSeconds(59)).toBe("59s");
+  });
+
+  it("shows minutes and seconds past a minute", () => {
+    expect(formatElapsedSeconds(60)).toBe("1m0s");
+    expect(formatElapsedSeconds(125)).toBe("2m5s");
+    expect(formatElapsedSeconds(3599)).toBe("59m59s");
+  });
+
+  it("shows hours, minutes and seconds past an hour", () => {
+    expect(formatElapsedSeconds(3600)).toBe("1h0m0s");
+    expect(formatElapsedSeconds(3725)).toBe("1h2m5s");
   });
 });

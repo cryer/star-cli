@@ -25,6 +25,17 @@ export function formatByteCount(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+// Elapsed-time label for the thinking indicator: seconds while short, then
+// the two largest units (1m5s, 1h2m3s) so long relay waits stay readable.
+export function formatElapsedSeconds(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  const secs = total % 60;
+  if (minutes < 60) return `${minutes}m${secs}s`;
+  return `${Math.floor(minutes / 60)}h${minutes % 60}m${secs}s`;
+}
+
 // Splits a streaming buffer into a committable head (complete lines) and a
 // remainder, once the buffer holds at least minCompleteLines complete lines.
 // The last line is always kept in the remainder: it may still be growing.

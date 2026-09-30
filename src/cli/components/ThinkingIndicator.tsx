@@ -1,5 +1,6 @@
 import { Box, Text } from "ink";
 
+import { formatElapsedSeconds } from "../format";
 import { thinkingIcon } from "../icons";
 
 export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -28,7 +29,8 @@ export function ThinkingIndicator({
   const label = activity ?? `${thinkingIcon} star is thinking…`;
   // Long buffered waits (slow relays) look dead without a clock; show the
   // elapsed time once it becomes relevant.
-  const elapsed = elapsedSec !== undefined && elapsedSec >= 3 ? ` (${elapsedSec}s)` : "";
+  const elapsed =
+    elapsedSec !== undefined && elapsedSec >= 3 ? ` (${formatElapsedSeconds(elapsedSec)})` : "";
   return (
     <Box flexDirection="column">
       <Text dimColor>
