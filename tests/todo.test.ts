@@ -145,6 +145,31 @@ describe("todo_write / todo_read", () => {
       await rm(guardDir, { recursive: true, force: true });
     }
   });
+
+  it("deletes the persisted file once every item is done — a finished list has no resume value", async () => {
+    await run("todo_write", { todos: sample });
+    expect(await readFile(path.join(dir, ".star", "todos.json"), "utf8")).toContain("write docs");
+
+    const res = await run("todo_write", {
+      todos: sample.map((t) => ({ ...t, status: "done" })),
+    });
+    expect(res.isError).toBeUndefined();
+    // Memory keeps the completed list (todo_read, the loop's open-todo
+    // signal); only the on-disk copy is dropped.
+    expect(store.list()).toHaveLength(3);
+    expect(res.content).toBe("Todo list updated (3/3 done).");
+    await expect(readFile(path.join(dir, ".star", "todos.json"), "utf8")).rejects.toThrow();
+
+    // A new open item persists again.
+    await run("todo_write", { todos: [{ id: 1, title: "back to work", status: "pending" }] });
+    expect(await readFile(path.join(dir, ".star", "todos.json"), "utf8")).toContain("back to work");
+  });
+
+  it("deletes the persisted file for an empty list", async () => {
+    await run("todo_write", { todos: sample });
+    await run("todo_write", { todos: [] });
+    await expect(readFile(path.join(dir, ".star", "todos.json"), "utf8")).rejects.toThrow();
+  });
 });
 
 describe("per-store todo tools", () => {

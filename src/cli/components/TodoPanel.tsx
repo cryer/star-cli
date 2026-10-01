@@ -38,9 +38,11 @@ export function visibleTodoWindow(
 }
 
 // Persistent todo list rendered in the live region above the input box, so
-// it survives spinner/thinking redraws; finished items are dimmed.
+// it survives spinner/thinking redraws; finished items are dimmed. A fully
+// completed list has nothing left to track: hide it until the next
+// todo_write brings open items.
 export function TodoPanel({ todos }: { todos: TodoItem[] }) {
-  if (todos.length === 0) return null;
+  if (todos.length === 0 || todos.every((t) => t.status === "done")) return null;
   const { items, hiddenBefore, hiddenAfter } = visibleTodoWindow(todos);
   return (
     <Box flexDirection="column">

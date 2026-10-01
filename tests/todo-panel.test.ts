@@ -57,4 +57,21 @@ describe("TodoPanel", () => {
     expect(frame).toContain("5 more");
     app.unmount();
   });
+
+  it("hides a fully completed list until new open items arrive", async () => {
+    const done: TodoItem[] = makeTodos(3).map((t) => ({ ...t, status: "done" as const }));
+    const app = renderApp(createElement(TodoPanel, { todos: done }));
+    await tick();
+    expect(stripAnsi(app.lastFrame() ?? "")).not.toContain("task 1");
+    app.unmount();
+
+    const reopened = renderApp(
+      createElement(TodoPanel, {
+        todos: [...done, { id: 4, title: "new task", status: "pending" }],
+      }),
+    );
+    await tick();
+    expect(stripAnsi(reopened.lastFrame() ?? "")).toContain("new task");
+    reopened.unmount();
+  });
 });

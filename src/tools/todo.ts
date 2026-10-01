@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { Tool } from "./types";
@@ -65,15 +65,22 @@ export class TodoStore {
   }
 
   // Atomic write (tmp + rename): a crash or failed save can never leave a
-  // truncated todos.json behind.
+  // truncated todos.json behind. An empty or fully completed list has no
+  // resume value — rehydrating it would only restore finished work — so the
+  // file is deleted instead of persisted.
   async save(cwd: string): Promise<void> {
     if (!persistGuard()) {
       return;
     }
-    await mkdir(path.join(cwd, ".star"), { recursive: true });
+    const items = this.list();
     const file = fileFor(cwd);
+    if (items.length === 0 || items.every((it) => it.status === "done")) {
+      await rm(file, { force: true });
+      return;
+    }
+    await mkdir(path.join(cwd, ".star"), { recursive: true });
     const tmp = `${file}.tmp`;
-    await writeFile(tmp, `${JSON.stringify(this.list(), null, 2)}\n`);
+    await writeFile(tmp, `${JSON.stringify(items, null, 2)}\n`);
     await rename(tmp, file);
   }
 }
