@@ -34,4 +34,9 @@ export interface Tool<S extends z.ZodType = z.ZodType> {
   parameters: S;
   permission: PermissionLevel;
   execute(args: z.infer<S>, ctx: ToolContext): Promise<ToolResult>;
+  // Clears per-session volatile state (e.g. read_file's unchanged-since-last-
+  // read cache). The agent loop calls this whenever the history is rewritten
+  // wholesale (compaction, /undo, resume): content the cache claims is "still
+  // in context" may no longer be.
+  reset?(): void;
 }

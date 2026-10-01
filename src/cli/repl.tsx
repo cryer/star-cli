@@ -1435,12 +1435,6 @@ export function Repl({
           return `Busy — /${busyCommandRef.current} is still running.`;
         }
         busyCommandRef.current = "compact";
-        let summaryModel = null;
-        try {
-          summaryModel = createModel(config, modelNameRef.current);
-        } catch {
-          summaryModel = null;
-        }
         // /compact is refused mid-turn, so the stream ticker is free to reuse:
         // drive the spinner with a busy label while compaction runs — the
         // summary call alone can take up to 60s on a slow relay.
@@ -1451,7 +1445,6 @@ export function Repl({
             backend: backendRef.current,
             sessionStore: sessionStoreRef.current,
             config,
-            model: summaryModel,
           });
           if (result.compacted && result.messages) {
             const display = buildDisplayMessages(result.messages);

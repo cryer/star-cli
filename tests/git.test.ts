@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { LanguageModelV1Prompt } from "ai";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentLoop } from "../src/agent/loop";
@@ -247,7 +248,7 @@ describe("git helpers", () => {
   });
 });
 
-describe("git context in the system prompt", () => {
+describe("git context in the outgoing request", () => {
   let dir: string;
 
   beforeEach(() => {
@@ -258,9 +259,37 @@ describe("git context in the system prompt", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  function makeLoop(cwd: string): AgentLoop {
+  function capturingModel(captured: LanguageModelV1Prompt[]): MockLanguageModelV1 {
+    return new MockLanguageModelV1({
+      doStream: async (options) => {
+        captured.push(options.prompt);
+        return {
+          stream: convertArrayToReadableStream([
+            { type: "text-delta", textDelta: "done" },
+            {
+              type: "finish",
+              finishReason: "stop",
+              usage: { promptTokens: 5, completionTokens: 3 },
+            },
+          ]),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+  }
+
+  function lastUserText(prompt: LanguageModelV1Prompt): string {
+    const user = [...prompt].reverse().find((m) => m.role === "user");
+    if (!user || typeof user.content === "string") return "";
+    return user.content
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  function makeLoop(cwd: string, model?: MockLanguageModelV1): AgentLoop {
     return new AgentLoop({
-      model: textModel("done"),
+      model: model ?? textModel("done"),
       registry: createDefaultRegistry(),
       config: makeConfig(),
       cwd,
@@ -274,33 +303,45 @@ describe("git context in the system prompt", () => {
     expect(loop.getMessages()[0]?.content).toBe("BASE PROMPT");
   });
 
-  it("appends branch, dirty state, and recent commits inside a repo", async () => {
+  it("sends git state as a request-scoped reminder, keeping the system prompt stable", async () => {
     initRepo(dir);
     commitFile(dir, "a.txt", "one", "chore: initial commit");
-    const loop = makeLoop(dir);
+    const prompts: LanguageModelV1Prompt[] = [];
+    const loop = makeLoop(dir, capturingModel(prompts));
 
     await drain(loop.stream("hi", new AbortController().signal));
+    // The system message must not carry volatile git state: it is the head of
+    // the prompt-cache prefix, so a changed repo state would invalidate
+    // everything after it.
     const head = loop.getMessages()[0];
     expect(head?.role).toBe("system");
-    expect(head?.content).toContain("BASE PROMPT");
-    expect(head?.content).toContain("Branch: main");
-    expect(head?.content).toContain("Working tree: clean");
-    expect(head?.content).toContain("chore: initial commit");
+    expect(head?.content).toBe("BASE PROMPT");
+    const requestText = lastUserText(prompts[0] ?? []);
+    expect(requestText).toContain("<system-reminder>");
+    expect(requestText).toContain("Branch: main");
+    expect(requestText).toContain("Working tree: clean");
+    expect(requestText).toContain("chore: initial commit");
+    expect(requestText).toContain("hi");
+    // Request-only: the persisted user message stays the bare prompt.
+    const persistedUser = loop.getMessages().find((m) => m.role === "user");
+    expect(persistedUser?.content).toBe("hi");
   });
 
   it("refreshes the git context on every turn", async () => {
     initRepo(dir);
     commitFile(dir, "a.txt", "one", "chore: initial commit");
-    const loop = makeLoop(dir);
+    const prompts: LanguageModelV1Prompt[] = [];
+    const loop = makeLoop(dir, capturingModel(prompts));
 
     await drain(loop.stream("first", new AbortController().signal));
-    expect(loop.getMessages()[0]?.content).toContain("Working tree: clean");
+    expect(lastUserText(prompts[0] ?? [])).toContain("Working tree: clean");
 
     writeFileSync(path.join(dir, "a.txt"), "changed");
     // The loop reads git state through the 15s cached summary; tests reset it
     // to observe a refresh within the same test.
     resetGitSummaryCache();
     await drain(loop.stream("second", new AbortController().signal));
-    expect(loop.getMessages()[0]?.content).toContain("1 file(s) with uncommitted changes");
+    expect(lastUserText(prompts[1] ?? [])).toContain("1 file(s) with uncommitted changes");
+    expect(loop.getMessages()[0]?.content).toBe("BASE PROMPT");
   });
 });

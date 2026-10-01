@@ -52,6 +52,35 @@ const MAX_KEEPALIVE_SILENCE_MS = 10 * 60_000;
 const CACHE_READ_KEYS = ["cacheReadInputTokens", "cache_read_input_tokens"];
 const CACHED_PROMPT_KEYS = ["cachedPromptTokens", "cached_prompt_tokens", "cachedTokens"];
 
+// Anthropic prompt caching: a cache_control block marks "everything from the
+// request start up to this block" as a cached prefix. The agent loop resends
+// the full history every step, so two breakpoints — the leading system
+// message (covers the tool definitions and the static prompt prefix) and the
+// last message (the whole history so far) — turn most of every resend into
+// ~0.1x-billed cache reads. Other protocols do their own server-side caching
+// and never see this (provider metadata is keyed by provider name).
+export function withAnthropicCacheBreakpoints(
+  model: LanguageModel,
+  messages: CoreMessage[],
+): CoreMessage[] {
+  if (!model.provider.startsWith("anthropic")) return messages;
+  const mark = (message: CoreMessage): CoreMessage => ({
+    ...message,
+    experimental_providerMetadata: {
+      ...message.experimental_providerMetadata,
+      anthropic: {
+        ...message.experimental_providerMetadata?.anthropic,
+        cacheControl: { type: "ephemeral" },
+      },
+    },
+  });
+  const result = messages.slice();
+  if (result[0]?.role === "system") result[0] = mark(result[0]);
+  const last = result.length - 1;
+  if (last > 0 && result[last]) result[last] = mark(result[last] as CoreMessage);
+  return result;
+}
+
 // Pulls prompt-cache token counts out of a finish part's providerMetadata.
 // Anthropic-style fields (cacheReadInputTokens) report cache reads on top of
 // promptTokens; OpenAI-style fields (cachedPromptTokens) are a subset of it.
@@ -87,7 +116,7 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
   const { openai: openaiMetadata, ...otherMetadata } = opts.providerMetadata ?? {};
   const result = streamText({
     model: opts.model,
-    messages: opts.messages,
+    messages: withAnthropicCacheBreakpoints(opts.model, opts.messages),
     tools: opts.tools as ToolSet | undefined,
     abortSignal: controller.signal,
     maxTokens: opts.maxTokens,

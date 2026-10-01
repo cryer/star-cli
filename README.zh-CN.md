@@ -17,7 +17,7 @@
 
 </div>
 
-功能特性：带斜杠命令（+ 自动补全）的流式 REPL · OpenAI / Anthropic / OpenAI 兼容服务商，配交互式 `/connect` 接入向导 · 内置 fs / bash / web 工具，带权限门禁 · git 集成（`/commit` 起草 Conventional Commits 提交信息，`/diff` 显示彩色工作区 diff，仓库状态注入系统提示词）· 计划模式：只读调研 + 计划批准 · 带暗色推理预览的思考动画 · 写入/编辑批准时的 diff 预览 · `@file` 引用 · `!cmd` shell 直通 · 用 Markdown 文件自定义斜杠命令 · 对话压缩（`/compact`）· 会话持久化与恢复，自动生成标题（`/resume`、`star -r`）· 子代理委派，处理专注的子任务 · 生命周期钩子（来自配置的 `PreToolUse`/`PostToolUse`/`Stop` shell 命令）· 文件写入快照 `/undo` 与检查点回滚 `/rewind` · TODO 任务跟踪 · 状态栏可见的后台 shell 任务（`/tasks`）· 长回合与后台任务完成时的终端响铃 · Markdown 会话导出（`/export`）· `/init` + `/doctor` 项目脚手架与环境检查 · 成本估算 · 更新提醒 · 便于脚本化的 `--json` NDJSON 输出。
+功能特性：带斜杠命令（+ 自动补全）的流式 REPL · OpenAI / Anthropic / OpenAI 兼容服务商，配交互式 `/connect` 接入向导 · 内置 fs / bash / web 工具，带权限门禁 · git 集成（`/commit` 起草 Conventional Commits 提交信息，`/diff` 显示彩色工作区 diff，仓库状态以每回合请求级 reminder 发送，不会破坏提示词缓存）· Anthropic 服务商的提示词缓存（在稳定前缀与历史尾部打缓存断点；OpenAI 系协议由服务端自动缓存），状态栏显示命中率 · token 节俭：重复读取未变化的文件只回一行说明，压缩摘要、标题等辅助调用可配置更便宜的 `smallModel` · 计划模式：只读调研 + 计划批准 · 带暗色推理预览的思考动画 · 写入/编辑批准时的 diff 预览 · `@file` 引用 · `!cmd` shell 直通 · 用 Markdown 文件自定义斜杠命令 · 对话压缩（`/compact`）· 会话持久化与恢复，自动生成标题（`/resume`、`star -r`）· 子代理委派，处理专注的子任务 · 生命周期钩子（来自配置的 `PreToolUse`/`PostToolUse`/`Stop` shell 命令）· 文件写入快照 `/undo` 与检查点回滚 `/rewind` · TODO 任务跟踪 · 状态栏可见的后台 shell 任务（`/tasks`）· 长回合与后台任务完成时的终端响铃 · Markdown 会话导出（`/export`）· `/init` + `/doctor` 项目脚手架与环境检查 · 成本估算 · 更新提醒 · 便于脚本化的 `--json` NDJSON 输出。
 
 ## 环境要求
 
@@ -50,6 +50,9 @@ star -p "hi"             # non-interactive print mode
 
 ```toml
 defaultModel = "gpt"              # 默认使用的 [[models]] 块名称
+# smallModel = "haiku"            # 可选的 [[models]] 块，用于低价的辅助调用
+                                  #（压缩摘要、会话标题、完成度检查）；
+                                  # 不设置 = 由当前主模型执行
 permissionMode = "ask"            # ask | auto | readonly | yolo | plan
 contextMaxTokens = 100000         # 上下文窗口（token 数，下方可按模型覆盖）
 # compactThresholdTokens = 80000  # 可选的自动压缩触发阈值（token 数）；默认为上下文窗口本身，

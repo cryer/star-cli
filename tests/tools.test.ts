@@ -57,7 +57,8 @@ describe("read_file", () => {
   });
 
   it("respects offset and limit", async () => {
-    const res = await run("read_file", { path: "a.txt", offset: 2, limit: 1 });
+    await writeFile(path.join(dir, "offsets.txt"), "alpha\nbeta\ngamma");
+    const res = await run("read_file", { path: "offsets.txt", offset: 2, limit: 1 });
     expect(res.content).toContain("2\tbeta");
     expect(res.content).not.toContain("1\talpha");
     expect(res.content).not.toContain("3\tgamma");

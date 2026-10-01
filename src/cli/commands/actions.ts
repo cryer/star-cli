@@ -17,7 +17,6 @@ export interface CompactSessionOptions {
   backend: ChatBackend;
   sessionStore: SessionStore | null;
   config: StarConfig;
-  model: LanguageModel | null;
 }
 
 export interface CompactSessionResult {
@@ -27,7 +26,7 @@ export interface CompactSessionResult {
 }
 
 export async function compactSession(opts: CompactSessionOptions): Promise<CompactSessionResult> {
-  const { backend, sessionStore, config, model } = opts;
+  const { backend, sessionStore, config } = opts;
   if (!(backend instanceof AgentLoop)) {
     return { message: "Current backend does not support compaction.", compacted: false };
   }
@@ -48,7 +47,13 @@ export async function compactSession(opts: CompactSessionOptions): Promise<Compa
       compacted: false,
     };
   }
-  const next = await applyCompactionSummary(messages, compacted, config, model);
+  const next = await applyCompactionSummary(
+    messages,
+    compacted,
+    config,
+    backend.getAuxModel(),
+    backend.getAuxTemperature(),
+  );
   await backend.loadMessages(next);
   await sessionStore?.replaceMessages(next);
   const afterTokens = estimateTokens(next);
@@ -63,15 +68,16 @@ async function applyCompactionSummary(
   original: CoreMessage[],
   compacted: CompactionResult,
   config: StarConfig,
-  model: LanguageModel | null,
+  model: LanguageModel,
+  temperature?: number,
 ): Promise<CoreMessage[]> {
-  if (config.contextCompaction !== "summary" || !model) {
+  if (config.contextCompaction !== "summary") {
     return compacted.messages;
   }
   const headCount = compacted.messages[0]?.role === "system" ? 1 : 0;
   const dropped = original.slice(headCount, headCount + compacted.droppedCount);
   try {
-    const summary = await summarizeMessages(dropped, model);
+    const summary = await summarizeMessages(dropped, model, undefined, temperature);
     const messages = compacted.messages.slice();
     messages[headCount] = {
       role: "user",

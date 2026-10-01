@@ -79,6 +79,10 @@ export const HookConfigSchema = z.object({
 
 export const ConfigSchema = z.object({
   defaultModel: z.string().default(""),
+  // Optional [[models]] name for cheap auxiliary LLM calls (compaction
+  // summaries, session titles, turn completion checks) — Claude Code routes
+  // these to a Haiku-class model. Unset = the active main model does them.
+  smallModel: z.string().optional(),
   permissionMode: z.enum(["auto", "ask", "readonly", "yolo", "plan"]).default("ask"),
   providers: z.array(ProviderConfigSchema).default([]),
   models: z.array(ModelConfigSchema).default([]),

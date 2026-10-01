@@ -2,7 +2,7 @@ import { bashTool } from "./bash";
 import { editFileTool } from "./fs/edit";
 import { globTool } from "./fs/glob";
 import { grepTool } from "./fs/grep";
-import { readFileTool } from "./fs/read";
+import { createReadFileTool } from "./fs/read";
 import { readImageTool } from "./fs/read-image";
 import { writeFileTool } from "./fs/write";
 import { screenshotTool } from "./screenshot";
@@ -19,7 +19,9 @@ export class ToolRegistry {
   // their own instance so a child's todo_write cannot clobber the parent list.
   constructor(todoStore?: TodoStore) {
     for (const tool of [
-      readFileTool,
+      // Fresh per registry (i.e. per agent loop): the unchanged-since-last-
+      // read cache must not leak across loops, whose contexts differ.
+      createReadFileTool(),
       readImageTool,
       screenshotTool,
       writeFileTool,
@@ -40,6 +42,13 @@ export class ToolRegistry {
 
   register(tool: Tool): void {
     this.tools.set(tool.name, tool);
+  }
+
+  // Drops per-session volatile tool state after a wholesale history rewrite
+  // (compaction, /undo, resume): anything a tool remembers as "already sent
+  // to the model" may no longer be in the context.
+  resetVolatileState(): void {
+    for (const tool of this.tools.values()) tool.reset?.();
   }
 
   get(name: string): Tool | undefined {

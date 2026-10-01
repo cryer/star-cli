@@ -28,6 +28,19 @@ const SUMMARY_SYSTEM_PROMPT = [
   "Output only the summary, no preamble.",
 ].join("\n");
 
+// Cap the summarizer's own input: a long session's dropped transcript can be
+// megabytes of tool output, and the summary call is billed too. The head
+// (original task) and tail (most recent state) carry what a summary needs.
+const MAX_SUMMARY_INPUT_CHARS = 80_000;
+const SUMMARY_HEAD_CHARS = 24_000;
+
+export function truncateSummaryInput(transcript: string): string {
+  if (transcript.length <= MAX_SUMMARY_INPUT_CHARS) return transcript;
+  const tailChars = MAX_SUMMARY_INPUT_CHARS - SUMMARY_HEAD_CHARS;
+  const omitted = transcript.length - MAX_SUMMARY_INPUT_CHARS;
+  return `${transcript.slice(0, SUMMARY_HEAD_CHARS)}\n[... ${omitted} characters omitted ...]\n${transcript.slice(-tailChars)}`;
+}
+
 function serializeMessage(message: CoreMessage): string {
   if (typeof message.content === "string") {
     return `${message.role}: ${message.content}`;
@@ -51,7 +64,7 @@ export async function summarizeMessages(
   // endpoints that mandate one explicit value don't reject the summary call.
   temperature?: number,
 ): Promise<string> {
-  const transcript = messages.map(serializeMessage).join("\n");
+  const transcript = truncateSummaryInput(messages.map(serializeMessage).join("\n"));
   const { text } = await generateText({
     model,
     system: SUMMARY_SYSTEM_PROMPT,

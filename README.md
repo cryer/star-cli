@@ -17,7 +17,7 @@ Multi-model LLM access · streaming terminal UI · tool calling · permission co
 
 </div>
 
-Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers with an interactive `/connect` onboarding wizard · built-in fs / bash / web tools with a permission gate · git integration (`/commit` drafts Conventional Commits messages, `/diff` shows a colored working-tree diff, repo status injected into the system prompt) · plan mode with read-only research and plan approval · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume with auto-generated titles (`/resume`, `star -r`) · subagent delegation for focused subtasks · lifecycle hooks (`PreToolUse`/`PostToolUse`/`Stop` shell commands from config) · file-write snapshots with `/undo` and checkpoint rollback with `/rewind` · TODO task tracking · background shell tasks with status-bar visibility (`/tasks`) · terminal bell on long turns and background-task completion · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
+Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers with an interactive `/connect` onboarding wizard · built-in fs / bash / web tools with a permission gate · git integration (`/commit` drafts Conventional Commits messages, `/diff` shows a colored working-tree diff, repo status sent as a per-turn request-scoped reminder so it never breaks the prompt cache) · prompt caching on Anthropic providers (cache breakpoints on the stable prefix and the history tail; OpenAI-style protocols cache server-side automatically) with a status-bar hit rate · token thrift: re-reading an unchanged file answers with a one-line note, and auxiliary calls (summaries, titles) can run on a cheaper `smallModel` · plan mode with read-only research and plan approval · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume with auto-generated titles (`/resume`, `star -r`) · subagent delegation for focused subtasks · lifecycle hooks (`PreToolUse`/`PostToolUse`/`Stop` shell commands from config) · file-write snapshots with `/undo` and checkpoint rollback with `/rewind` · TODO task tracking · background shell tasks with status-bar visibility (`/tasks`) · terminal bell on long turns and background-task completion · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
 
 ## Requirements
 
@@ -50,6 +50,9 @@ Config file: `~/.star-cli/config.toml` (set the `STAR_HOME` environment variable
 
 ```toml
 defaultModel = "gpt"              # name of the [[models]] block used by default
+# smallModel = "haiku"            # optional [[models]] block for cheap auxiliary calls
+                                  # (compaction summaries, session titles, completion checks);
+                                  # unset = the active main model does them
 permissionMode = "ask"            # ask | auto | readonly | yolo | plan
 contextMaxTokens = 100000         # context window in tokens (per-model override below)
 # compactThresholdTokens = 80000  # optional auto-compaction trigger in tokens; defaults to the

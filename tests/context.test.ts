@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compactMessages } from "../src/context/compaction";
+import { compactMessages, truncateSummaryInput } from "../src/context/compaction";
 import { estimateMessageTokens, estimateTokens } from "../src/context/tokens";
 import type { CoreMessage } from "../src/core/messages";
 
@@ -199,5 +199,25 @@ describe("compactMessages", () => {
     const result = compactMessages(messages, 10_000, { force: true });
     expect(result.compacted).toBe(false);
     expect(result.messages).toEqual(messages);
+  });
+});
+
+describe("truncateSummaryInput", () => {
+  it("passes short transcripts through unchanged", () => {
+    const text = "user: hello\nassistant: hi";
+    expect(truncateSummaryInput(text)).toBe(text);
+  });
+
+  it("caps long transcripts, keeping head and tail with an omission marker", () => {
+    const head = `H${"h".repeat(23_999)}`;
+    const middle = "m".repeat(100_000);
+    const tail = `T${"t".repeat(10_000)}`;
+    const result = truncateSummaryInput(head + middle + tail);
+    expect(result.length).toBeLessThan(81_000);
+    expect(result.startsWith(head)).toBe(true);
+    expect(result.endsWith(tail)).toBe(true);
+    expect(result).toContain("54001 characters omitted");
+    // Only part of the middle survives inside the kept tail window.
+    expect((result.match(/m/g) ?? []).length).toBeLessThan(50_000);
   });
 });

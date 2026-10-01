@@ -101,7 +101,6 @@ describe("slash /compact and /export", () => {
         backend: loop,
         sessionStore: store,
         config: makeConfig(),
-        model: null,
       });
 
       expect(result.compacted).toBe(false);
@@ -125,14 +124,12 @@ describe("slash /compact and /export", () => {
         backend: loop,
         sessionStore: null,
         config: makeConfig({ contextMaxTokens: 100_000 }),
-        model: null,
       });
 
       expect(result.compacted).toBe(true);
       expect(result.message).toContain("Compacted context: 6 -> 5 messages");
-      expect(loop.getMessages()[0]?.content).toBe(
-        "[context compacted: 2 earlier messages dropped]",
-      );
+      // The loop's own model (getAuxModel fallback) produces the summary.
+      expect(loop.getMessages()[0]?.content).toBe("[earlier conversation summarized]\ns");
     });
 
     it("refuses when no whole turn can be dropped", async () => {
@@ -149,7 +146,6 @@ describe("slash /compact and /export", () => {
         backend: loop,
         sessionStore: null,
         config: makeConfig({ contextMaxTokens: 100_000 }),
-        model: null,
       });
 
       expect(result.compacted).toBe(false);
@@ -170,7 +166,6 @@ describe("slash /compact and /export", () => {
         backend: loop,
         sessionStore: store,
         config: makeConfig(),
-        model,
       });
 
       expect(result.compacted).toBe(true);
@@ -194,7 +189,6 @@ describe("slash /compact and /export", () => {
         backend: loop,
         sessionStore: null,
         config: makeConfig(),
-        model,
       });
 
       expect(result.compacted).toBe(true);

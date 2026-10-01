@@ -11,6 +11,8 @@ import {
   retractLastTurn,
 } from "../core/messages";
 import { type HookEvent, type HookRunResult, runHooks } from "../hooks/runner";
+import { createModel } from "../llm/provider";
+import { resolveModelConfig } from "../llm/registry";
 import { computeRetryDelayMs, isRetryableStreamError, summarizeStreamError } from "../llm/retry";
 import { streamChat } from "../llm/stream";
 import { checkPermission } from "../permissions/gate";
@@ -123,6 +125,33 @@ function finalNudgeWarning(autoContinues: number, maxAutoContinues: number): str
 }
 
 const COMPLETION_CHECK_TIMEOUT_MS = 30_000;
+
+// Attaches per-turn volatile context (git state) to the latest user message —
+// request-only, never persisted. Keeping it out of the system message and out
+// of the immutable history means a changed repo state between turns never
+// invalidates the prompt-cache prefix: the block always lands in the
+// not-yet-cached tail.
+export function attachTurnContext(messages: CoreMessage[], context: string | null): CoreMessage[] {
+  if (!context) return messages;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.role !== "user") continue;
+    const reminder = {
+      type: "text" as const,
+      text: `<system-reminder>\n${context}\n</system-reminder>`,
+    };
+    const content =
+      typeof message.content === "string"
+        ? message.content
+          ? [reminder, { type: "text" as const, text: message.content }]
+          : [reminder]
+        : [reminder, ...message.content];
+    const copy = messages.slice();
+    copy[i] = { ...message, content };
+    return copy;
+  }
+  return messages;
+}
 
 // Keyword matching cannot catch every phrasing of "I am about to…", so a
 // text-only end to a turn that used tools gets a semantic check: the model
@@ -257,6 +286,16 @@ export class AgentLoop {
   private activeTurnUserIndex = -1;
   private titleScheduled = false;
   private titleInput?: string;
+  // Rendered git context for the in-flight turn (null when unavailable);
+  // snapshotted at turn start so every step of the turn sends the same block.
+  private turnGitContext: string | null = null;
+  // Lazily resolved auxiliary model (config.smallModel) for cheap side calls
+  // — compaction summaries, session titles, completion checks. Undefined =
+  // use the main model; a resolution failure is surfaced once as a notice.
+  private auxModelResolved = false;
+  private auxModelValue?: LanguageModel;
+  private auxTemperatureValue?: number;
+  private auxModelError: string | null = null;
   confirmHandler?: (req: PermissionRequest) => Promise<boolean>;
   // Hook failures never block the turn (except an explicit PreToolUse block);
   // their stderr surfaces through this callback (REPL system message / stderr
@@ -319,6 +358,35 @@ export class AgentLoop {
     return this.messages;
   }
 
+  // Auxiliary model for cheap side calls: config.smallModel, resolved once.
+  // An unresolvable name/key degrades to the main model instead of breaking
+  // turns; the failure rides out once as a notice at the next turn start.
+  private resolveAuxModel(): void {
+    if (this.auxModelResolved) return;
+    this.auxModelResolved = true;
+    const name = this.opts.config.smallModel;
+    if (!name) return;
+    try {
+      this.auxModelValue = createModel(this.opts.config, name);
+      this.auxTemperatureValue =
+        resolveModelConfig(this.opts.config, name).temperature ?? this.opts.temperature;
+    } catch (error) {
+      this.auxModelError = `smallModel "${name}" could not be resolved (${
+        error instanceof Error ? error.message : String(error)
+      }); using the main model for auxiliary calls.`;
+    }
+  }
+
+  getAuxModel(): LanguageModel {
+    this.resolveAuxModel();
+    return this.auxModelValue ?? this.opts.model;
+  }
+
+  getAuxTemperature(): number | undefined {
+    this.resolveAuxModel();
+    return this.auxModelValue ? this.auxTemperatureValue : this.opts.temperature;
+  }
+
   // Rebinds the per-call provider metadata (e.g. after the reasoning effort
   // for the current model changed via /model) without recreating the loop.
   setProviderMetadata(metadata: Record<string, Record<string, unknown>> | undefined): void {
@@ -363,6 +431,7 @@ export class AgentLoop {
     this.messages = reconcileToolCalls(messages);
     this.turnMarkers = [];
     this.redoStack = [];
+    this.opts.registry?.resetVolatileState();
   }
 
   // Read-only counterpart of retractLastTurn: how many messages /undo would
@@ -396,6 +465,7 @@ export class AgentLoop {
     this.lastUndoneLabel = messageText(this.messages[userIndex]).slice(0, REDO_LABEL_MAX);
     this.messages = result.messages;
     await this.opts.sessionStore?.replaceMessages([...this.messages]);
+    this.opts.registry?.resetVolatileState();
     const last = this.turnMarkers[this.turnMarkers.length - 1];
     let turn: number | undefined;
     let tree: string | undefined;
@@ -490,6 +560,7 @@ export class AgentLoop {
     if (removed === 0) return 0;
     this.messages = this.messages.slice(0, cut);
     await this.opts.sessionStore?.replaceMessages([...this.messages]);
+    this.opts.registry?.resetVolatileState();
     this.turnMarkers = this.turnMarkers.filter((m) => m.userIndex < cut);
     this.redoStack = [];
     return removed;
@@ -529,7 +600,7 @@ export class AgentLoop {
     const input = this.titleInput;
     if (!input) return;
     this.titleScheduled = true;
-    scheduleSessionTitle(store, input, this.opts.model);
+    scheduleSessionTitle(store, input, this.getAuxModel());
   }
 
   // A user interrupt (Esc) ends the turn mid-stream, before the normal
@@ -582,6 +653,16 @@ export class AgentLoop {
     opts?: { persistAs?: string },
   ): AsyncGenerator<StreamEvent> {
     this.syncSystemMessage();
+    // Snapshot the repo state once per turn; attachTurnContext adds it to the
+    // outgoing request without touching the persisted history. Git failures
+    // degrade to no context (getGitSummaryCached returns null).
+    const git = getGitSummaryCached(this.opts.cwd);
+    this.turnGitContext = git ? formatGitSummary(git) : null;
+    this.resolveAuxModel();
+    if (this.auxModelError) {
+      yield { type: "notice", message: this.auxModelError };
+      this.auxModelError = null;
+    }
 
     const inputText = typeof input === "string" ? input : input.text;
     const images = typeof input === "string" ? [] : input.images;
@@ -706,6 +787,7 @@ export class AgentLoop {
         // /undo then only retracts messages until new turns accumulate,
         // instead of reverting files against a stale snapshot turn.
         this.turnMarkers = [];
+        this.opts.registry?.resetVolatileState();
       }
 
       // One model step, with retries: a transient stream failure (network
@@ -963,11 +1045,11 @@ export class AgentLoop {
             )}. Complete them now with tool calls, or update the list with todo_write if they are no longer needed.`;
         } else if (usedToolsThisTurn && !signal.aborted) {
           const complete = await checkTaskComplete(
-            this.opts.model,
+            this.getAuxModel(),
             inputText,
             text,
             signal,
-            this.opts.temperature,
+            this.getAuxTemperature(),
           );
           if (complete === false) {
             reason = "completion check reports the task unfinished";
@@ -1124,14 +1206,11 @@ export class AgentLoop {
   // The permission mode can change at runtime, so the system message is
   // recomputed at the start of every turn instead of being frozen by the
   // constructor. Also restores a system message after loadMessages() (resume,
-  // /model switch) replaced the history with one that has none. Git context
-  // (branch, dirty count, recent commits) is refreshed here too, so the model
-  // always sees the current repo state; any git failure is silently skipped.
-  // Project memory (AGENTS.md in the cwd) and user memory (~/.star-cli/
-  // MEMORY.md) are appended as delimited blocks; both cache by mtime, so this
-  // stays cheap per turn. The
-  // skills listing is refreshed here as well, so skills added mid-session
-  // show up in the next turn's system prompt.
+  // /model switch) replaced the history with one that has none. Everything in
+  // here is stable across turns (base prompt, plan-mode flag, memories, skills
+  // — the latter two cached by mtime), which keeps the prompt-cache prefix
+  // intact; volatile git state rides per-turn on the latest user message
+  // instead (attachTurnContext).
   private syncSystemMessage(): void {
     const base = this.opts.system;
     const plan = this.opts.config.permissionMode === "plan";
@@ -1144,8 +1223,6 @@ export class AgentLoop {
     if (userMemory) parts.push(userMemory);
     const skills = discoverSkills(this.opts.cwd);
     if (skills.length > 0) parts.push(formatSkillsBlock(skills));
-    const git = getGitSummaryCached(this.opts.cwd);
-    if (git) parts.push(formatGitSummary(git));
     if (parts.length === 0) return;
     const content = parts.join("\n\n");
     const head = this.messages[0];
@@ -1163,14 +1240,19 @@ export class AgentLoop {
     compacted: CompactionResult,
     signal?: AbortSignal,
   ): Promise<CoreMessage[]> {
-    const { config, model } = this.opts;
-    if (config.contextCompaction !== "summary" || !model) {
+    const { config } = this.opts;
+    if (config.contextCompaction !== "summary") {
       return compacted.messages;
     }
     const headCount = compacted.messages[0]?.role === "system" ? 1 : 0;
     const dropped = this.messages.slice(headCount, headCount + compacted.droppedCount);
     try {
-      const summary = await summarizeMessages(dropped, model, signal, this.opts.temperature);
+      const summary = await summarizeMessages(
+        dropped,
+        this.getAuxModel(),
+        signal,
+        this.getAuxTemperature(),
+      );
       const messages = compacted.messages.slice();
       messages[headCount] = {
         role: "user",
@@ -1189,7 +1271,7 @@ export class AgentLoop {
   ): AsyncGenerator<StreamEvent> {
     for await (const event of streamChat({
       model: this.opts.model,
-      messages: this.messages,
+      messages: attachTurnContext(this.messages, this.turnGitContext),
       tools: aiTools,
       abortSignal: signal,
       providerMetadata: this.opts.providerMetadata,
