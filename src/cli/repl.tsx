@@ -1437,7 +1437,10 @@ export function Repl({
         busyCommandRef.current = "compact";
         // /compact is refused mid-turn, so the stream ticker is free to reuse:
         // drive the spinner with a busy label while compaction runs — the
-        // summary call alone can take up to 60s on a slow relay.
+        // summary call alone can take up to 60s on a slow relay. Stamp the
+        // start time too: the elapsed indicator reads turnStartedAtRef, which
+        // is otherwise 0 (fresh session) or the last turn's start.
+        turnStartedAtRef.current = Date.now();
         tickerStopRef.current = startTicker((tick) => setSpinnerTick(tick));
         setActivity("compacting context…");
         try {
