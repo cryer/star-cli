@@ -344,7 +344,7 @@ star -p "what's wrong in this UI?" --image screenshot.png --image mockup.jpg
 
 ## 内置工具
 
-`read_file`、`read_image`（会话中把图片文件带给模型——截图、设计稿等；支持 png/jpg/gif/webp，超过 2000px 自动降采样）、`write_file`、`edit_file`、`glob`、`grep`、`bash`、`web_fetch`、`web_search`（DuckDuckGo，无需 API 密钥）、`todo_read`、`todo_write`、`task_list`、`task_output`、`task_kill`、`subagent`、`skill`、`remember`——每个都声明一个权限级别（`read` / `write` / `exec`），由权限门禁强制执行。硬性安全规则（危险 shell 命令、工作目录之外的路径、`.env` / 私钥等机密文件）在 `ask` / `auto` / `readonly` 下被拒绝，且无法被 allow 规则覆盖。
+`read_file`、`read_image`（会话中把图片文件带给模型——截图、设计稿等；支持 png/jpg/gif/webp，超过 2000px 自动降采样）、`screenshot`（截取主显示器画面给模型看——用于核对运行中程序的真实视觉效果，比如 dev server 渲染的页面；平台原生截图、零依赖，Windows 上 DPI 感知保证缩放下像素精确，无显示器的 headless 会话返回明确错误）、`write_file`、`edit_file`、`glob`、`grep`、`bash`、`web_fetch`、`web_search`（DuckDuckGo，无需 API 密钥）、`todo_read`、`todo_write`、`task_list`、`task_output`、`task_kill`、`subagent`、`skill`、`remember`——每个都声明一个权限级别（`read` / `write` / `exec`），由权限门禁强制执行。硬性安全规则（危险 shell 命令、工作目录之外的路径、`.env` / 私钥等机密文件）在 `ask` / `auto` / `readonly` 下被拒绝，且无法被 allow 规则覆盖。
 
 `subagent` 工具（`exec` 级别，因此在计划模式下隐藏，在 readonly 下被拒绝）派生一个带相同内置工具的子代理循环，处理专注、自包含的子任务——调研、探索或一处孤立的改动——并把子代理的最终报告作为工具结果返回。子代理只运行一层（子代理不能再派生子代理），共享父代理的权限模式与确认提示，其对话不持久化到会话。
 
