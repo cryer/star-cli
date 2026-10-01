@@ -1054,7 +1054,7 @@ export class AgentLoop {
           this.messages.push(toolMessage);
           await this.persist(toolMessage);
           answered.add(call.id);
-          // Tool-attached images (read_image) ride as a follow-up user message
+          // Tool-attached images (read_image, screenshot) ride as a follow-up user message
           // with real image parts — tool results are text-only on every
           // protocol, and this is the same shape pasted images arrive in.
           if (result.images && result.images.length > 0) {

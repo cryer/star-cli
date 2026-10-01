@@ -22,7 +22,7 @@ export interface ToolContext {
 export interface ToolResult {
   content: string;
   isError?: boolean;
-  // Image attachments the model must actually see (read_image). The agent
+  // Image attachments the model must actually see (read_image, screenshot). The agent
   // loop appends them to the history as a user message with image parts —
   // tool results themselves are text-only on every protocol.
   images?: ImageInput[];

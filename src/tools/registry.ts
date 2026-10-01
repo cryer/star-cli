@@ -5,6 +5,7 @@ import { grepTool } from "./fs/grep";
 import { readFileTool } from "./fs/read";
 import { readImageTool } from "./fs/read-image";
 import { writeFileTool } from "./fs/write";
+import { screenshotTool } from "./screenshot";
 import { taskKillTool, taskListTool, taskOutputTool } from "./tasks";
 import { type TodoStore, createTodoTools } from "./todo";
 import type { Tool } from "./types";
@@ -20,6 +21,7 @@ export class ToolRegistry {
     for (const tool of [
       readFileTool,
       readImageTool,
+      screenshotTool,
       writeFileTool,
       editFileTool,
       globTool,
