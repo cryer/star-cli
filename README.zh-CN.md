@@ -114,6 +114,10 @@ model = "gpt-4o"                  # 发送给 API 的模型 id
                                   # minimal/max 等），因此接受任意字符串，由服务端校验。
                                   # 不设置 = 服务端默认。anthropic 协议下忽略。
                                   # /model 选完模型后也会接着让你选择推理强度。
+# vision = false                  # 标记纯语言模型：read_image/screenshot 会直接返回文本错误，
+                                  # 不再把图片塞进历史导致端点报 4xx。不设置 = 允许图片。（即使
+                                  # 不设置，端点明确拒绝图片的 4xx 也会自愈：剥掉历史中的图片后
+                                  # 自动重试一次。）
 # streamIdleTimeoutSec = 60       # 按模型覆盖全局的流看门狗超时
 # streamFirstChunkTimeoutSec = 600
 # 可选的按模型定价（美元/1M token）——启用 /cost 和 /usage 中的美元估算。

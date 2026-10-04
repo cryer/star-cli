@@ -116,6 +116,11 @@ model = "gpt-4o"                  # model id sent to the API
                                   # provider (low/medium/high are common; some add minimal/max...).
                                   # Unset = server default. Ignored for anthropic. The /model
                                   # picker also offers these levels after a model pick.
+# vision = false                  # mark a text-only model: read_image/screenshot then decline with
+                                  # a text error instead of attaching images the endpoint would
+                                  # reject. Unset = images allowed. (Without it, a 4xx rejecting
+                                  # images outright still self-heals: the images are stripped from
+                                  # the history and the request retried once.)
 # streamIdleTimeoutSec = 60       # per-model overrides of the global stream watchdog timeouts
 # streamFirstChunkTimeoutSec = 600
 # optional per-model pricing in USD per 1M tokens — enables the $ estimate in /cost and /usage.
