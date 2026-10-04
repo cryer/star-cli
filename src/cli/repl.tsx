@@ -40,7 +40,14 @@ import {
   listTurnSnapshots,
   rewindToSnapshot,
 } from "../tools/fs/snapshots";
-import { type TodoItem, formatTodos, loadTodos, parseTodoArgs, resetTodos } from "../tools/todo";
+import {
+  type TodoItem,
+  formatTodos,
+  loadTodos,
+  parseTodoArgs,
+  resetTodos,
+  setTodoSession,
+} from "../tools/todo";
 import { VERSION } from "../version";
 import type { ChatBackend } from "./backend";
 import { budgetState } from "./budget";
@@ -578,7 +585,7 @@ export function Repl({
   const resumedAtStart = initialMessages !== undefined;
   useEffect(() => {
     if (!resumedAtStart) return;
-    loadTodos(cwd)
+    loadTodos(cwd, sessionStoreRef.current?.id)
       .then(setTodos)
       .catch(() => {});
   }, [cwd, resumedAtStart]);
@@ -881,8 +888,10 @@ export function Repl({
       current.setSessionStore(store);
       sessionStoreRef.current = store;
       // Resuming is the explicit "continue this project" gesture: bring the
-      // persisted todo list back into the panel (and the model's todo_read).
-      setTodos(await loadTodos(cwd));
+      // persisted todo list back into the panel (and the model's todo_read) —
+      // but only when this session actually owns it.
+      setTodoSession(store.id);
+      setTodos(await loadTodos(cwd, store.id));
       hydrateSnapshots(await loadSessionSnapshots(store.dir));
       const display = buildDisplayMessages(resumed.messages);
       nextIdRef.current = display.length;
@@ -1372,6 +1381,7 @@ export function Repl({
         await fork.setTitle(title);
         current.setSessionStore(fork);
         sessionStoreRef.current = fork;
+        setTodoSession(fork.id);
         return `Forked into new session ${fork.id} ("${title}") and switched to it. Checkpoints and rewind history do not carry over.`;
       },
       newSession: async () => {
@@ -1386,6 +1396,7 @@ export function Repl({
         const store = await SessionStore.create(cwd, modelNameRef.current);
         current.setSessionStore(store);
         sessionStoreRef.current = store;
+        setTodoSession(store.id);
         // Keep the leading system prompt, drop everything else.
         const [first] = current.getMessages();
         await current.loadMessages(first?.role === "system" ? [first] : []);

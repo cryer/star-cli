@@ -15,6 +15,11 @@ const todoItemSchema = z.object({
   status: z.enum(["pending", "in_progress", "done"]),
 });
 
+const fileSchema = z.object({
+  sessionId: z.string().nullable(),
+  items: z.array(todoItemSchema),
+});
+
 const writeSchema = z.object({
   todos: z.array(todoItemSchema).describe("The full todo list, replacing the current one"),
 });
@@ -33,6 +38,17 @@ export function setTodoPersistGuard(guard: () => boolean): void {
   persistGuard = guard;
 }
 
+// The session that owns the persisted todo list. .star/todos.json is
+// per-project-directory, so stamping it with the owning session id is what
+// keeps one session's list from leaking into another session resumed in the
+// same directory. null = no session bound (e.g. print mode without a store);
+// such files never match a later -c/-r resume.
+let boundSessionId: string | null = null;
+
+export function setTodoSession(id: string | null): void {
+  boundSessionId = id;
+}
+
 export class TodoStore {
   private items = new Map<number, TodoItem>();
 
@@ -47,7 +63,7 @@ export class TodoStore {
     }
   }
 
-  async load(cwd: string): Promise<void> {
+  async load(cwd: string, sessionId?: string): Promise<void> {
     let raw: string;
     try {
       raw = await readFile(fileFor(cwd), "utf8");
@@ -57,8 +73,23 @@ export class TodoStore {
     try {
       const parsed: unknown = JSON.parse(raw);
       if (Array.isArray(parsed)) {
+        // Legacy pre-upgrade format (a bare array): adopt it so existing
+        // todos survive the upgrade — the next save stamps the current
+        // session id.
         this.replace(parsed.filter((it) => todoItemSchema.safeParse(it).success));
+        return;
       }
+      const file = fileSchema.safeParse(parsed);
+      if (!file.success) {
+        return;
+      }
+      if (file.data.sessionId !== (sessionId ?? null)) {
+        // Another session owns this list: drop any stale in-memory items so
+        // they can't leak into the resumed session, but leave the file alone.
+        this.replace([]);
+        return;
+      }
+      this.replace(file.data.items);
     } catch {
       // corrupted file: keep current state
     }
@@ -80,7 +111,7 @@ export class TodoStore {
     }
     await mkdir(path.join(cwd, ".star"), { recursive: true });
     const tmp = `${file}.tmp`;
-    await writeFile(tmp, `${JSON.stringify(items, null, 2)}\n`);
+    await writeFile(tmp, `${JSON.stringify({ sessionId: boundSessionId, items }, null, 2)}\n`);
     await rename(tmp, file);
   }
 }
@@ -123,9 +154,10 @@ export function pendingTodoTitles(args: unknown): string[] {
 
 // Load the persisted todo list for a cwd into the default store and return
 // it. Called only when the user explicitly continues a project (session
-// resume) — a fresh session never rehydrates stale todos on its own.
-export async function loadTodos(cwd: string): Promise<TodoItem[]> {
-  await defaultStore.load(cwd);
+// resume) — a fresh session never rehydrates stale todos on its own, and a
+// file owned by a different session id leaves the store empty.
+export async function loadTodos(cwd: string, sessionId?: string): Promise<TodoItem[]> {
+  await defaultStore.load(cwd, sessionId);
   return defaultStore.list();
 }
 

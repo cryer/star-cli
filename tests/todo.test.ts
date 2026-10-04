@@ -1,7 +1,7 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { TodoStore, createDefaultRegistry, createTodoTools } from "../src/tools";
 import type { TodoItem } from "../src/tools";
 import {
@@ -10,6 +10,7 @@ import {
   pendingTodoTitles,
   resetTodos,
   setTodoPersistGuard,
+  setTodoSession,
 } from "../src/tools/todo";
 import type { Tool, ToolContext, ToolResult } from "../src/tools/types";
 
@@ -43,6 +44,10 @@ afterAll(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+afterEach(() => {
+  setTodoSession(null);
+});
+
 describe("todo_write / todo_read", () => {
   it("writes and reads back the same list", async () => {
     const res = await run("todo_write", { todos: sample });
@@ -65,7 +70,10 @@ describe("todo_write / todo_read", () => {
 
   it("persists to .star/todos.json, but a fresh store stays empty until load()", async () => {
     const raw = await readFile(path.join(dir, ".star", "todos.json"), "utf8");
-    expect(JSON.parse(raw)).toEqual([{ id: 9, title: "only item", status: "pending" }]);
+    expect(JSON.parse(raw)).toEqual({
+      sessionId: null,
+      items: [{ id: 9, title: "only item", status: "pending" }],
+    });
 
     // A new session never resurrects the persisted list on its own…
     const fresh = new TodoStore();
@@ -169,6 +177,69 @@ describe("todo_write / todo_read", () => {
     await run("todo_write", { todos: sample });
     await run("todo_write", { todos: [] });
     await expect(readFile(path.join(dir, ".star", "todos.json"), "utf8")).rejects.toThrow();
+  });
+});
+
+describe("session ownership", () => {
+  it("stamps the bound session id on save", async () => {
+    setTodoSession("sess-a");
+    await run("todo_write", { todos: sample });
+    const raw = await readFile(path.join(dir, ".star", "todos.json"), "utf8");
+    expect(JSON.parse(raw)).toEqual({ sessionId: "sess-a", items: sample });
+  });
+
+  it("does not rehydrate a file owned by another session", async () => {
+    const ownedDir = await mkdtemp(path.join(tmpdir(), "star-todo-owner-"));
+    try {
+      setTodoSession("sess-a");
+      const ownedStore = new TodoStore();
+      const [ownedWrite] = createTodoTools(ownedStore);
+      await ownedWrite?.execute({ todos: sample }, { cwd: ownedDir });
+
+      const loaded = await loadTodos(ownedDir, "sess-b");
+      expect(loaded).toEqual([]);
+      const [read] = createTodoTools().filter((t) => t.name === "todo_read");
+      const res = await read?.execute({}, { cwd: ownedDir });
+      expect(res?.content).toBe("No todos.");
+    } finally {
+      await rm(ownedDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rehydrates when the session id matches", async () => {
+    const ownedDir = await mkdtemp(path.join(tmpdir(), "star-todo-match-"));
+    try {
+      setTodoSession("sess-a");
+      const ownedStore = new TodoStore();
+      const [ownedWrite] = createTodoTools(ownedStore);
+      await ownedWrite?.execute({ todos: sample }, { cwd: ownedDir });
+
+      const loaded = await loadTodos(ownedDir, "sess-a");
+      expect(loaded).toEqual(sample);
+    } finally {
+      resetTodos();
+      await rm(ownedDir, { recursive: true, force: true });
+    }
+  });
+
+  it("adopts a legacy plain-array file and stamps it on the next save", async () => {
+    const legacyDir = await mkdtemp(path.join(tmpdir(), "star-todo-legacy-"));
+    try {
+      await mkdir(path.join(legacyDir, ".star"), { recursive: true });
+      await writeFile(path.join(legacyDir, ".star", "todos.json"), `${JSON.stringify(sample)}\n`);
+
+      const loaded = await loadTodos(legacyDir, "sess-new");
+      expect(loaded).toEqual(sample);
+
+      setTodoSession("sess-new");
+      const [write] = createTodoTools();
+      await write?.execute({ todos: sample }, { cwd: legacyDir });
+      const raw = await readFile(path.join(legacyDir, ".star", "todos.json"), "utf8");
+      expect(JSON.parse(raw)).toEqual({ sessionId: "sess-new", items: sample });
+    } finally {
+      resetTodos();
+      await rm(legacyDir, { recursive: true, force: true });
+    }
   });
 });
 

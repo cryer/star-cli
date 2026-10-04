@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
 import { createModel } from "../src/llm/provider";
-import { listModels, resolveModelConfig } from "../src/llm/registry";
+import { listModels, resolveModelConfig, resolveStartupModel } from "../src/llm/registry";
 import { streamChat } from "../src/llm/stream";
 
 function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
@@ -62,6 +62,32 @@ describe("resolveModelConfig", () => {
 
   it("listModels returns all configured models", () => {
     expect(listModels(makeConfig()).map((m) => m.name)).toEqual(["fast", "smart"]);
+  });
+});
+
+describe("resolveStartupModel", () => {
+  it("uses the default model when no session model is recorded", () => {
+    expect(resolveStartupModel(makeConfig())).toEqual({ name: "fast", notice: null });
+    expect(resolveStartupModel(makeConfig(), "")).toEqual({ name: "fast", notice: null });
+    expect(resolveStartupModel(makeConfig(), null)).toEqual({ name: "fast", notice: null });
+  });
+
+  it("restores a recorded session model that still exists in the config", () => {
+    expect(resolveStartupModel(makeConfig(), "smart")).toEqual({ name: "smart", notice: null });
+  });
+
+  it("falls back to the default with a notice when the recorded model is gone", () => {
+    const result = resolveStartupModel(makeConfig(), "retired");
+    expect(result.name).toBe("fast");
+    expect(result.notice).toBe(
+      'Session model "retired" not found in config — using default model.',
+    );
+  });
+
+  it("returns undefined when nothing resolves, so the caller keeps its exit path", () => {
+    const result = resolveStartupModel(makeConfig({ defaultModel: undefined }), null);
+    expect(result.name).toBeUndefined();
+    expect(result.notice).toBeNull();
   });
 });
 

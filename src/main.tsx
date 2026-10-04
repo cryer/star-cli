@@ -10,7 +10,7 @@ import { loadConfigSync } from "./config/loader";
 import { type StarConfig, contextWindowTokens } from "./config/schema";
 import { type CoreMessage, type ImageInput, reconcileToolCalls } from "./core/messages";
 import { createModel, reasoningEffortMetadata } from "./llm/provider";
-import { resolveModelConfig } from "./llm/registry";
+import { resolveModelConfig, resolveStartupModel } from "./llm/registry";
 import { loadSessionSnapshots } from "./session/checkpoints";
 import { clearSessions } from "./session/clear";
 import {
@@ -23,7 +23,7 @@ import { type SessionMeta, SessionStore } from "./session/store";
 import { defaultTaskManager } from "./tasks/manager";
 import { createDefaultRegistry } from "./tools";
 import { hydrateSnapshots } from "./tools/fs/snapshots";
-import { loadTodos } from "./tools/todo";
+import { loadTodos, setTodoSession } from "./tools/todo";
 import { VERSION } from "./version";
 
 async function createLoop(
@@ -251,15 +251,6 @@ program
       process.exit(1);
     }
 
-    const modelName = opts.model ?? config.defaultModel;
-    if (!modelName) {
-      console.error(
-        "No model configured. Add one to ~/.star-cli/config.toml or pass --model.\n" +
-          "See README.md for configuration examples.",
-      );
-      process.exit(1);
-    }
-
     let sessionStore: SessionStore | null = null;
     let resumed: { meta: SessionMeta; messages: CoreMessage[] } | null = null;
     let resumeId: string | null = null;
@@ -293,8 +284,30 @@ program
         await sessionStore.replaceMessages(messages);
       }
       resumed = { meta, messages };
-    } else if (!opts.print) {
+      setTodoSession(resumeId);
+    }
+
+    // An explicit --model already landed in config.defaultModel (loader
+    // override) and wins; otherwise a resumed session's recorded model is
+    // restored when it still resolves in the config.
+    const { name: modelName, notice: modelNotice } = resolveStartupModel(
+      config,
+      opts.model ? undefined : resumed?.meta.model,
+    );
+    if (modelNotice) {
+      process.stderr.write(`${modelNotice}\n`);
+    }
+    if (!modelName) {
+      console.error(
+        "No model configured. Add one to ~/.star-cli/config.toml or pass --model.\n" +
+          "See README.md for configuration examples.",
+      );
+      process.exit(1);
+    }
+
+    if (!resumeId && !opts.print) {
       sessionStore = await SessionStore.create(cwd, modelName);
+      setTodoSession(sessionStore.id);
     }
 
     let loop: AgentLoop;
@@ -307,8 +320,9 @@ program
     if (resumed) {
       await loop.loadMessages(resumed.messages);
       // Resuming explicitly continues the project: rehydrate its todo list
-      // (fresh sessions leave it alone even when .star/todos.json exists).
-      await loadTodos(cwd);
+      // (fresh sessions leave it alone even when .star/todos.json exists, and
+      // a list owned by another session is not adopted).
+      await loadTodos(cwd, resumeId ?? undefined);
       if (sessionStore) {
         hydrateSnapshots(await loadSessionSnapshots(sessionStore.dir));
       }
