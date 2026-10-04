@@ -17,6 +17,11 @@ export interface ToolContext {
   cwd: string;
   abortSignal?: AbortSignal;
   snapshotContext?: SnapshotContext;
+  // False when the active model is text-only ([[models]] vision = false):
+  // image-producing tools (read_image, screenshot) must decline with a text
+  // error rather than attach images the endpoint would reject. Undefined
+  // means images are allowed.
+  visionEnabled?: boolean;
 }
 
 export interface ToolResult {

@@ -3,7 +3,12 @@ import { type StarConfig, resolveCompactThreshold } from "../config/schema";
 import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
 import type { StreamEvent, TokenUsage } from "../core/events";
 import { formatGitSummary, getGitSummaryCached } from "../core/git";
-import { isOversizedImageError, stripOversizedImages } from "../core/image";
+import {
+  isOversizedImageError,
+  isVisionUnsupportedError,
+  stripAllImages,
+  stripOversizedImages,
+} from "../core/image";
 import {
   type ChatInput,
   type CoreMessage,
@@ -62,6 +67,11 @@ export interface AgentLoopOptions {
   // MAX_SUBAGENT_DEPTH the subagent tool is not registered, so subagents
   // cannot spawn further subagents.
   subagentDepth?: number;
+  // Whether the active model accepts image input (the model's [[models]]
+  // vision key), resolved by the caller; undefined = images allowed.
+  // Subagents inherit it. When false, read_image/screenshot decline with a
+  // text error instead of attaching images the endpoint would reject.
+  vision?: boolean;
   // Base delay between stream retries (doubled per attempt); tests shrink it.
   retryDelayMs?: number;
 }
@@ -346,6 +356,7 @@ export class AgentLoop {
           temperature: opts.temperature,
           streamIdleTimeoutSec: opts.streamIdleTimeoutSec,
           streamFirstChunkTimeoutSec: opts.streamFirstChunkTimeoutSec,
+          vision: opts.vision,
           depth,
           getConfirmHandler: () => this.confirmHandler,
           onUsage: (usage, childModel) => this.addSubagentUsage(usage, childModel),
@@ -581,6 +592,17 @@ export class AgentLoop {
   // can be resent and a later resume never carries the offending images.
   private async stripOversizedImages(): Promise<number> {
     const { messages, removed } = stripOversizedImages(this.messages);
+    if (removed === 0) return 0;
+    this.messages = messages;
+    await this.opts.sessionStore?.replaceMessages([...this.messages]);
+    return removed;
+  }
+
+  // Same rewrite as above, but for text-only endpoints that reject any image
+  // at all: every image part in the history is replaced with a placeholder,
+  // which also heals sessions already poisoned by an attached image.
+  private async stripAllImages(): Promise<number> {
+    const { messages, removed } = stripAllImages(this.messages);
     if (removed === 0) return 0;
     this.messages = messages;
     await this.opts.sessionStore?.replaceMessages([...this.messages]);
@@ -823,6 +845,10 @@ export class AgentLoop {
       // provider rejects the request for an oversized image (a 4xx), the
       // offending images are stripped from the history and the request resent.
       let oversizedImagesStripped = false;
+      // Same one-shot escape for text-only endpoints that reject ANY image
+      // ("no vision encoder"): every image part is stripped, which also heals
+      // a session already poisoned by an attached image.
+      let visionUnsupportedStripped = false;
 
       // Whitespace-only text counts as NO output: buffering relays often
       // stream one leading space delta the moment the request lands, then go
@@ -892,6 +918,17 @@ export class AgentLoop {
             yield {
               type: "notice",
               message: `Removed ${removed} oversized image(s) the model rejected; retrying the request.`,
+            };
+            continue;
+          }
+        }
+        if (failure && !visionUnsupportedStripped && isVisionUnsupportedError(failure)) {
+          visionUnsupportedStripped = true;
+          const removed = await this.stripAllImages();
+          if (removed > 0) {
+            yield {
+              type: "notice",
+              message: `Removed ${removed} image(s) the model cannot read; retrying the request.`,
             };
             continue;
           }
@@ -1465,6 +1502,7 @@ export class AgentLoop {
       result = await tool.execute(parsed.data, {
         cwd,
         abortSignal: signal,
+        visionEnabled: this.opts.vision !== false,
         snapshotContext: {
           owner: (this.opts.subagentDepth ?? 0) > 0 ? "subagent" : "root",
           turn: this.activeTurnSeq,

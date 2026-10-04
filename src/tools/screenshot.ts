@@ -18,7 +18,14 @@ export function createScreenshotTool(
       "Capture a screenshot of the primary display and see it. Use this to check the actual visual result of a running program (web page, GUI) — e.g. after starting a dev server — instead of inferring from code. The capture shows exactly what is visible on screen, including overlapping windows: content hidden behind other windows cannot be seen, so if a specific window matters ask the user to bring it to the front first. Note the capture may include anything else currently on screen.",
     permission: "read",
     parameters: schema,
-    async execute() {
+    async execute(_args, ctx) {
+      if (ctx.visionEnabled === false) {
+        return {
+          content:
+            "The active model does not support image input (vision = false), so no screenshot was taken. Work from text instead, or ask the user to describe what is on screen.",
+          isError: true,
+        };
+      }
       const result = await capture();
       if (!result.ok) {
         return { content: `Screenshot failed: ${result.error}`, isError: true };

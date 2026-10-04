@@ -30,6 +30,9 @@ export interface SubagentDeps {
   // overrides); unset falls back to the top-level config values.
   streamIdleTimeoutSec?: number;
   streamFirstChunkTimeoutSec?: number;
+  // Inherited from the parent loop (the model's [[models]] vision key); when
+  // false the child's read_image/screenshot decline with a text error too.
+  vision?: boolean;
   depth: number;
   getConfirmHandler?: () => ((req: PermissionRequest) => Promise<boolean>) | undefined;
   // Receives the child loop's accumulated token usage once the run settles
@@ -129,6 +132,7 @@ async function runSubagent(
     temperature: deps.temperature,
     streamIdleTimeoutSec: deps.streamIdleTimeoutSec,
     streamFirstChunkTimeoutSec: deps.streamFirstChunkTimeoutSec,
+    vision: deps.vision,
     subagentDepth: deps.depth + 1,
   });
   const confirmHandler = deps.getConfirmHandler?.();

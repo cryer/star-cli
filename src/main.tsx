@@ -47,6 +47,7 @@ async function createLoop(
     temperature: modelConfig.temperature,
     streamIdleTimeoutSec: modelConfig.streamIdleTimeoutSec,
     streamFirstChunkTimeoutSec: modelConfig.streamFirstChunkTimeoutSec,
+    vision: modelConfig.vision,
   });
 }
 

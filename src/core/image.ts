@@ -8,6 +8,7 @@ export const MAX_IMAGE_DIMENSION = 2000;
 // Byte-size fallback for images whose dimensions cannot be probed.
 export const OVERSIZED_IMAGE_FALLBACK_BYTES = 5 * 1024 * 1024;
 export const IMAGE_REMOVED_PLACEHOLDER = "[image removed: too large for the model]";
+export const IMAGE_UNSUPPORTED_PLACEHOLDER = "[image removed: the model cannot read images]";
 
 export interface ImageDimensions {
   width: number;
@@ -111,6 +112,23 @@ export function isOversizedImageError(error: Error): boolean {
   return /image/i.test(text) && IMAGE_SIZE_KEYWORDS.test(text);
 }
 
+// A text-only endpoint rejected the request because it contained any image
+// at all (llama.cpp-style "this server was started without the vision
+// encoder … it cannot read images", providers answering "this model does
+// not support images"). Unlike isOversizedImageError no size keyword is
+// required — the remedy is stripping EVERY image part, not just big ones.
+const VISION_UNSUPPORTED_KEYWORDS =
+  /vision\s*encoder|can(?:not|'t) (?:read|process|handle|accept) images?|does(?:\s*not|n't) support (?:image|vision|multimodal)|images?(?:\s*input)? (?:are|is) not supported|not a vision|no vision (?:capability|support|encoder)|multimodal(?:\s*input)? (?:is )?not supported/i;
+
+export function isVisionUnsupportedError(error: Error): boolean {
+  const status = (error as { statusCode?: unknown }).statusCode;
+  if (typeof status !== "number" || status < 400 || status >= 500) return false;
+  const text = [error.message, responseBodyOf(error)]
+    .filter((part): part is string => typeof part === "string")
+    .join("\n");
+  return /image|vision|multimodal/i.test(text) && VISION_UNSUPPORTED_KEYWORDS.test(text);
+}
+
 function imagePartBytes(image: unknown): Buffer | null {
   if (typeof image === "string") {
     const base64 = image.startsWith("data:") ? image.slice(image.indexOf(",") + 1) : image;
@@ -148,6 +166,28 @@ export function stripOversizedImages(messages: CoreMessage[]): {
       changed = true;
       removed++;
       return { type: "text" as const, text: IMAGE_REMOVED_PLACEHOLDER };
+    });
+    return changed ? ({ ...message, content } as CoreMessage) : message;
+  });
+  return { messages: removed > 0 ? result : messages, removed };
+}
+
+// Replaces EVERY image part in the history with a text placeholder — the
+// remedy when the endpoint cannot read images at all (text-only model), not
+// just oversized ones. The input array is not mutated.
+export function stripAllImages(messages: CoreMessage[]): {
+  messages: CoreMessage[];
+  removed: number;
+} {
+  let removed = 0;
+  const result = messages.map((message) => {
+    if (!Array.isArray(message.content)) return message;
+    let changed = false;
+    const content = message.content.map((part) => {
+      if (part.type !== "image") return part;
+      changed = true;
+      removed++;
+      return { type: "text" as const, text: IMAGE_UNSUPPORTED_PLACEHOLDER };
     });
     return changed ? ({ ...message, content } as CoreMessage) : message;
   });

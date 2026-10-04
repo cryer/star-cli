@@ -42,6 +42,10 @@ export const ModelConfigSchema = z.object({
   // buffer long generations and stall mid-stream between flushes.
   streamIdleTimeoutSec: z.number().positive().optional(),
   streamFirstChunkTimeoutSec: z.number().positive().optional(),
+  // Text-only models: set false so image-producing tools (read_image,
+  // screenshot) decline with a text error instead of attaching images the
+  // endpoint would reject with an unrecoverable 4xx. Unset = images allowed.
+  vision: z.boolean().optional(),
   // Cost estimation needs BOTH prices (USD per 1M tokens); with only one set
   // the model is treated as unpriced.
   promptPrice: z.number().nonnegative().optional(),

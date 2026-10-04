@@ -38,6 +38,13 @@ export const readImageTool: Tool<typeof schema> = {
   permission: "read",
   parameters: schema,
   async execute(args, ctx) {
+    if (ctx.visionEnabled === false) {
+      return {
+        content:
+          "The active model does not support image input (vision = false), so the image was not read. Work from text instead, or ask the user to describe the image.",
+        isError: true,
+      };
+    }
     const filePath = path.resolve(ctx.cwd, args.path);
     // Same symlink-aware sensitive check as read_file.
     const resolvedPath = await realpath(filePath).catch(() => null);

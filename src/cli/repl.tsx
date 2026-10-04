@@ -779,6 +779,7 @@ export function Repl({
           temperature: modelConfig.temperature,
           streamIdleTimeoutSec: modelConfig.streamIdleTimeoutSec,
           streamFirstChunkTimeoutSec: modelConfig.streamFirstChunkTimeoutSec,
+          vision: modelConfig.vision,
         });
         const prev = backendRef.current;
         if (prev instanceof AgentLoop) {
