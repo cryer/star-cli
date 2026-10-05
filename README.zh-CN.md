@@ -384,3 +384,12 @@ pnpm test:pipeline   # layered pipeline incl. optional live LLM smoke (needs an 
 CI 在 Ubuntu + Windows 上、Node 20/22 下运行 lint、typecheck、测试和构建（`.github/workflows/ci.yml`）。
 
 架构：`src/cli`（Ink UI）、`src/agent`（主循环）、`src/llm`（Vercel AI SDK 服务商层）、`src/tools`、`src/context`（token 预算 + 压缩）、`src/permissions`、`src/session`、`src/config`。
+
+## 基准测试
+
+[Terminal-Bench 2.0](https://github.com/laude-institute/terminal-bench)，随机抽取 20 个任务，两个 agent 使用相同模型：
+
+| Agent | 模型 | 通过率 | 平均 token 消耗 | 平均耗时 |
+|---|---|---|---|---|
+| Star CLI 0.3.9 | Kimi K3 | 17/20 (85%) | 129.2K | 414s |
+| terminus-2 2.0.0 | Kimi K3 | 9/20 (45%) | 49.5K | 484s |
