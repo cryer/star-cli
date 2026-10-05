@@ -118,7 +118,9 @@ describe("StatusBar context percent", () => {
       }),
     );
     await tick();
-    // 1500 chars ≈ 375 estimated tokens ≈ 0.4% of a 100k window.
+    // 1500 chars ≈ 375 estimated tokens; the tool-schema overhead (~2k
+    // tokens) is now included in ctx %, so small real usage lands in the
+    // low single digits of a 100k window — still the one-decimal path.
     await typeText(app.stdin, "x".repeat(1500), "\r");
     await vi.waitFor(
       () => {
@@ -131,7 +133,8 @@ describe("StatusBar context percent", () => {
     const match = frame.match(/ctx: ([\d.]+)%/);
     expect(match, `frame should show ctx %, got: ${frame.slice(-300)}`).not.toBeNull();
     expect(Number(match?.[1])).toBeGreaterThan(0);
-    expect(Number(match?.[1])).toBeLessThan(1);
+    expect(Number(match?.[1])).toBeLessThan(10);
+    expect(match?.[1]).toContain(".");
     app.unmount();
   });
 

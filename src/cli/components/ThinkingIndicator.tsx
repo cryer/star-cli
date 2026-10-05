@@ -1,7 +1,9 @@
 import { Box, Text } from "ink";
+import { memo, useEffect, useState } from "react";
 
 import { formatElapsedSeconds } from "../format";
 import { thinkingIcon } from "../icons";
+import { startTicker } from "../ticker";
 
 export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 export const REASONING_TAIL_LENGTH = 200;
@@ -13,22 +15,30 @@ export function truncateTail(text: string, max: number): string {
   return `…${flat.slice(flat.length - max)}`;
 }
 
-// The spinner frame is driven by the caller's render ticker (see cli/ticker.ts);
-// keeping no internal interval avoids a second full-tree Ink rewrite per frame.
-// `activity` replaces the default label, e.g. while a tool call is executing.
-export function ThinkingIndicator({
+// The spinner animates from the component's own ticker (see cli/ticker.ts):
+// the indicator is mounted only while a turn or a busy command is in flight,
+// so the 100ms frame re-render stays inside this component instead of
+// setState-ing the Repl root (and reconciling the whole tree) on every frame.
+// Unmounting stops the interval. `frame` pins a fixed frame and wins over the
+// animated one; `activity` replaces the default label, e.g. while a tool call
+// is executing; `startedAt` (ms timestamp) drives the elapsed clock.
+export const ThinkingIndicator = memo(function ThinkingIndicator({
   reasoning,
-  frame = 0,
+  frame,
   activity,
-  elapsedSec,
-}: { reasoning?: string; frame?: number; activity?: string; elapsedSec?: number }) {
+  startedAt,
+}: { reasoning?: string; frame?: number; activity?: string; startedAt?: number }) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => startTicker((t) => setTick(t)), []);
   const tail = reasoning ? truncateTail(reasoning, REASONING_TAIL_LENGTH) : "";
-  const spinner = SPINNER_FRAMES[frame % SPINNER_FRAMES.length];
+  const spinner = SPINNER_FRAMES[(frame ?? tick) % SPINNER_FRAMES.length];
   // Tool-running activities carry their own per-tool icon in the label
   // (see repl.tsx), so the 💭 prefix only applies while thinking.
   const label = activity ?? `${thinkingIcon} star is thinking…`;
   // Long buffered waits (slow relays) look dead without a clock; show the
   // elapsed time once it becomes relevant.
+  const elapsedSec =
+    startedAt === undefined ? undefined : Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
   const elapsed =
     elapsedSec !== undefined && elapsedSec >= 3 ? ` (${formatElapsedSeconds(elapsedSec)})` : "";
   return (
@@ -45,4 +55,4 @@ export function ThinkingIndicator({
       )}
     </Box>
   );
-}
+});

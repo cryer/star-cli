@@ -12,8 +12,10 @@ export function nextFlush(prev: FlushState, next: FlushState): FlushState | null
   return next;
 }
 
-// Single render ticker: one interval drives both stream flushes and the
-// spinner frame. Returns a stop function; the callback receives the tick count.
+// Shared 100ms interval helper. The Repl's stream flush and the
+// ThinkingIndicator's spinner each run their own instance, so the spinner's
+// per-frame re-render stays inside the indicator instead of touching the
+// Repl root. Returns a stop function; the callback receives the tick count.
 export function startTicker(onTick: (tick: number) => void, intervalMs = TICK_MS): () => void {
   let tick = 0;
   const timer = setInterval(() => {

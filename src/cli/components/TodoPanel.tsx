@@ -1,4 +1,5 @@
 import { Box, Text } from "ink";
+import { memo } from "react";
 import type { TodoItem } from "../../tools/todo";
 import { toTerminalSafe } from "../terminal-text";
 
@@ -41,7 +42,7 @@ export function visibleTodoWindow(
 // it survives spinner/thinking redraws; finished items are dimmed. A fully
 // completed list has nothing left to track: hide it until the next
 // todo_write brings open items.
-export function TodoPanel({ todos }: { todos: TodoItem[] }) {
+export const TodoPanel = memo(function TodoPanel({ todos }: { todos: TodoItem[] }) {
   if (todos.length === 0 || todos.every((t) => t.status === "done")) return null;
   const { items, hiddenBefore, hiddenAfter } = visibleTodoWindow(todos);
   return (
@@ -60,4 +61,4 @@ export function TodoPanel({ todos }: { todos: TodoItem[] }) {
       {hiddenAfter > 0 && <Text dimColor> … {hiddenAfter} more</Text>}
     </Box>
   );
-}
+});

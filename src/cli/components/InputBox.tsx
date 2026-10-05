@@ -1,5 +1,5 @@
 import { Box, Text, useStdout } from "ink";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { type SlashCommandHint, filterCommands } from "../commands/suggest";
 import { type PathSuggestion, extractAtToken, suggestPaths } from "../path-suggest";
 import { useInput } from "../use-input";
@@ -169,7 +169,10 @@ interface InputBoxProps {
   onPasteImage?(): void;
 }
 
-export function InputBox({
+// Memoized: every prop from the Repl is a stable reference (state or
+// useCallback/useMemo), so a busy-turn re-render (stream flushes) skips the
+// styled-string rebuild and command filtering below.
+export const InputBox = memo(function InputBox({
   isStreaming,
   disabled,
   commands,
@@ -697,4 +700,4 @@ export function InputBox({
       )}
     </Box>
   );
-}
+});

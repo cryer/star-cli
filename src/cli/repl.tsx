@@ -249,7 +249,6 @@ export function Repl({
   const [, setUsageVersion] = useState(0);
   const [modelName, setModelName] = useState(model);
   const [pending, setPending] = useState<PendingPermission | null>(null);
-  const [spinnerTick, setSpinnerTick] = useState(0);
   const [activity, setActivity] = useState<string | null>(null);
   const [bgLabels, setBgLabels] = useState<string[]>(() => runningTaskLabels());
   const [todos, setTodos] = useState<TodoItem[]>([]);
@@ -287,6 +286,9 @@ export function Repl({
   // (the single pending slot can only hold one request at a time).
   const permissionChainRef = useRef<Promise<void>>(Promise.resolve());
   const alwaysAllowedRef = useRef(new Set<string>());
+  // Stable array view of alwaysAllowedRef: isAllowedByRules caches compiled
+  // rules by array identity, so it must only change when the set does.
+  const alwaysAllowedListRef = useRef<string[]>([]);
   // Mode the session was in before plan mode was entered; restored on plan
   // approval or /plan toggle. null when plan mode is not active.
   const prevModeRef = useRef<StarConfig["permissionMode"] | null>(null);
@@ -541,7 +543,7 @@ export function Repl({
   const attachConfirmHandler = useCallback(
     (target: ChatBackend) => {
       target.confirmHandler = (req) => {
-        if (isAllowedByRules([...alwaysAllowedRef.current], req)) {
+        if (isAllowedByRules(alwaysAllowedListRef.current, req)) {
           return Promise.resolve(true);
         }
         const ask = async (): Promise<boolean> => {
@@ -762,6 +764,7 @@ export function Repl({
       if (decision === "always") {
         const rule = buildAllowRule(p.request);
         alwaysAllowedRef.current.add(rule);
+        alwaysAllowedListRef.current = [...alwaysAllowedRef.current];
         void addAllowRule(rule)
           .then((added) => {
             pushMessage(
@@ -963,8 +966,7 @@ export function Repl({
         flushedRef.current = { ...flushedRef.current, streamed: "" };
         setStreamingText("");
       };
-      tickerStopRef.current = startTicker((tick) => {
-        setSpinnerTick(tick);
+      tickerStopRef.current = startTicker(() => {
         const uncommitted = streamedRef.current.slice(lastCommittedLenRef.current);
         const split = splitCommittableLines(uncommitted, 8);
         if (split) {
@@ -1464,13 +1466,11 @@ export function Repl({
         busyCommandRef.current = "compact";
         const controller = new AbortController();
         busyAbortRef.current = controller;
-        // /compact is refused mid-turn, so the stream ticker is free to reuse:
-        // drive the spinner with a busy label while compaction runs — the
-        // summary call alone can take up to 60s on a slow relay. Stamp the
-        // start time too: the elapsed indicator reads turnStartedAtRef, which
-        // is otherwise 0 (fresh session) or the last turn's start.
+        // The busy label's spinner animates on the indicator's own ticker
+        // (see ThinkingIndicator); only the elapsed clock's start needs
+        // stamping here — turnStartedAtRef is otherwise 0 (fresh session) or
+        // the last turn's start.
         turnStartedAtRef.current = Date.now();
-        tickerStopRef.current = startTicker((tick) => setSpinnerTick(tick));
         setActivity("compacting context…");
         try {
           const result = await compactSession({
@@ -1856,7 +1856,8 @@ export function Repl({
     const current = backendRef.current;
     if (current instanceof AgentLoop) {
       const window_ = contextWindowTokens(config, modelNameRef.current);
-      const pct = (estimateTokens([...current.getMessages()]) / window_) * 100;
+      const pct =
+        ((estimateTokens(current.getMessages()) + current.getToolSchemaTokens()) / window_) * 100;
       // One decimal below 10% so small-but-real usage doesn't display as 0%.
       setContextPercent(pct < 10 ? Math.round(pct * 10) / 10 : Math.round(pct));
     } else {
@@ -1872,9 +1873,8 @@ export function Repl({
       {(thinking || activity !== null) && (
         <ThinkingIndicator
           reasoning={thinkingText}
-          frame={spinnerTick}
           activity={activity ?? undefined}
-          elapsedSec={Math.max(0, Math.floor((Date.now() - turnStartedAtRef.current) / 1000))}
+          startedAt={turnStartedAtRef.current}
         />
       )}
       {!thinking && activity === null && thoughtSummary !== null && (
