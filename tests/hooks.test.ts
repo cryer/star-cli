@@ -295,6 +295,24 @@ describe("PreToolUse hooks", () => {
     expect(fs.existsSync(path.join(cwd, "other.txt"))).toBe(true);
   });
 
+  it("decodes multi-byte stderr split across chunks without replacement chars", async () => {
+    const warnings: string[] = [];
+    const reason = "拒绝：路径包含敏感信息，已阻止写入";
+    const command = `node -e "const b=Buffer.from('${reason}');process.exitCode=2;process.stderr.write(b.subarray(0,1));setTimeout(()=>{process.stderr.write(b.subarray(1,2));setTimeout(()=>process.stderr.write(b.subarray(2)),20)},20)"`;
+    const loop = makeLoop(
+      mockModel([writeFileCall("c1", "split.txt", "x"), textRound("done")]),
+      [makeHook({ command })],
+      warnings,
+    );
+
+    const events = await collect(loop.stream("write a file", new AbortController().signal));
+
+    const result = events.find((e) => e.type === "tool-result");
+    if (result?.type !== "tool-result") throw new Error("expected a tool-result event");
+    expect(result.content).toContain(reason);
+    expect(result.content).not.toContain("�");
+  });
+
   it("passes tool and session context via environment variables", async () => {
     const store = await SessionStore.create(cwd, "test-model");
     const warnings: string[] = [];
@@ -317,6 +335,73 @@ describe("PreToolUse hooks", () => {
     expect(JSON.parse(env.i)).toEqual({ path: "env-target.txt", content: "body" });
     expect(env.s).toBe(store.id);
     expect(env.c).toBe(cwd);
+  });
+});
+
+describe("hook input transport", () => {
+  it("pipes tool input over 16KB to stdin with STAR_TOOL_INPUT_STDIN=1", async () => {
+    const warnings: string[] = [];
+    const content = "a".repeat(21_000);
+    const command =
+      "node -e \"let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{" +
+      "require('fs').writeFileSync('stdin-input.json',d);" +
+      "require('fs').writeFileSync('stdin-meta.json',JSON.stringify({" +
+      "stdinFlag:process.env.STAR_TOOL_INPUT_STDIN||null," +
+      'envInput:process.env.STAR_TOOL_INPUT||null}))})"';
+    const loop = makeLoop(
+      mockModel([writeFileCall("c1", "big-target.txt", content), textRound("done")]),
+      [makeHook({ command })],
+      warnings,
+    );
+
+    await collect(loop.stream("write a file", new AbortController().signal));
+
+    expect(JSON.parse(fs.readFileSync(path.join(cwd, "stdin-input.json"), "utf8"))).toEqual({
+      path: "big-target.txt",
+      content,
+    });
+    const meta = JSON.parse(fs.readFileSync(path.join(cwd, "stdin-meta.json"), "utf8"));
+    expect(meta.stdinFlag).toBe("1");
+    expect(meta.envInput).toBeNull();
+    expect(fs.readFileSync(path.join(cwd, "big-target.txt"), "utf8")).toBe(content);
+    expect(warnings).toEqual([]);
+  });
+
+  it("keeps small tool input on STAR_TOOL_INPUT without the stdin marker", async () => {
+    const warnings: string[] = [];
+    const command =
+      "node -e \"require('fs').writeFileSync('small-meta.json',JSON.stringify({" +
+      "stdinFlag:process.env.STAR_TOOL_INPUT_STDIN||null," +
+      'envInput:process.env.STAR_TOOL_INPUT||null}))"';
+    const loop = makeLoop(
+      mockModel([writeFileCall("c1", "small-target.txt", "tiny"), textRound("done")]),
+      [makeHook({ command })],
+      warnings,
+    );
+
+    await collect(loop.stream("write a file", new AbortController().signal));
+
+    const meta = JSON.parse(fs.readFileSync(path.join(cwd, "small-meta.json"), "utf8"));
+    expect(JSON.parse(meta.envInput)).toEqual({ path: "small-target.txt", content: "tiny" });
+    expect(meta.stdinFlag).toBeNull();
+    expect(warnings).toEqual([]);
+  });
+
+  it("survives EPIPE when a big-payload hook exits before reading stdin", async () => {
+    const warnings: string[] = [];
+    const content = "a".repeat(21_000);
+    const loop = makeLoop(
+      mockModel([writeFileCall("c1", "epipe-target.txt", content), textRound("done")]),
+      [makeHook({ command: 'node -e "process.exit(1)"' })],
+      warnings,
+    );
+
+    const events = await collect(loop.stream("write a file", new AbortController().signal));
+
+    expect(events.some((e) => e.type === "error")).toBe(false);
+    expect(fs.readFileSync(path.join(cwd, "epipe-target.txt"), "utf8")).toBe(content);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("exited with code 1");
   });
 });
 

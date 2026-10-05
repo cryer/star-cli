@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import type { HookConfig } from "../config/schema";
 
 export type HookEvent = "PreToolUse" | "PostToolUse" | "Stop";
@@ -18,6 +19,10 @@ export interface HookRunResult {
 
 const STDERR_LIMIT = 2000;
 const STDERR_CAPTURE_LIMIT = 64 * 1024;
+// Tool input rides in the environment as STAR_TOOL_INPUT, but env blocks are
+// capped (Linux E2BIG, 32KB on Windows), so past this many UTF-8 bytes the
+// JSON is piped to the hook's stdin instead, marked by STAR_TOOL_INPUT_STDIN=1.
+const STDIN_PAYLOAD_THRESHOLD = 16 * 1024;
 
 interface CommandOutcome {
   code: number;
@@ -70,7 +75,11 @@ function runCommand(
     STAR_SESSION_ID: ctx.sessionId ?? "",
   };
   if (ctx.toolName !== undefined) env.STAR_TOOL_NAME = ctx.toolName;
-  if (ctx.toolInput !== undefined) env.STAR_TOOL_INPUT = JSON.stringify(ctx.toolInput);
+  const inputJson = ctx.toolInput !== undefined ? JSON.stringify(ctx.toolInput) : undefined;
+  const inputViaStdin =
+    inputJson !== undefined && Buffer.byteLength(inputJson, "utf8") > STDIN_PAYLOAD_THRESHOLD;
+  if (inputJson !== undefined && !inputViaStdin) env.STAR_TOOL_INPUT = inputJson;
+  if (inputViaStdin) env.STAR_TOOL_INPUT_STDIN = "1";
   return new Promise((resolve) => {
     let child: ChildProcess;
     try {
@@ -90,7 +99,15 @@ function runCommand(
       });
       return;
     }
+    // A hook that exits before reading its input closes the pipe early; the
+    // resulting EPIPE is just a failing hook, reported via its exit code.
+    if (inputViaStdin && inputJson !== undefined && child.stdin) {
+      child.stdin.on("error", () => {});
+      child.stdin.end(inputJson);
+    }
     let stderr = "";
+    // Chunk-wise toString would corrupt multi-byte UTF-8 split across chunks.
+    const stderrDecoder = new StringDecoder("utf8");
     let timedOut = false;
     let settled = false;
     const finish = (outcome: CommandOutcome) => {
@@ -98,7 +115,7 @@ function runCommand(
       settled = true;
       clearTimeout(timer);
       clearTimeout(fallback);
-      resolve(outcome);
+      resolve({ ...outcome, stderr: outcome.stderr + stderrDecoder.end() });
     };
     const timer = setTimeout(() => {
       timedOut = true;
@@ -112,7 +129,7 @@ function runCommand(
     }, hook.timeoutSec * 1000);
     let fallback: NodeJS.Timeout;
     child.stderr?.on("data", (chunk: Buffer) => {
-      if (stderr.length < STDERR_CAPTURE_LIMIT) stderr += chunk.toString("utf8");
+      if (stderr.length < STDERR_CAPTURE_LIMIT) stderr += stderrDecoder.write(chunk);
     });
     child.stdout?.resume();
     child.on("error", (error) => {
