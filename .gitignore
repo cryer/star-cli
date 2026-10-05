@@ -10,6 +10,7 @@ coverage/
 *.md
 !README.md
 !README.zh-CN.md
+!CHANGELOG.md
 
 AGENTS.md
 test.txt
