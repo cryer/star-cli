@@ -4,6 +4,7 @@ import type { AgentLoop } from "./agent/loop";
 import { formatTokens } from "./cli/cost";
 import { formatStreamError } from "./cli/format";
 import { MAX_IMAGE_BYTES, imageMimeType, readImageInput, resolveMentions } from "./cli/mentions";
+import { printEventLine } from "./cli/print-human";
 import { UsageTracker, eventToJsonLine } from "./cli/print-json";
 import {
   imageRequiresPrintError,
@@ -110,26 +111,15 @@ async function printMode(
       if (json) {
         const line = eventToJsonLine(event);
         if (line) process.stdout.write(`${line}\n`);
+      } else {
+        // Human-readable path: tool args are the one-line summarizeArgs
+        // digest (same as the REPL tool cards), never the full JSON.
+        const line = printEventLine(event);
+        if (line) {
+          (line.stream === "stdout" ? process.stdout : process.stderr).write(line.text);
+        }
       }
       switch (event.type) {
-        case "text-delta":
-          if (!json) process.stdout.write(event.text);
-          break;
-        case "reasoning":
-          break;
-        case "tool-call":
-          if (!json) process.stderr.write(`\n[tool] ${event.name} ${JSON.stringify(event.args)}\n`);
-          break;
-        case "tool-result": {
-          if (!json) {
-            const preview =
-              event.content.length > 500
-                ? `${event.content.slice(0, 500)}... (truncated)`
-                : event.content;
-            process.stderr.write(`[result] ${event.isError ? "ERROR: " : ""}${preview}\n`);
-          }
-          break;
-        }
         case "finish":
           usage.add(event.usage);
           // A resumed session (-c/-r -p) must accumulate this turn's usage,
@@ -138,23 +128,7 @@ async function printMode(
             sessionStore?.addUsage(event.usage).catch(() => {});
           }
           break;
-        case "retry": {
-          if (!json) {
-            const wait =
-              event.delayMs !== undefined && event.delayMs >= 1000
-                ? ` in ${Math.round(event.delayMs / 1000)}s`
-                : "";
-            process.stderr.write(
-              `\n[retry ${event.attempt}/${event.maxAttempts}${wait}] ${event.reason}\n`,
-            );
-          }
-          break;
-        }
-        case "notice":
-          if (!json) process.stderr.write(`\n[notice] ${event.message}\n`);
-          break;
         case "error":
-          if (!json) process.stderr.write(`\n[error] ${formatStreamError(event.error)}\n`);
           exitCode = 1;
           break;
       }

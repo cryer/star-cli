@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { renderApp, stripAnsi, typeText } from "./ink-harness";
 
 const { InputBox } = await import("../src/cli/components/InputBox");
-const { filterCommands, MAX_SUGGESTIONS, didYouMeanSuffix } = await import(
+const { filterCommands, filterArgHints, MAX_SUGGESTIONS, didYouMeanSuffix } = await import(
   "../src/cli/commands/suggest"
 );
 
@@ -14,6 +14,22 @@ const COMMANDS = [
   { name: "export", description: "Export the current session to a Markdown file" },
   { name: "help", description: "List available commands" },
   { name: "model", description: "List available models or switch the current model" },
+];
+
+const ARG_COMMANDS = [
+  {
+    name: "model",
+    description: "Switch the current model",
+    usage: "/model [name]",
+    argHints: () => ["gpt-4o", "gpt-4o-mini", "kimi-k2"],
+  },
+  {
+    name: "permission",
+    description: "Set the permission mode",
+    usage: "/permission [ask|auto|readonly|yolo]",
+    argHints: ["ask", "auto", "readonly", "yolo", "plan"],
+  },
+  { name: "exit", description: "Exit the application" },
 ];
 
 const UP = "\u001B[A";
@@ -107,6 +123,65 @@ describe("filterCommands", () => {
 
   it("returns nothing when the query is not even a subsequence", () => {
     expect(filterCommands("/zq", COMMANDS)).toEqual([]);
+  });
+});
+
+describe("filterArgHints", () => {
+  it("returns every candidate after the command name plus a space", () => {
+    expect(filterArgHints("/permission ", ARG_COMMANDS).map((h) => h.value)).toEqual([
+      "ask",
+      "auto",
+      "readonly",
+      "yolo",
+      "plan",
+    ]);
+  });
+
+  it("filters candidates by the current argument prefix, case-insensitively", () => {
+    expect(filterArgHints("/permission a", ARG_COMMANDS).map((h) => h.value)).toEqual([
+      "ask",
+      "auto",
+    ]);
+    expect(filterArgHints("/permission RE", ARG_COMMANDS).map((h) => h.value)).toEqual([
+      "readonly",
+    ]);
+  });
+
+  it("resolves function sources with the current argument prefix", () => {
+    expect(filterArgHints("/model g", ARG_COMMANDS).map((h) => h.value)).toEqual([
+      "gpt-4o",
+      "gpt-4o-mini",
+    ]);
+  });
+
+  it("builds the replacement by swapping the trailing token and adding a space", () => {
+    expect(filterArgHints("/permission a", ARG_COMMANDS)[0]?.replacement).toBe("/permission ask ");
+    expect(filterArgHints("/permission ", ARG_COMMANDS)[0]?.replacement).toBe("/permission ask ");
+    expect(filterArgHints("/model gpt-4o k", ARG_COMMANDS)[0]?.replacement).toBe(
+      "/model gpt-4o kimi-k2 ",
+    );
+  });
+
+  it("returns nothing for commands without argHints or unknown commands", () => {
+    expect(filterArgHints("/exit foo", ARG_COMMANDS)).toEqual([]);
+    expect(filterArgHints("/zzz foo", ARG_COMMANDS)).toEqual([]);
+  });
+
+  it("returns nothing without a space or a leading slash", () => {
+    expect(filterArgHints("/permission", ARG_COMMANDS)).toEqual([]);
+    expect(filterArgHints("permission a", ARG_COMMANDS)).toEqual([]);
+    expect(filterArgHints("", ARG_COMMANDS)).toEqual([]);
+  });
+
+  it("caps the candidates at MAX_SUGGESTIONS", () => {
+    const commands = [
+      {
+        name: "model",
+        description: "",
+        argHints: Array.from({ length: MAX_SUGGESTIONS + 3 }, (_, i) => `m${i}`),
+      },
+    ];
+    expect(filterArgHints("/model ", commands)).toHaveLength(MAX_SUGGESTIONS);
   });
 });
 
@@ -240,6 +315,81 @@ describe("InputBox slash suggestions", () => {
     const { app, onSubmit } = setup();
     await typeText(app.stdin, "/ex", ENTER);
     expect(onSubmit).toHaveBeenCalledWith("/ex");
+    app.unmount();
+  });
+});
+
+describe("InputBox slash argument suggestions", () => {
+  function setupArgs() {
+    const onSubmit = vi.fn();
+    const app = renderApp(
+      createElement(InputBox, {
+        isStreaming: false,
+        commands: ARG_COMMANDS,
+        onSubmit,
+        onInterrupt: () => {},
+        onExit: () => {},
+      }),
+    );
+    return { app, onSubmit };
+  }
+
+  it("offers argument candidates once the input names a command with argHints", async () => {
+    const { app } = setupArgs();
+    await typeText(app.stdin, "/permission ");
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("readonly");
+    expect(frame).toContain("yolo");
+    app.unmount();
+  });
+
+  it("filters argument candidates by the typed prefix", async () => {
+    const { app } = setupArgs();
+    await typeText(app.stdin, "/permission re");
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("readonly");
+    expect(frame).not.toContain("yolo");
+    app.unmount();
+  });
+
+  it("shows no argument candidates for a command without argHints", async () => {
+    const { app } = setupArgs();
+    await typeText(app.stdin, "/exit no");
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).not.toContain("readonly");
+    expect(frame).not.toContain("gpt-4o");
+    app.unmount();
+  });
+
+  it("completes the highlighted argument on tab and submits the full command", async () => {
+    const { app, onSubmit } = setupArgs();
+    await typeText(app.stdin, "/permission re", TAB);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("/permission readonly ");
+    await typeText(app.stdin, ENTER);
+    expect(onSubmit).toHaveBeenCalledWith("/permission readonly");
+    app.unmount();
+  });
+
+  it("completes a function-sourced argument and cycles the highlight", async () => {
+    const { app, onSubmit } = setupArgs();
+    await typeText(app.stdin, "/model g", DOWN, TAB, ENTER);
+    expect(onSubmit).toHaveBeenCalledWith("/model gpt-4o-mini");
+    app.unmount();
+  });
+
+  it("keeps completing after a command-name tab completion", async () => {
+    const { app, onSubmit } = setupArgs();
+    await typeText(app.stdin, "/perm", TAB);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("/permission ");
+    await typeText(app.stdin, TAB, ENTER);
+    expect(onSubmit).toHaveBeenCalledWith("/permission ask");
+    app.unmount();
+  });
+
+  it("completes the highlighted argument on right arrow at end of input", async () => {
+    const { app, onSubmit } = setupArgs();
+    await typeText(app.stdin, "/permission pla", RIGHT, ENTER);
+    expect(onSubmit).toHaveBeenCalledWith("/permission plan");
     app.unmount();
   });
 });

@@ -1,7 +1,13 @@
-import type { CoreMessage } from "../core/messages";
+import type { StreamErrorInfo } from "../core/events";
+import { type CoreMessage, coreMessageText } from "../core/messages";
 import type { DisplayMessage } from "./components/MessageList";
+import { toolIcon } from "./icons";
 import { committableLineCount } from "./markdown";
 import { toTerminalSafe } from "./terminal-text";
+
+// Re-exported so CLI consumers keep their existing import path; the
+// implementation lives in core/messages.ts, shared with the agent loop.
+export { coreMessageText };
 
 export function summarizeArgs(args: unknown, maxLength = 120): string {
   let json: string;
@@ -56,23 +62,11 @@ export function splitCommittableLines(
   return { committed, rest: text.slice(committed.length + 1) };
 }
 
-export function formatStreamError(error: Error): string {
+export function formatStreamError(error: StreamErrorInfo): string {
   if (error.message.includes("Unexpected end of JSON input")) {
     return `${error.message} (response stream was truncated — try again)`;
   }
   return error.message;
-}
-
-export function coreMessageText(message: CoreMessage): string {
-  const content = message.content;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .filter((part) => part.type === "text")
-      .map((part) => ("text" in part ? part.text : ""))
-      .join(" ");
-  }
-  return "";
 }
 
 export function buildDisplayMessages(messages: CoreMessage[]): DisplayMessage[] {
@@ -80,14 +74,49 @@ export function buildDisplayMessages(messages: CoreMessage[]): DisplayMessage[] 
   let collapsed = 0;
   for (const message of messages) {
     if (message.role === "user" || message.role === "assistant") {
-      const text = coreMessageText(message);
-      if (text) {
-        // Restored history skips the streaming ingestion path, so escape it
-        // here instead (idempotent — live-turn text is already normalized).
-        display.push({ id: display.length, role: message.role, text: toTerminalSafe(text) });
-      } else {
-        collapsed++;
+      const content = message.content;
+      if (!Array.isArray(content)) {
+        const text = coreMessageText(message);
+        if (text) {
+          // Restored history skips the streaming ingestion path, so escape it
+          // here instead (idempotent — live-turn text is already normalized).
+          display.push({ id: display.length, role: message.role, text: toTerminalSafe(text) });
+        } else {
+          collapsed++;
+        }
+        continue;
       }
+      // Tool calls fold in place: each call renders as one dim summary line
+      // at its original position (same header shape as the live tool card),
+      // so a resumed transcript keeps the order things happened in instead
+      // of sinking every call into one trailing count.
+      let textParts: string[] = [];
+      let represented = false;
+      const flushText = () => {
+        const text = textParts.join(" ");
+        textParts = [];
+        if (!text) return;
+        represented = true;
+        display.push({ id: display.length, role: message.role, text: toTerminalSafe(text) });
+      };
+      for (const part of content) {
+        if (part.type === "text" && "text" in part) {
+          textParts.push(part.text);
+        } else if (part.type === "tool-call") {
+          flushText();
+          represented = true;
+          display.push({
+            id: display.length,
+            role: "tool",
+            text: toTerminalSafe(
+              `${toolIcon(part.toolName)} ${part.toolName} ${summarizeArgs(part.args)}`,
+            ),
+            dim: true,
+          });
+        }
+      }
+      flushText();
+      if (!represented) collapsed++;
     } else if (message.role === "tool") {
       collapsed++;
     }

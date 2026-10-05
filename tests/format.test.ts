@@ -15,22 +15,95 @@ describe("buildDisplayMessages", () => {
     ]);
   });
 
-  it("collapses tool and text-less messages into a count note", () => {
+  it("folds tool calls in place as dim one-line summaries", () => {
     const messages: CoreMessage[] = [
       { role: "user", content: "读一下文件" },
       {
         role: "assistant",
-        content: [{ type: "tool-call", toolCallId: "1", toolName: "read", args: {} }],
+        content: [{ type: "tool-call", toolCallId: "1", toolName: "read_file", args: {} }],
       },
       {
         role: "tool",
-        content: [{ type: "tool-result", toolCallId: "1", toolName: "read", result: "ok" }],
+        content: [{ type: "tool-result", toolCallId: "1", toolName: "read_file", result: "ok" }],
       },
       { role: "assistant", content: "文件内容如上" },
     ];
     const display = buildDisplayMessages(messages);
-    expect(display.map((m) => m.role)).toEqual(["user", "assistant", "system"]);
-    expect(display[2]?.text).toBe("Restored 2 history message(s) not shown here.");
+    expect(display.map((m) => m.role)).toEqual(["user", "tool", "assistant", "system"]);
+    expect(display[1]?.text).toContain("read_file {}");
+    expect(display[1]?.dim).toBe(true);
+    // Only the tool-result message stays collapsed; the call itself is shown.
+    expect(display[3]?.text).toBe("Restored 1 history message(s) not shown here.");
+  });
+
+  it("keeps tool-call fold lines in their original order across a turn", () => {
+    const messages: CoreMessage[] = [
+      { role: "user", content: "读完 a 再改 b" },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "先读 a" },
+          { type: "tool-call", toolCallId: "1", toolName: "read_file", args: { path: "a.ts" } },
+          { type: "tool-call", toolCallId: "2", toolName: "edit_file", args: { path: "b.ts" } },
+        ],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "1", toolName: "read_file", result: "ok" }],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "2", toolName: "edit_file", result: "ok" }],
+      },
+      { role: "assistant", content: "改完了" },
+    ];
+    const display = buildDisplayMessages(messages);
+    expect(display.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "tool",
+      "tool",
+      "assistant",
+      "system",
+    ]);
+    expect(display[1]?.text).toBe("先读 a");
+    expect(display[2]?.text).toContain('read_file {"path":"a.ts"}');
+    expect(display[3]?.text).toContain('edit_file {"path":"b.ts"}');
+    expect(display[2]?.dim).toBe(true);
+    expect(display[3]?.dim).toBe(true);
+    expect(display[4]?.text).toBe("改完了");
+    expect(display[5]?.text).toBe("Restored 2 history message(s) not shown here.");
+  });
+
+  it("truncates long tool arguments to a single bounded line", () => {
+    const messages: CoreMessage[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "1",
+            toolName: "write_file",
+            args: { path: "a.ts", content: "x".repeat(500) },
+          },
+        ],
+      },
+    ];
+    const display = buildDisplayMessages(messages);
+    expect(display).toHaveLength(1);
+    expect(display[0]?.text).not.toContain("\n");
+    expect(display[0]?.text.length).toBeLessThan(140);
+    expect(display[0]?.text).toContain("...");
+  });
+
+  it("still collapses text-less messages without tool calls into the count note", () => {
+    const messages: CoreMessage[] = [
+      { role: "user", content: [{ type: "image", image: new Uint8Array([1]) }] },
+      { role: "assistant", content: "收到图片" },
+    ];
+    const display = buildDisplayMessages(messages);
+    expect(display.map((m) => m.role)).toEqual(["assistant", "system"]);
+    expect(display[1]?.text).toBe("Restored 1 history message(s) not shown here.");
   });
 
   it("escapes terminal control characters in restored history text", () => {

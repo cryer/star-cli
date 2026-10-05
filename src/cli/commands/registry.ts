@@ -1,4 +1,5 @@
 import type { DiffLine } from "../diff-preview";
+import type { ArgHintSource } from "./suggest";
 
 export interface CommandContext {
   addSystemMessage(text: string): void;
@@ -56,6 +57,11 @@ export interface SlashCommand {
   // /help groups commands under this heading; uncategorized commands fall
   // into "Other".
   category?: string;
+  // Candidates offered by the input suggestion menu once the typed input is
+  // "/name <args…>": a static list or a function of the current argument
+  // prefix. Leave unset for commands whose arguments are free text or
+  // expensive to enumerate (session ids, checkpoints, …).
+  argHints?: ArgHintSource;
   run(args: string, ctx: CommandContext): void | Promise<void>;
 }
 

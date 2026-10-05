@@ -65,6 +65,7 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
       "Delete stored sessions: this directory by default, every session with --all (the current session is kept)",
     usage: "/clear-sessions [--all]",
     category: "Sessions",
+    argHints: ["--all"],
     async run(args, ctx) {
       const arg = args.trim();
       if (arg !== "" && arg !== "--all") {
@@ -232,6 +233,7 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
     description: "Set the permission mode (opens a picker when no mode is given)",
     usage: "/permission [ask|auto|readonly|yolo]",
     category: "Settings",
+    argHints: ["ask", "auto", "readonly", "yolo", "plan"],
     async run(args, ctx) {
       const arg = args.trim();
       if (!arg) {
@@ -257,6 +259,7 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
     description: "Show user memory (MEMORY.md), or add an entry",
     usage: "/memory [add <text>]",
     category: "Settings",
+    argHints: ["add"],
     run(args, ctx) {
       const arg = args.trim();
       if (arg === "add" || arg.startsWith("add ")) {
@@ -342,6 +345,7 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
     description: "Generate an AGENTS.md for the current project",
     usage: "/init [force]",
     category: "Settings",
+    argHints: ["force"],
     async run(args, ctx) {
       ctx.addSystemMessage(await ctx.initProject(args));
     },
@@ -405,6 +409,7 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
       "Copy the last assistant reply to the clipboard (`all` for the whole conversation)",
     usage: "/copy [all]",
     category: "Sessions",
+    argHints: ["all"],
     async run(args, ctx) {
       const arg = args.trim();
       if (arg !== "" && arg !== "all") {

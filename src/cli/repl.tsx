@@ -1714,6 +1714,12 @@ export function Repl({
     };
     const reg = new CommandRegistry();
     registerBuiltinCommands(reg);
+    // /model completes against the configured model names. Attached here
+    // (not in builtin.ts) because the registry factories have no config
+    // access; the closure reads config.models lazily so a model added via
+    // /connect later in the session is offered too.
+    const modelCommand = reg.get("model");
+    if (modelCommand) modelCommand.argHints = () => config.models.map((m) => m.name);
     registerCustomCommands(reg, cwd);
     return Object.assign(reg, { ctx });
   }, [
@@ -1841,6 +1847,7 @@ export function Repl({
         name: cmd.name,
         description: cmd.description,
         usage: cmd.usage ?? `/${cmd.name}`,
+        argHints: cmd.argHints,
       })),
     [registry],
   );

@@ -15,6 +15,9 @@ export interface DisplayMessage {
   // tight = no bottom margin; used for mid-turn continuation chunks so a
   // long streamed answer committed in pieces still reads as one block.
   tight?: boolean;
+  // dim = render without the role color (folded one-line tool-call summaries
+  // in restored history, which should recede behind the conversation text).
+  dim?: boolean;
   // Set on the last chunk of a turn cut short with Esc: renders a dim
   // "[interrupted]" marker after the text. Display-only — the session store
   // carries its own marker (see AgentLoop.persistInterrupted).
@@ -120,7 +123,9 @@ export const MessageList = memo(function MessageList({ messages }: { messages: D
           // separate label line is needed.
           return (
             <Box key={message.id} flexDirection="column" marginBottom={marginBottom}>
-              <Text color="magenta">{message.text}</Text>
+              <Text color={message.dim ? undefined : "magenta"} dimColor={message.dim}>
+                {message.text}
+              </Text>
               {message.diff && <DiffLines lines={message.diff} />}
             </Box>
           );

@@ -1,6 +1,6 @@
 import { Box, Text, useStdout } from "ink";
 import { memo, useEffect, useRef, useState } from "react";
-import { type SlashCommandHint, filterCommands } from "../commands/suggest";
+import { type SlashCommandHint, filterArgHints, filterCommands } from "../commands/suggest";
 import { type PathSuggestion, extractAtToken, suggestPaths } from "../path-suggest";
 import { useInput } from "../use-input";
 
@@ -343,6 +343,12 @@ export const InputBox = memo(function InputBox({
 
   const suggestionsEnabled = !isStreaming && !disabled && !suggestionsDismissed && !search;
   const suggestions = suggestionsEnabled && commands ? filterCommands(value, commands) : [];
+  // Argument hints replace the trailing token, so they are only offered with
+  // the cursor at the end of the input (Tab elsewhere would splice wrongly).
+  const argHints =
+    suggestionsEnabled && commands && cursor === value.length
+      ? filterArgHints(value, commands)
+      : [];
 
   useEffect(() => {
     if (!suggestionsEnabled || !cwd) {
@@ -363,8 +369,14 @@ export const InputBox = memo(function InputBox({
     };
   }, [value, cursor, cwd, suggestionsEnabled]);
 
-  const showPathSuggestions = suggestions.length === 0 && pathSuggestions.length > 0;
-  const suggestionCount = suggestions.length > 0 ? suggestions.length : pathSuggestions.length;
+  const showPathSuggestions =
+    suggestions.length === 0 && argHints.length === 0 && pathSuggestions.length > 0;
+  const suggestionCount =
+    suggestions.length > 0
+      ? suggestions.length
+      : argHints.length > 0
+        ? argHints.length
+        : pathSuggestions.length;
   const activeIndex = suggestionCount === 0 ? 0 : Math.min(highlight, suggestionCount - 1);
 
   const completeHighlighted = () => {
@@ -373,6 +385,12 @@ export const InputBox = memo(function InputBox({
       if (!cmd) return;
       const text = `/${cmd.name} `;
       edit(text, text.length);
+      return;
+    }
+    if (argHints.length > 0) {
+      const hint = argHints[activeIndex];
+      if (!hint) return;
+      edit(hint.replacement, hint.replacement.length);
       return;
     }
     const sugg = pathSuggestions[activeIndex];
@@ -682,6 +700,21 @@ export const InputBox = memo(function InputBox({
               </Text>
             );
           })}
+        </Box>
+      )}
+      {argHints.length > 0 && (
+        <Box flexDirection="column" paddingLeft={2}>
+          {argHints.map((hint, index) =>
+            index === activeIndex ? (
+              <Text key={hint.value} bold inverse>
+                {hint.value}
+              </Text>
+            ) : (
+              <Text key={hint.value} color="cyan">
+                {hint.value}
+              </Text>
+            ),
+          )}
         </Box>
       )}
       {showPathSuggestions && (

@@ -1,7 +1,13 @@
+// Argument candidates for a command: a static list, or a function of the
+// current argument prefix (last whitespace-separated token) for dynamic
+// sources like the configured model names.
+export type ArgHintSource = string[] | ((argPrefix: string) => string[]);
+
 export interface SlashCommandHint {
   name: string;
   description: string;
   usage?: string;
+  argHints?: ArgHintSource;
 }
 
 export const MAX_SUGGESTIONS = 5;
@@ -35,4 +41,36 @@ export function didYouMeanSuffix(names: string[]): string {
   if (names.length === 0) return "";
   const listed = names.slice(0, 3).map((name) => `/${name}`);
   return ` Did you mean: ${listed.join(", ")}?`;
+}
+
+export interface ArgHint {
+  // The argument value being offered.
+  value: string;
+  // The full input text once this hint is accepted (current token replaced,
+  // trailing space appended so the next token can be typed or submitted).
+  replacement: string;
+}
+
+// Argument completion for the "/cmd args..." shape: once the input names a
+// command that declares argHints, offer its candidates filtered by the
+// current (last) argument token. Commands without argHints get nothing, same
+// as before. Only the trailing token is completed — anything earlier is kept
+// verbatim.
+export function filterArgHints(input: string, commands: SlashCommandHint[]): ArgHint[] {
+  if (!input.startsWith("/")) return [];
+  const spaceIndex = input.search(/\s/);
+  if (spaceIndex === -1) return [];
+  const name = input.slice(1, spaceIndex).toLowerCase();
+  const command = commands.find((cmd) => cmd.name.toLowerCase() === name);
+  if (!command?.argHints) return [];
+  const tokenMatch = /\S+$/.exec(input.slice(spaceIndex));
+  const argPrefix = tokenMatch ? tokenMatch[0] : "";
+  const source = command.argHints;
+  const candidates = typeof source === "function" ? source(argPrefix) : source;
+  const prefix = argPrefix.toLowerCase();
+  const stem = input.slice(0, input.length - argPrefix.length);
+  return candidates
+    .filter((candidate) => candidate.toLowerCase().startsWith(prefix))
+    .slice(0, MAX_SUGGESTIONS)
+    .map((value) => ({ value, replacement: `${stem}${value} ` }));
 }
