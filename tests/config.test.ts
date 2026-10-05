@@ -2,10 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { type MockInstance, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveApiKey } from "../src/config/keys";
 import { loadConfig, loadConfigSync } from "../src/config/loader";
 import { globalConfigPath, projectConfigPath, sessionsDir, starHome } from "../src/config/paths";
-import type { ProviderConfig } from "../src/config/schema";
 import { contextWindowTokens, resolveCompactThreshold } from "../src/config/schema";
 import { isSensitivePath, registerSensitivePatterns } from "../src/core/sensitive";
 import { createWebFetchTool, setWebFetchAllowPrivateHosts } from "../src/tools/web/fetch";
@@ -574,34 +572,6 @@ apiKey = "sk-plaintext"
   });
 });
 
-describe("resolveApiKey", () => {
-  const provider: ProviderConfig = {
-    name: "openai",
-    protocol: "openai-compatible",
-    baseURL: "https://api.openai.com/v1",
-    apiKeyEnv: "TEST_STAR_API_KEY",
-  };
-
-  it("prefers the environment variable", () => {
-    vi.stubEnv("TEST_STAR_API_KEY", "env-key");
-    expect(resolveApiKey({ ...provider, apiKey: "file-key" })).toBe("env-key");
-  });
-
-  it("falls back to the configured apiKey", () => {
-    expect(resolveApiKey({ ...provider, apiKey: "file-key" })).toBe("file-key");
-  });
-
-  it("uses apiKey when apiKeyEnv is unset", () => {
-    const { apiKeyEnv, ...rest } = provider;
-    expect(resolveApiKey({ ...rest, apiKey: "file-key" })).toBe("file-key");
-  });
-
-  it("throws a descriptive error when no key is available", () => {
-    expect(() => resolveApiKey(provider)).toThrow(/TEST_STAR_API_KEY/);
-    expect(() => resolveApiKey(provider)).toThrow(/openai/);
-  });
-});
-
 describe("security-sensitive config keys", () => {
   let stderrSpy: MockInstance;
 
@@ -671,5 +641,199 @@ describe("security-sensitive config keys", () => {
     const res = await guarded.execute({ url: "http://intranet/" }, { cwd });
     expect(res.isError).toBeUndefined();
     expect(resolved).toBe(0);
+  });
+});
+
+describe("unknown config keys", () => {
+  let stderrSpy: MockInstance;
+
+  beforeEach(() => {
+    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    stderrSpy.mockRestore();
+  });
+
+  function stderrOutput(): string {
+    return stderrSpy.mock.calls.map((call) => String(call[0])).join("");
+  }
+
+  it("warns on an unknown top-level key but still loads the config", async () => {
+    writeFile(globalConfigPath(), `streamMaxRetreis = 9\ndefaultModel = "m"\n`);
+    const config = await loadConfig(cwd);
+    expect(config.defaultModel).toBe("m");
+    // The typo'd key is ignored; the real setting keeps its default.
+    expect(config.streamMaxRetries).toBe(5);
+    const out = stderrOutput();
+    expect(out).toContain(`[star] unknown config key "streamMaxRetreis" in ${globalConfigPath()}`);
+    expect(out).toContain('possible typo of "streamMaxRetries"?');
+  });
+
+  it("stays silent when every key is known", async () => {
+    writeFile(
+      globalConfigPath(),
+      `defaultModel = "m"
+maxSteps = 10
+
+[permissions]
+allow = ["bash"]
+ask = ["bash(git push *)"]
+sensitive = ["*.secret"]
+
+[[providers]]
+name = "p"
+protocol = "anthropic"
+baseURL = "https://api.example.com"
+apiKeyEnv = "TEST_STAR_API_KEY"
+headers = { "x-a" = "b" }
+
+[[models]]
+name = "m"
+provider = "p"
+model = "m"
+maxTokens = 4096
+reasoningEffort = "high"
+temperature = 1
+vision = false
+promptPrice = 1
+completionPrice = 2
+cacheReadPrice = 0.5
+
+[[hooks]]
+event = "Stop"
+matcher = ".*"
+command = "echo done"
+timeoutSec = 5
+`,
+    );
+    await loadConfig(cwd);
+    expect(stderrOutput()).toBe("");
+  });
+
+  it("warns on unknown keys inside schema-defined sections", async () => {
+    writeFile(
+      globalConfigPath(),
+      `[permissions]
+alow = ["bash"]
+
+[[providers]]
+name = "p"
+baseURL = "https://api.example.com"
+baseUrl2 = "https://typo.example.com"
+
+[[models]]
+name = "m"
+provider = "p"
+model = "m"
+maxToken = 4096
+
+[[hooks]]
+event = "Stop"
+command = "echo done"
+comand = "echo typo"
+`,
+    );
+    const config = await loadConfig(cwd);
+    expect(config.models).toHaveLength(1);
+    const out = stderrOutput();
+    expect(out).toContain(`unknown config key "permissions.alow" in ${globalConfigPath()}`);
+    expect(out).toContain('possible typo of "allow"?');
+    expect(out).toContain(`unknown config key "providers[0].baseUrl2" in ${globalConfigPath()}`);
+    expect(out).toContain(`unknown config key "models[0].maxToken" in ${globalConfigPath()}`);
+    expect(out).toContain('possible typo of "maxTokens"?');
+    expect(out).toContain(`unknown config key "hooks[0].comand" in ${globalConfigPath()}`);
+    expect(out).toContain('possible typo of "command"?');
+  });
+
+  it("warns in loadConfigSync too", () => {
+    writeFile(globalConfigPath(), "notifyBelll = false\n");
+    loadConfigSync(cwd);
+    expect(stderrOutput()).toContain('unknown config key "notifyBelll"');
+  });
+
+  it("does not suggest when nothing is close enough", async () => {
+    writeFile(globalConfigPath(), "zzzzzz = 1\n");
+    await loadConfig(cwd);
+    const out = stderrOutput();
+    expect(out).toContain('unknown config key "zzzzzz"');
+    expect(out).toContain("possible typo?");
+    expect(out).not.toContain("typo of");
+  });
+
+  it("project config: schema-known sandboxed keys keep the sandbox warning, not an unknown-key one", async () => {
+    writeFile(
+      projectConfigPath(cwd),
+      `permissionMode = "yolo"
+
+[permissions]
+alow = ["bash"]
+
+[[hooks]]
+event = "Stop"
+command = "echo done"
+comand = "echo typo"
+`,
+    );
+    const config = await loadConfig(cwd);
+    expect(config.permissionMode).toBe("ask");
+    const out = stderrOutput();
+    expect(out).toContain(
+      `[star] ignoring "permissionMode" in ${projectConfigPath(cwd)}: project config cannot set this key`,
+    );
+    expect(out).toContain(
+      `[star] ignoring "permissions" in ${projectConfigPath(cwd)}: project config cannot set this key`,
+    );
+    // Sandboxed sections are dropped wholesale: no per-key unknown-key noise.
+    expect(out).not.toContain("unknown config key");
+  });
+
+  it("project config: warns on keys the schema does not know, including inside [[models]]", async () => {
+    writeFile(
+      projectConfigPath(cwd),
+      `streamMaxRetreis = 3
+
+[[models]]
+name = "m"
+provider = "p"
+model = "m"
+maxToken = 4096
+`,
+    );
+    const config = await loadConfig(cwd);
+    // The typo'd key is ignored; the real setting keeps its default.
+    expect(config.streamMaxRetries).toBe(5);
+    const out = stderrOutput();
+    expect(out).toContain(`unknown config key "streamMaxRetreis" in ${projectConfigPath(cwd)}`);
+    expect(out).toContain('possible typo of "streamMaxRetries"?');
+    expect(out).toContain(`unknown config key "models[0].maxToken" in ${projectConfigPath(cwd)}`);
+  });
+});
+
+describe("readable validation errors", () => {
+  it("lists one line per issue instead of a JSON blob", async () => {
+    writeFile(globalConfigPath(), `maxSteps = "not-a-number"\nsessionBudgetUsd = 0\n`);
+    const failure = await loadConfig(cwd).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toContain(`Invalid config in ${globalConfigPath()}:`);
+    expect(message).toMatch(/\n {2}maxSteps: /);
+    expect(message).toMatch(/\n {2}sessionBudgetUsd: /);
+    // zod's raw error.message blob is gone.
+    expect(message).not.toContain('"code"');
+    expect(message).not.toContain("[{");
+  });
+
+  it("prefixes nested issue paths for table entries", async () => {
+    writeFile(
+      projectConfigPath(cwd),
+      `[[models]]
+name = "m"
+provider = "p"
+model = "m"
+maxTokens = -1
+`,
+    );
+    await expect(loadConfig(cwd)).rejects.toThrow(/\n {2}models\.0\.maxTokens: /);
   });
 });

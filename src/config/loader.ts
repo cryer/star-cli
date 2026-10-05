@@ -4,13 +4,28 @@ import { registerSensitivePatterns } from "../core/sensitive";
 import { setWebFetchAllowPrivateHosts } from "../tools/web/fetch";
 import { loadEnvFile } from "./env";
 import { globalConfigPath, projectConfigPath } from "./paths";
-import { type CliOverrides, ConfigSchema, type ModelConfig, type StarConfig } from "./schema";
+import {
+  type CliOverrides,
+  ConfigSchema,
+  HookConfigSchema,
+  type ModelConfig,
+  ModelConfigSchema,
+  PermissionsConfigSchema,
+  ProviderConfigSchema,
+  type StarConfig,
+} from "./schema";
 
 const PartialConfigSchema = ConfigSchema.partial();
 
 type PartialConfig = ReturnType<typeof PartialConfigSchema.parse>;
 
-function parseTomlFile(content: string, filePath: string): PartialConfig {
+// Which file a parsed config came from: project files warn differently —
+// schema-known keys the sandbox strips get sanitizeProjectConfig's "project
+// config cannot set this key", so the unknown-key diff only reports keys the
+// schema does not know at all.
+type ConfigScope = "global" | "project";
+
+function parseTomlFile(content: string, filePath: string, scope: ConfigScope): PartialConfig {
   let raw: unknown;
   try {
     raw = parse(content);
@@ -20,8 +35,16 @@ function parseTomlFile(content: string, filePath: string): PartialConfig {
   }
   const result = PartialConfigSchema.safeParse(raw);
   if (!result.success) {
-    throw new Error(`Invalid config in ${filePath}: ${result.error.message}`);
+    // One readable line per issue instead of zod's single JSON blob.
+    const details = result.error.issues
+      .map((issue) => {
+        const where = issue.path.length > 0 ? issue.path.join(".") : "(root)";
+        return `  ${where}: ${issue.message}`;
+      })
+      .join("\n");
+    throw new Error(`Invalid config in ${filePath}:\n${details}`);
   }
+  warnUnknownKeys(raw, filePath, scope);
   return result.data;
 }
 
@@ -58,6 +81,90 @@ const PROJECT_STREAM_RANGES = {
 // 0 disables these protections, so a project may only tighten them, never
 // turn them off (handled at merge time via min()).
 const PROJECT_PROTECTIVE_MIN_KEYS = new Set(["maxSteps", "doomLoopThreshold"]);
+
+// Known keys per schema-defined section, for the unknown-key diff.
+const TOP_LEVEL_KEYS = new Set(Object.keys(ConfigSchema.shape));
+const SECTION_KEYS: Record<string, { keys: Set<string>; array: boolean }> = {
+  permissions: { keys: new Set(Object.keys(PermissionsConfigSchema.shape)), array: false },
+  providers: { keys: new Set(Object.keys(ProviderConfigSchema.shape)), array: true },
+  models: { keys: new Set(Object.keys(ModelConfigSchema.shape)), array: true },
+  hooks: { keys: new Set(Object.keys(HookConfigSchema.shape)), array: true },
+};
+
+function editDistance(a: string, b: string): number {
+  let previous: number[] = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const current: number[] = [i];
+    for (let j = 1; j <= b.length; j++) {
+      current[j] = Math.min(
+        (previous[j] ?? 0) + 1,
+        (current[j - 1] ?? 0) + 1,
+        (previous[j - 1] ?? 0) + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    previous = current;
+  }
+  return previous[b.length] ?? 0;
+}
+
+// Cheap "did you mean": case-insensitive Levenshtein against the known keys,
+// accepted when the distance is small relative to the key's length.
+function suggestKey(key: string, known: Set<string>): string | undefined {
+  const needle = key.toLowerCase();
+  let best: string | undefined;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const candidate of known) {
+    const distance = editDistance(needle, candidate.toLowerCase());
+    if (distance <= Math.max(1, Math.floor(candidate.length / 4)) && distance < bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+function warnUnknownKey(keyPath: string, filePath: string, known: Set<string>): void {
+  const leaf = keyPath.slice(keyPath.lastIndexOf(".") + 1);
+  const suggestion = suggestKey(leaf, known);
+  const hint = suggestion
+    ? `possible typo of "${suggestion}"? the key is ignored`
+    : "possible typo? the key is ignored";
+  process.stderr.write(`[star] unknown config key "${keyPath}" in ${filePath}: ${hint}\n`);
+}
+
+// zod object schemas strip unknown keys without a word, so a misspelled
+// option ("streamMaxRetreis") would otherwise vanish silently. Diff the raw
+// TOML against the schema shapes and warn once per unknown key — top level
+// plus inside the schema-defined sections ([permissions], [[providers]],
+// [[models]], [[hooks]]). Warnings never block loading. In project files,
+// schema-known sections the sandbox drops wholesale (everything but
+// [[models]]) already get sanitizeProjectConfig's own warning, so their
+// inner keys are not diffed.
+function warnUnknownKeys(raw: unknown, filePath: string, scope: ConfigScope): void {
+  if (typeof raw !== "object" || raw === null) return;
+  const table = raw as Record<string, unknown>;
+  for (const key of Object.keys(table)) {
+    if (!TOP_LEVEL_KEYS.has(key)) warnUnknownKey(key, filePath, TOP_LEVEL_KEYS);
+  }
+  for (const [section, { keys, array }] of Object.entries(SECTION_KEYS)) {
+    if (scope === "project" && !PROJECT_ALLOWED_KEYS.has(section)) continue;
+    const value = table[section];
+    if (array) {
+      if (!Array.isArray(value)) continue;
+      value.forEach((entry, index) => {
+        if (typeof entry !== "object" || entry === null) return;
+        for (const key of Object.keys(entry)) {
+          if (!keys.has(key)) warnUnknownKey(`${section}[${index}].${key}`, filePath, keys);
+        }
+      });
+      continue;
+    }
+    if (typeof value !== "object" || value === null) continue;
+    for (const key of Object.keys(value as Record<string, unknown>)) {
+      if (!keys.has(key)) warnUnknownKey(`${section}.${key}`, filePath, keys);
+    }
+  }
+}
 
 function warnProject(filePath: string, message: string): void {
   process.stderr.write(`[star] ${message} in ${filePath}\n`);
@@ -209,7 +316,7 @@ function applyOverrides(config: PartialConfig, overrides?: CliOverrides): Partia
   return merged;
 }
 
-async function readTomlFile(filePath: string): Promise<PartialConfig> {
+async function readTomlFile(filePath: string, scope: ConfigScope): Promise<PartialConfig> {
   let content: string;
   try {
     content = await fs.promises.readFile(filePath, "utf8");
@@ -217,20 +324,20 @@ async function readTomlFile(filePath: string): Promise<PartialConfig> {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw error;
   }
-  return parseTomlFile(content, filePath);
+  return parseTomlFile(content, filePath, scope);
 }
 
-function readTomlFileSync(filePath: string): PartialConfig {
+function readTomlFileSync(filePath: string, scope: ConfigScope): PartialConfig {
   if (!fs.existsSync(filePath)) return {};
   const content = fs.readFileSync(filePath, "utf8");
-  return parseTomlFile(content, filePath);
+  return parseTomlFile(content, filePath, scope);
 }
 
 export async function loadConfig(cwd: string, overrides?: CliOverrides): Promise<StarConfig> {
   loadEnvFile();
-  const global = await readTomlFile(globalConfigPath());
+  const global = await readTomlFile(globalConfigPath(), "global");
   const projectPath = projectConfigPath(cwd);
-  const project = sanitizeProjectConfig(await readTomlFile(projectPath), projectPath);
+  const project = sanitizeProjectConfig(await readTomlFile(projectPath, "project"), projectPath);
   const merged = applyOverrides(mergeProjectConfig(global, project, projectPath), overrides);
   warnPlaintextApiKey(merged);
   return wireRuntimeSettings(ConfigSchema.parse(merged));
@@ -238,9 +345,9 @@ export async function loadConfig(cwd: string, overrides?: CliOverrides): Promise
 
 export function loadConfigSync(cwd: string, overrides?: CliOverrides): StarConfig {
   loadEnvFile();
-  const global = readTomlFileSync(globalConfigPath());
+  const global = readTomlFileSync(globalConfigPath(), "global");
   const projectPath = projectConfigPath(cwd);
-  const project = sanitizeProjectConfig(readTomlFileSync(projectPath), projectPath);
+  const project = sanitizeProjectConfig(readTomlFileSync(projectPath, "project"), projectPath);
   const merged = applyOverrides(mergeProjectConfig(global, project, projectPath), overrides);
   warnPlaintextApiKey(merged);
   return wireRuntimeSettings(ConfigSchema.parse(merged));

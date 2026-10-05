@@ -15,7 +15,6 @@ import {
   setDefaultModelInToml,
 } from "../src/cli/commands/connect";
 import { loadEnvFile, parseEnvContent, upsertEnvContent } from "../src/config/env";
-import { resolveApiKey } from "../src/config/keys";
 import { loadConfigSync } from "../src/config/loader";
 import { envFilePath, globalConfigPath } from "../src/config/paths";
 
@@ -242,7 +241,9 @@ describe("saveConnection", () => {
     expect(provider?.baseURL).toBe("https://openrouter.ai/api/v1");
     expect(process.env.STAR_API_KEY_OPENROUTER).toBe(answers.apiKey);
     if (!provider) throw new Error("provider missing");
-    expect(resolveApiKey(provider)).toBe(answers.apiKey);
+    // Key resolution itself lives in llm/provider.ts; here the provider's
+    // apiKeyEnv plus the filled env var (asserted above) are what it reads.
+    expect(provider.apiKeyEnv).toBe("STAR_API_KEY_OPENROUTER");
     const model = config.models.find((m) => m.name === "gpt-4o");
     expect(model?.provider).toBe("openrouter");
     expect(model?.contextMaxTokens).toBe(128000);
