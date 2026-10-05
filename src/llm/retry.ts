@@ -5,6 +5,7 @@
 // dies mid-way — so classification looks past the status code at the error
 // message and response body, and the wait between attempts honors Retry-After
 // headers with jittered exponential backoff as the fallback.
+import type { StreamErrorInfo } from "../core/events";
 import { responseBodyOf } from "../core/http-error";
 
 // Client/validation failures will fail again identically, so only transient
@@ -47,40 +48,29 @@ const NETWORK_ERROR_CODES = new Set([
   "ECONNABORTED",
 ]);
 
-function networkCodeOf(value: unknown): string | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const code = (value as { code?: unknown }).code;
-  return typeof code === "string" ? code : undefined;
-}
-
 // Without an HTTP status the only honest retry signal is a network-family
 // failure: Node's fetch reports those as TypeError("fetch failed") (usually
-// with the errno on error.cause.code), and the classic stack attaches the
-// errno to the error itself. Anything else statusless — above all a TypeError
-// from a code bug — fails deterministically and must fail fast instead of
-// resending the whole history five times.
-function isNetworkFailure(error: Error): boolean {
-  for (const candidate of [error, (error as { cause?: unknown }).cause]) {
-    const code = networkCodeOf(candidate);
+// with the errno on error.cause.code, flattened to causeCode by
+// toStreamErrorInfo), and the classic stack attaches the errno to the error
+// itself. Anything else statusless — above all a TypeError from a code bug —
+// fails deterministically and must fail fast instead of resending the whole
+// history five times.
+function isNetworkFailure(error: StreamErrorInfo): boolean {
+  for (const code of [error.code, error.causeCode]) {
     if (code && (NETWORK_ERROR_CODES.has(code) || code.startsWith("UND_ERR_"))) return true;
   }
   return error.name === "TypeError" && /fetch failed|failed to fetch|network/i.test(error.message);
-}
-
-function statusCodeOf(error: Error): number | undefined {
-  const status = (error as { statusCode?: unknown }).statusCode;
-  return typeof status === "number" ? status : undefined;
 }
 
 function matchesRetryablePattern(text: string | undefined): boolean {
   return typeof text === "string" && RETRYABLE_MESSAGE_PATTERNS.some((p) => p.test(text));
 }
 
-export function isRetryableStreamError(error: Error): boolean {
+export function isRetryableStreamError(error: StreamErrorInfo): boolean {
   if (NON_RETRYABLE_ERROR_NAMES.has(error.name)) return false;
   // The SDK's own classification (it marks 429/5xx API call errors retryable).
-  if ((error as { isRetryable?: unknown }).isRetryable === true) return true;
-  const status = statusCodeOf(error);
+  if (error.isRetryable === true) return true;
+  const status = error.statusCode;
   if (status !== undefined) {
     // 501 Not Implemented is excluded from the 5xx blanket: the endpoint
     // cannot serve this request shape at all, so it falls through to the
@@ -104,12 +94,12 @@ export const MAX_RETRY_DELAY_MS = 60_000;
 // Parses the Retry-After hints an APICallError can carry: retry-after-ms,
 // then retry-after in seconds or as an HTTP date. Header names from the AI
 // SDK are already lowercase, but normalize defensively.
-export function retryAfterDelayMs(error: Error): number | undefined {
-  const headers = (error as { responseHeaders?: unknown }).responseHeaders;
-  if (!headers || typeof headers !== "object") return undefined;
+export function retryAfterDelayMs(error: StreamErrorInfo): number | undefined {
+  const headers = error.responseHeaders;
+  if (!headers) return undefined;
   const normalized: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) {
-    if (typeof value === "string") normalized[key.toLowerCase()] = value;
+    normalized[key.toLowerCase()] = value;
   }
   const afterMs = Number.parseFloat(normalized["retry-after-ms"] ?? "");
   if (!Number.isNaN(afterMs)) return Math.max(0, afterMs);
@@ -129,7 +119,7 @@ export function retryAfterDelayMs(error: Error): number | undefined {
 export function computeRetryDelayMs(
   attempt: number,
   baseMs: number,
-  error?: Error | null,
+  error?: StreamErrorInfo | null,
   random: number = Math.random(),
 ): number {
   const hinted = error ? retryAfterDelayMs(error) : undefined;
@@ -141,9 +131,9 @@ export function computeRetryDelayMs(
 // One-line description of a stream failure for retry notices and logs: the
 // message, the HTTP status when the message omits it, and an excerpt of the
 // response body when it adds information the message does not have.
-export function summarizeStreamError(error: Error): string {
+export function summarizeStreamError(error: StreamErrorInfo): string {
   const parts = [error.message || error.name];
-  const status = statusCodeOf(error);
+  const status = error.statusCode;
   if (status !== undefined && !error.message.includes(String(status))) {
     parts.push(`(HTTP ${status})`);
   }

@@ -147,7 +147,10 @@ describe("eventToJsonLine", () => {
   });
 
   it("serializes error events with a plain message object", () => {
-    const line = eventToJsonLine({ type: "error", error: new Error("model exploded") });
+    const line = eventToJsonLine({
+      type: "error",
+      error: { name: "Error", message: "model exploded" },
+    });
     expect(JSON.parse(line as string)).toEqual({
       type: "error",
       error: { message: "model exploded" },

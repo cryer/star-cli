@@ -2,7 +2,13 @@ import { type LanguageModel, tool as aiTool, generateText } from "ai";
 import { type StarConfig, resolveCompactThreshold } from "../config/schema";
 import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
 import { estimateToolSchemaTokens } from "../context/tokens";
-import { type StreamEvent, type TokenUsage, usageTotalTokens } from "../core/events";
+import {
+  type StreamErrorInfo,
+  type StreamEvent,
+  type TokenUsage,
+  toStreamErrorInfo,
+  usageTotalTokens,
+} from "../core/events";
 import { formatGitSummary, getGitSummaryCached } from "../core/git";
 import {
   isOversizedImageError,
@@ -13,8 +19,11 @@ import {
 import {
   type ChatInput,
   type CoreMessage,
+  INTERRUPTED_TOOL_RESULT_TEXT,
   type MessageMeta,
   type StarMessage,
+  UNFINISHED_TOOL_RESULT_TEXT,
+  coreMessageText,
   isSyntheticUserMessage,
   reconcileStarMessages,
   retractLastTurn,
@@ -232,21 +241,6 @@ const ABORT_STOP_HOOK_TIMEOUT_SEC = 3;
 // The redo stack labels each entry with the start of the undone turn's user
 // message, so the /redo prompt can say what restoring brings back.
 const REDO_LABEL_MAX = 40;
-
-// Text of a message for the redo label; mirrors cli/format.ts
-// coreMessageText (kept local — the agent layer must not import from cli).
-function messageText(message: CoreMessage | undefined): string {
-  if (!message) return "";
-  const content = message.content;
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .filter((part) => part.type === "text")
-      .map((part) => ("text" in part ? part.text : ""))
-      .join(" ");
-  }
-  return "";
-}
 
 // Stable JSON for doom-loop signatures: object keys sort recursively so the
 // same arguments serialize identically regardless of key order.
@@ -547,7 +541,10 @@ export class AgentLoop {
     const result = retractLastTurn([...this.messages]);
     if (result.removed === 0) return { removed: 0 };
     const userIndex = result.messages.length;
-    this.lastUndoneLabel = messageText(this.messages[userIndex]?.message).slice(0, REDO_LABEL_MAX);
+    this.lastUndoneLabel = coreMessageText(this.messages[userIndex]?.message).slice(
+      0,
+      REDO_LABEL_MAX,
+    );
     this.messages = result.messages;
     await this.opts.sessionStore?.replaceMessages([...this.messages]);
     this.opts.registry?.resetVolatileState();
@@ -733,7 +730,7 @@ export class AgentLoop {
     this.messages.push({ message: assistantMessage });
     await this.persist(assistantMessage);
     for (const call of toolCalls) {
-      const content = "Tool execution interrupted by user.";
+      const content = INTERRUPTED_TOOL_RESULT_TEXT;
       const synthetic: CoreMessage = {
         role: "tool",
         content: [
@@ -867,9 +864,10 @@ export class AgentLoop {
         if (!toolExecutedSinceCheckpoint) {
           yield {
             type: "error",
-            error: new Error(
-              `Max steps (${maxSteps}) reached with no tool execution since the last checkpoint, stopping.`,
-            ),
+            error: {
+              name: "Error",
+              message: `Max steps (${maxSteps}) reached with no tool execution since the last checkpoint, stopping.`,
+            },
           };
           await this.runStopHooks("max-steps");
           return;
@@ -934,7 +932,7 @@ export class AgentLoop {
       const baseDelay = this.opts.retryDelayMs ?? STREAM_RETRY_BASE_DELAY_MS;
       let text = "";
       const toolCalls: PendingToolCall[] = [];
-      let failure: Error | null = null;
+      let failure: StreamErrorInfo | null = null;
       // Finish reason of the latest attempt: distinguishes a model that
       // actively returned nothing (stop/content-filter — the same request
       // tends to fail again) from a stream that died empty (idle-timeout,
@@ -1013,7 +1011,7 @@ export class AgentLoop {
         } catch (error) {
           // A user-initiated abort is a normal end of the turn, not an error.
           if (!signal.aborted) {
-            failure = error instanceof Error ? error : new Error(String(error));
+            failure = toStreamErrorInfo(error);
           }
         }
 
@@ -1123,7 +1121,10 @@ export class AgentLoop {
         }
         yield {
           type: "error",
-          error: new Error("The model returned an empty response after retries; ending the turn."),
+          error: {
+            name: "Error",
+            message: "The model returned an empty response after retries; ending the turn.",
+          },
         };
         await this.runStopHooks("empty");
         return;
@@ -1341,8 +1342,8 @@ export class AgentLoop {
         for (const call of toolCalls) {
           if (answered.has(call.id)) continue;
           const content = signal.aborted
-            ? "Tool execution interrupted by user."
-            : "Tool execution interrupted before a result was produced.";
+            ? INTERRUPTED_TOOL_RESULT_TEXT
+            : UNFINISHED_TOOL_RESULT_TEXT;
           const synthetic: CoreMessage = {
             role: "tool",
             content: [

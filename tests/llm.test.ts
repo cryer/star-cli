@@ -376,7 +376,7 @@ describe("streamChat", () => {
     expect(events[1]?.type).toBe("finish");
   });
 
-  it("normalizes error events into Error instances", async () => {
+  it("normalizes error events into serializable info", async () => {
     const model = new MockLanguageModelV1({
       doStream: async () => ({
         stream: convertArrayToReadableStream([{ type: "error", error: new Error("boom") }]),
@@ -390,8 +390,10 @@ describe("streamChat", () => {
 
     expect(events[0]?.type).toBe("error");
     if (events[0]?.type === "error") {
-      expect(events[0].error).toBeInstanceOf(Error);
-      expect(events[0].error.message).toBe("boom");
+      // Plain data, not an Error instance: the event must survive JSONL logs
+      // and process boundaries (an Error serializes to "{}").
+      expect(events[0].error).toEqual({ name: "Error", message: "boom" });
+      expect(JSON.parse(JSON.stringify(events[0]))).toEqual(events[0]);
     }
   });
 

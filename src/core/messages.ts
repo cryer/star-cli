@@ -31,6 +31,23 @@ export function isSyntheticUserMessage(star: StarMessage): boolean {
   return star.message.role === "user" && star.meta?.synthetic !== undefined;
 }
 
+// Plain-text content of a message: string content as-is; for array content,
+// the text parts joined with a space (tool calls, images and tool results
+// contribute nothing). Shared by the agent loop (/redo labels) and the CLI
+// (history rendering, conversation copy) so the extraction rule lives once.
+export function coreMessageText(message: CoreMessage | undefined): string {
+  if (!message) return "";
+  const content = message.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((part) => part.type === "text")
+      .map((part) => ("text" in part ? part.text : ""))
+      .join(" ");
+  }
+  return "";
+}
+
 export interface ImageInput {
   path: string;
   mimeType: string;
@@ -49,7 +66,20 @@ export interface ConversationState {
   messages: CoreMessage[];
 }
 
+// A tool call that has no real execution result must still be closed with a
+// synthetic tool message, or the stored history can no longer be sent to the
+// API. Three scenarios, three wordings:
+// - MISSING_TOOL_RESULT_TEXT: reconcileToolCalls/reconcileStarMessages repair
+//   a persisted history whose session ended before the results were written
+//   (crash, kill, older version) — the call may never have run at all.
+// - INTERRUPTED_TOOL_RESULT_TEXT: the user pressed Esc while the call was
+//   still streaming in or executing (agent loop abort paths).
+// - UNFINISHED_TOOL_RESULT_TEXT: execution stopped for any other reason
+//   (e.g. an error mid-batch) before the call produced a result.
 export const MISSING_TOOL_RESULT_TEXT = "tool result missing (session was interrupted)";
+export const INTERRUPTED_TOOL_RESULT_TEXT = "Tool execution interrupted by user.";
+export const UNFINISHED_TOOL_RESULT_TEXT =
+  "Tool execution interrupted before a result was produced.";
 
 export function reconcileToolCalls(messages: CoreMessage[]): CoreMessage[] {
   const result: CoreMessage[] = [];

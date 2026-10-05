@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { toStreamErrorInfo } from "../src/core/events";
 import { responseBodyOf } from "../src/core/http-error";
 import {
   MAX_RETRY_DELAY_MS,
@@ -89,10 +90,11 @@ describe("isRetryableStreamError", () => {
 
   it("retries only network-family failures without a status code", () => {
     // Node's fetch surfaces transport failures as TypeError("fetch failed"),
-    // usually with the errno on the cause.
+    // usually with the errno on the cause — flattened to causeCode where the
+    // stream produces the error event (toStreamErrorInfo).
     const fetchFailed = new TypeError("fetch failed");
     Object.assign(fetchFailed, { cause: { code: "ECONNRESET" } });
-    expect(isRetryableStreamError(fetchFailed)).toBe(true);
+    expect(isRetryableStreamError(toStreamErrorInfo(fetchFailed))).toBe(true);
     expect(isRetryableStreamError(new TypeError("fetch failed"))).toBe(true);
     // The classic stack attaches the errno to the error itself.
     const hangUp = new Error("socket hang up");

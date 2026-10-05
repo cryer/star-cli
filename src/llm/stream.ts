@@ -1,5 +1,5 @@
 import { type LanguageModel, type ToolSet, streamText } from "ai";
-import type { StreamEvent, TokenUsage } from "../core/events";
+import { type StreamEvent, type TokenUsage, toStreamErrorInfo } from "../core/events";
 import type { CoreMessage } from "../core/messages";
 import { streamActivity } from "./activity";
 import { debugStreamLog } from "./debug";
@@ -311,7 +311,10 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
         case "error": {
           // A user-initiated abort surfacing as a stream error is not a failure.
           if (opts.abortSignal?.aborted) return;
-          const error = part.error instanceof Error ? part.error : new Error(String(part.error));
+          // Flatten to serializable info here — the single Error→info
+          // conversion point — so the event can cross JSONL logs and process
+          // boundaries without losing the properties retry classifies on.
+          const error = toStreamErrorInfo(part.error);
           debugStreamLog("error-part", { seenContent, deltas, error: summarizeStreamError(error) });
           // Errors are terminal: iterating past one would merge trailing
           // parts into a turn already flagged failed.

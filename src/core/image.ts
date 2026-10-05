@@ -1,3 +1,4 @@
+import type { StreamErrorInfo } from "./events";
 import { responseBodyOf } from "./http-error";
 import type { CoreMessage } from "./messages";
 
@@ -103,9 +104,9 @@ export function probeImageDimensions(buf: Buffer): ImageDimensions | null {
 const IMAGE_SIZE_KEYWORDS =
   /too[\s-]*(large|big)|exceeds?|dimensions?|resolution|size\s*limit|max(?:imum)?[\s-]*size/i;
 
-export function isOversizedImageError(error: Error): boolean {
-  const status = (error as { statusCode?: unknown }).statusCode;
-  if (typeof status !== "number" || status < 400 || status >= 500) return false;
+export function isOversizedImageError(error: StreamErrorInfo): boolean {
+  const status = error.statusCode;
+  if (status === undefined || status < 400 || status >= 500) return false;
   const text = [error.message, responseBodyOf(error)]
     .filter((part): part is string => typeof part === "string")
     .join("\n");
@@ -120,9 +121,9 @@ export function isOversizedImageError(error: Error): boolean {
 const VISION_UNSUPPORTED_KEYWORDS =
   /vision\s*encoder|can(?:not|'t) (?:read|process|handle|accept) images?|does(?:\s*not|n't) support (?:image|vision|multimodal)|images?(?:\s*input)? (?:are|is) not supported|not a vision|no vision (?:capability|support|encoder)|multimodal(?:\s*input)? (?:is )?not supported/i;
 
-export function isVisionUnsupportedError(error: Error): boolean {
-  const status = (error as { statusCode?: unknown }).statusCode;
-  if (typeof status !== "number" || status < 400 || status >= 500) return false;
+export function isVisionUnsupportedError(error: StreamErrorInfo): boolean {
+  const status = error.statusCode;
+  if (status === undefined || status < 400 || status >= 500) return false;
   const text = [error.message, responseBodyOf(error)]
     .filter((part): part is string => typeof part === "string")
     .join("\n");
