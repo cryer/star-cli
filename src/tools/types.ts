@@ -17,6 +17,12 @@ export interface ToolContext {
   cwd: string;
   abortSignal?: AbortSignal;
   snapshotContext?: SnapshotContext;
+  // Identity of the agent loop running the tool: "root" for the main loop, a
+  // unique id per subagent loop (its background task id when spawned with
+  // run_in_background, a throwaway id otherwise). Background tasks record it
+  // as their owner so task_list/task_output/task_kill can scope a subagent
+  // to its own tasks while root reaches all. Undefined means root.
+  agentId?: string;
   // False when the active model is text-only ([[models]] vision = false):
   // image-producing tools (read_image, screenshot) must decline with a text
   // error rather than attach images the endpoint would reject. Undefined

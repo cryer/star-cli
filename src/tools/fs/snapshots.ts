@@ -15,8 +15,11 @@ export interface FileSnapshot {
   existed: boolean;
   // Pre-change content. Held in memory only between captureSnapshot and
   // pushSnapshot (which spills it to disk); afterwards null and read lazily
-  // from contentFile, so a full stack of large files costs no RAM.
-  content: string | null;
+  // from contentFile, so a full stack of large files costs no RAM. Raw bytes
+  // (Buffer) end to end so binary files survive capture → spill → restore
+  // byte-exact; a utf8 round-trip would corrupt them with U+FFFD. edit_file
+  // still pushes a string (it only edits text) — written back as utf8.
+  content: string | Buffer | null;
   // Set when the pre-change content exceeded MAX_SNAPSHOT_CONTENT_BYTES: only
   // metadata is kept (no content, no persisted content file) and revert()
   // skips the file instead of restoring it.
@@ -77,7 +80,9 @@ async function spillContent(snapshot: FileSnapshot): Promise<void> {
   try {
     const file = path.join(spillDir, `${snapshot.id}.snap`);
     await mkdir(spillDir, { recursive: true, mode: 0o700 });
-    await writeFile(file, snapshot.content, { encoding: "utf8", mode: 0o600 });
+    // Strings default to utf8 (same as before); Buffers are written raw so
+    // binary snapshots spill byte-exact.
+    await writeFile(file, snapshot.content, { mode: 0o600 });
     snapshot.contentFile = file;
     snapshot.content = null;
   } catch {
@@ -127,7 +132,7 @@ export async function captureSnapshot(
   toolName: string,
   snapshotContext?: SnapshotContext,
 ): Promise<FileSnapshot> {
-  let content: string | null = null;
+  let content: string | Buffer | null = null;
   let existed = false;
   let contentTooLarge = false;
   const st = await stat(filePath).catch(() => null);
@@ -137,7 +142,9 @@ export async function captureSnapshot(
       contentTooLarge = true;
     } else {
       try {
-        content = await readFile(filePath, "utf8");
+        // No encoding: capture the raw bytes so a later restore is byte-exact
+        // even for binary files (write_file may overwrite one).
+        content = await readFile(filePath);
       } catch {
         // unreadable files keep the old behavior: recorded as non-existent
         existed = false;
@@ -208,11 +215,13 @@ export function hydrateSnapshots(snapshots: FileSnapshot[]): void {
   }
 }
 
-async function resolveContent(snapshot: FileSnapshot): Promise<string | null> {
+async function resolveContent(snapshot: FileSnapshot): Promise<string | Buffer | null> {
   if (snapshot.content !== null) return snapshot.content;
   if (!snapshot.contentFile) return null;
   try {
-    return await readFile(snapshot.contentFile, "utf8");
+    // No encoding: the spill/checkpoint file holds raw bytes (utf8 for
+    // string-origin content), and revert writes them back verbatim.
+    return await readFile(snapshot.contentFile);
   } catch {
     return null;
   }
@@ -228,7 +237,7 @@ async function revert(snapshot: FileSnapshot): Promise<string> {
       return `Skipped ${snapshot.path}: the snapshot content is no longer available.`;
     }
     await mkdir(path.dirname(snapshot.path), { recursive: true });
-    await writeFile(snapshot.path, content, "utf8");
+    await writeFile(snapshot.path, content);
     return `Restored ${snapshot.path} to its state before ${snapshot.toolName}.`;
   }
   await rm(snapshot.path, { force: true });
@@ -264,9 +273,12 @@ export function listTurnSnapshots(turn: number, includeSubagent = false): FileSn
 
 // Old content of a snapshot, read lazily from the spill file or the
 // persisted session checkpoint content file. Exported for the read-only
-// /undo preview; revert() uses the same path.
-export function resolveSnapshotContent(snapshot: FileSnapshot): Promise<string | null> {
-  return resolveContent(snapshot);
+// /undo preview; revert() uses the same path. Binary snapshots decode
+// lossy here — the preview is display-only, restores stay byte-exact.
+export async function resolveSnapshotContent(snapshot: FileSnapshot): Promise<string | null> {
+  const content = await resolveContent(snapshot);
+  if (content === null) return null;
+  return typeof content === "string" ? content : content.toString("utf8");
 }
 
 // Reverts every snapshot created by the given turn, newest first, and leaves

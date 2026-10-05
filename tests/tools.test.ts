@@ -468,7 +468,7 @@ describe("bash", () => {
       command: `node -e "process.stdout.write('a'.repeat(100) + '\\n' + 'b'.repeat(100000) + '\\n' + 'c'.repeat(100))"`,
     });
     expect(res.isError).toBeUndefined();
-    expect(res.content).toContain("characters truncated");
+    expect(res.content).toContain("bytes truncated");
     expect(res.content.length).toBeLessThanOrEqual(30000 + 100);
     expect(res.content.startsWith("a".repeat(100))).toBe(true);
     expect(res.content.endsWith("c".repeat(100))).toBe(true);

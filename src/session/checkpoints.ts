@@ -68,11 +68,13 @@ export async function listCheckpointRecords(sessionDir: string): Promise<Checkpo
 export async function appendCheckpointRecord(
   sessionDir: string,
   record: CheckpointRecord,
-  content: string | null,
+  content: string | Buffer | null,
 ): Promise<void> {
   await enqueueIndexWrite(sessionDir, async () => {
     await fs.mkdir(checkpointsDir(sessionDir), { recursive: true, mode: 0o700 });
     if (record.existed && content !== null) {
+      // writeFile ignores the encoding for Buffer data, so binary snapshots
+      // persist byte-exact; string content stays utf8 as before.
       await fs.writeFile(checkpointContentPath(sessionDir, record.id), content, "utf8");
     }
     const records = await listCheckpointRecords(sessionDir);

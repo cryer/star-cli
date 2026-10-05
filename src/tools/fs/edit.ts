@@ -16,6 +16,20 @@ import {
 // replacement on undecodable bytes), and snapshots cannot restore it.
 const BINARY_PROBE_BYTES = 8192;
 
+function countOccurrences(haystack: string, needle: string): number {
+  let count = 0;
+  let idx = haystack.indexOf(needle);
+  while (idx !== -1) {
+    count += 1;
+    idx = haystack.indexOf(needle, idx + needle.length);
+  }
+  return count;
+}
+
+function normalizeEol(text: string): string {
+  return text.replace(/\r\n/g, "\n");
+}
+
 const schema = z.object({
   path: z.string().describe("File path, absolute or relative to the working directory"),
   old_string: z.string().min(1).describe("Exact text to replace"),
@@ -55,11 +69,31 @@ export const editFileTool: Tool<typeof schema> = {
     } catch (err) {
       return { content: `Failed to read ${args.path}: ${(err as Error).message}`, isError: true };
     }
-    let count = 0;
-    let idx = content.indexOf(args.old_string);
-    while (idx !== -1) {
-      count += 1;
-      idx = content.indexOf(args.old_string, idx + args.old_string.length);
+    // Dual-path matching: exact first. When that finds nothing, retry in an
+    // LF-normalized space — read_file strips \r for display, so on a CRLF
+    // file the model can only phrase a multi-line old_string with \n, which
+    // never matches the raw bytes. Uniqueness/replace_all counts are judged
+    // in the normalized space; after replacing there, the text is converted
+    // back to the original file's dominant line ending before writing.
+    let working = content;
+    let oldString = args.old_string;
+    let newString = args.new_string;
+    let restoreEol: ((text: string) => string) | null = null;
+    let count = countOccurrences(working, oldString);
+    if (count === 0) {
+      const normalizedContent = normalizeEol(content);
+      const normalizedOld = normalizeEol(oldString);
+      const normalizedCount = countOccurrences(normalizedContent, normalizedOld);
+      if (normalizedCount > 0) {
+        const crlfCount = countOccurrences(content, "\r\n");
+        const loneLfCount = countOccurrences(content.replace(/\r\n/g, ""), "\n");
+        restoreEol =
+          crlfCount > 0 && crlfCount >= loneLfCount ? (text) => text.replace(/\n/g, "\r\n") : null;
+        working = normalizedContent;
+        oldString = normalizedOld;
+        newString = normalizeEol(newString);
+        count = normalizedCount;
+      }
     }
     if (count === 0) {
       return { content: `old_string not found in ${args.path}`, isError: true };
@@ -70,9 +104,12 @@ export const editFileTool: Tool<typeof schema> = {
         isError: true,
       };
     }
-    const updated = args.replace_all
-      ? content.split(args.old_string).join(args.new_string)
-      : content.replace(args.old_string, () => args.new_string);
+    let updated = args.replace_all
+      ? working.split(oldString).join(newString)
+      : working.replace(oldString, () => newString);
+    if (restoreEol) {
+      updated = restoreEol(updated);
+    }
     try {
       // Guard against a silent overwrite when the file changed on disk
       // between our read and our write.

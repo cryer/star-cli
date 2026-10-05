@@ -1,11 +1,15 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { killTree, resolveShell } from "../tools/bash";
+import { childEnv, decodeOutput, killTree, resolveShell, trimUtf8Start } from "../tools/bash";
 
 export type TaskStatus = "running" | "completed" | "failed" | "timed_out" | "stopped";
 
 export interface TaskSnapshot {
   id: string;
+  // Which agent loop started the task ("root" for the main agent, a
+  // subagent's agentId otherwise); the task_* tools scope subagents to
+  // their own tasks while root reaches all.
+  ownerId: string;
   command: string;
   description?: string;
   status: TaskStatus;
@@ -26,13 +30,18 @@ const TRUNCATED_PREFIX = "[... earlier output truncated ...]\n";
 
 interface TaskRecord {
   id: string;
+  ownerId: string;
   command: string;
   description?: string;
   status: TaskStatus;
   startedAt: number;
   endedAt?: number;
   exitCode?: number | null;
-  output: string;
+  // Output accumulates as raw bytes and decodes once per snapshot: a
+  // multi-byte character split across chunks must not become U+FFFD, and
+  // Windows OEM-codepage (GBK) output needs the whole buffer to re-decode.
+  outputChunks: Buffer[];
+  outputBytes: number;
   truncated: boolean;
   child: ChildProcess;
   timer?: NodeJS.Timeout;
@@ -43,6 +52,11 @@ export interface StartTaskOptions {
   description?: string;
   cwd: string;
   timeoutSeconds?: number;
+  // Owning agent id for task_* scoping; defaults to "root".
+  ownerId?: string;
+  // Child environment; defaults to the scrubbed childEnv() (.env API keys
+  // removed) so a background command can't print the stored secrets.
+  env?: NodeJS.ProcessEnv;
 }
 
 export class TaskManager extends EventEmitter {
@@ -54,6 +68,7 @@ export class TaskManager extends EventEmitter {
     const spec = resolveShell();
     const child = spawn(spec.shell, spec.wrap(opts.command), {
       cwd: opts.cwd,
+      env: opts.env ?? childEnv(),
       windowsHide: true,
       // No stdin: background commands that read it would hang until the
       // (much longer) task timeout; give them EOF immediately.
@@ -64,20 +79,26 @@ export class TaskManager extends EventEmitter {
     });
     const rec: TaskRecord = {
       id,
+      ownerId: opts.ownerId ?? "root",
       command: opts.command,
       description: opts.description,
       status: "running",
       startedAt: Date.now(),
-      output: "",
+      outputChunks: [],
+      outputBytes: 0,
       truncated: false,
       child,
     };
     this.records.set(id, rec);
 
     const append = (d: Buffer) => {
-      rec.output += d.toString("utf8");
-      if (rec.output.length > MAX_TASK_OUTPUT) {
-        rec.output = rec.output.slice(-MAX_TASK_OUTPUT);
+      rec.outputChunks.push(d);
+      rec.outputBytes += d.length;
+      if (rec.outputBytes > MAX_TASK_OUTPUT) {
+        const merged = Buffer.concat(rec.outputChunks, rec.outputBytes);
+        const kept = trimUtf8Start(merged.subarray(merged.length - MAX_TASK_OUTPUT));
+        rec.outputChunks = [kept];
+        rec.outputBytes = kept.length;
         rec.truncated = true;
       }
     };
@@ -165,15 +186,17 @@ export class TaskManager extends EventEmitter {
   }
 
   private snapshot(rec: TaskRecord): TaskSnapshot {
+    const output = decodeOutput(Buffer.concat(rec.outputChunks, rec.outputBytes));
     return {
       id: rec.id,
+      ownerId: rec.ownerId,
       command: rec.command,
       description: rec.description,
       status: rec.status,
       startedAt: rec.startedAt,
       endedAt: rec.endedAt,
       exitCode: rec.exitCode,
-      output: rec.truncated ? TRUNCATED_PREFIX + rec.output : rec.output,
+      output: rec.truncated ? TRUNCATED_PREFIX + output : output,
     };
   }
 }

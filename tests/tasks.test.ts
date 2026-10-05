@@ -181,6 +181,7 @@ describe("formatTaskList", () => {
 describe("formatTaskStarted", () => {
   const base: TaskSnapshot = {
     id: "task-3",
+    ownerId: "root",
     command: "pnpm test",
     status: "running",
     startedAt: Date.now(),

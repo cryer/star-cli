@@ -27,6 +27,17 @@ export function parseEnvContent(content: string): Record<string, string> {
   return vars;
 }
 
+// Keys the .env file declared when loadEnvFile parsed it (whether or not
+// they won over the real environment). bash scrubs these from child-process
+// environments: the file exists to store API secrets, and in auto mode a
+// plain `env` or `curl $KEY` would otherwise print them. The main process
+// keeps process.env untouched for its own provider calls.
+const envFileKeySet = new Set<string>();
+
+export function getEnvFileKeys(): ReadonlySet<string> {
+  return envFileKeySet;
+}
+
 // Fills process.env from ~/.star-cli/.env. Variables already set in the real
 // environment always win — the file only supplies missing values. Never
 // throws: a missing or unreadable file means no keys.
@@ -38,6 +49,7 @@ export function loadEnvFile(filePath: string = envFilePath()): void {
     return;
   }
   for (const [key, value] of Object.entries(parseEnvContent(content))) {
+    envFileKeySet.add(key);
     if (process.env[key] === undefined) {
       process.env[key] = value;
     }
