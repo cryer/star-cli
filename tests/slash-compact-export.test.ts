@@ -42,10 +42,11 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     maxAutoContinues: 2,
     notifyBell: true,
     notifyBellThresholdSec: 10,
-    permissions: { allow: [], deny: [] },
+    permissions: { allow: [], deny: [], ask: [], sensitive: [] },
     hooks: [],
     doomLoopThreshold: 3,
     gitSnapshots: true,
+    webFetchAllowPrivateHosts: false,
     ...overrides,
   };
 }
@@ -195,6 +196,73 @@ describe("slash /compact and /export", () => {
       expect(loop.getMessages()[0]?.content).toBe(
         "[context compacted: 2 earlier messages dropped]",
       );
+    });
+
+    it("leaves history and the session store untouched when cancelled mid-summary", async () => {
+      const store = await SessionStore.create(cwd, "test");
+      const model = new MockLanguageModelV1({
+        doGenerate: async (options) => {
+          // The summary call hangs until the caller's abort cuts it short.
+          await new Promise<void>((resolve) => {
+            if (options.abortSignal?.aborted) resolve();
+            else options.abortSignal?.addEventListener("abort", () => resolve(), { once: true });
+          });
+          throw new Error("This operation was aborted");
+        },
+      });
+      const loop = makeLoop(model, store);
+      const history = longHistory();
+      await loop.loadMessages(history);
+      for (const message of history) await store.append(message);
+
+      const controller = new AbortController();
+      const pending = compactSession({
+        backend: loop,
+        sessionStore: store,
+        config: makeConfig(),
+        signal: controller.signal,
+      });
+      // Let the summary call start before the cancel lands.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      controller.abort();
+      const result = await pending;
+
+      expect(result.compacted).toBe(false);
+      expect(result.message).toContain("cancelled");
+      expect(loop.getMessages()).toEqual(history);
+      expect(await store.messages()).toEqual(history);
+    });
+
+    it("still cancels before the rewrite when the abort lands after the summary", async () => {
+      const controller = new AbortController();
+      const store = await SessionStore.create(cwd, "test");
+      const model = new MockLanguageModelV1({
+        doGenerate: async () => {
+          controller.abort();
+          return {
+            text: "SUMMARY TEXT",
+            finishReason: "stop",
+            usage: { promptTokens: 5, completionTokens: 3 },
+            rawCall: { rawPrompt: null, rawSettings: {} },
+          };
+        },
+      });
+      const loop = makeLoop(model, store);
+      const history = longHistory();
+      await loop.loadMessages(history);
+      for (const message of history) await store.append(message);
+
+      const result = await compactSession({
+        backend: loop,
+        sessionStore: store,
+        config: makeConfig(),
+        signal: controller.signal,
+      });
+
+      expect(result.compacted).toBe(false);
+      expect(result.message).toContain("cancelled");
+      expect(loop.getMessages()).toEqual(history);
+      expect(await store.messages()).toEqual(history);
     });
 
     it("dispatches to ctx.compactContext", async () => {

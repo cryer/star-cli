@@ -53,10 +53,11 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     maxAutoContinues: 2,
     notifyBell: true,
     notifyBellThresholdSec: 10,
-    permissions: { allow: [], deny: [] },
+    permissions: { allow: [], deny: [], ask: [], sensitive: [] },
     hooks: [],
     doomLoopThreshold: 3,
     gitSnapshots: false,
+    webFetchAllowPrivateHosts: false,
     ...overrides,
   };
 }
@@ -245,6 +246,24 @@ describe("AgentLoop compaction summary", () => {
     const events = await collect(loop.stream("hi", new AbortController().signal));
 
     expect(events.some((e) => e.type === "text-delta" && e.text === "ok")).toBe(true);
+    const first = loop.getMessages()[0];
+    expect(first?.role).toBe("user");
+    expect(first?.content).toBe("[context compacted: 2 earlier messages dropped]");
+  });
+
+  it("falls back to the truncation placeholder when the summary comes back empty", async () => {
+    const loop = makeLoop(
+      new MockLanguageModelV1({
+        doGenerate: generateRound("   "),
+        doStream: textStream("ok"),
+      }),
+    );
+    await loadLongHistory(loop);
+
+    await collect(loop.stream("hi", new AbortController().signal));
+
+    // An empty summary must not hollow out the history: the dropped turns
+    // are represented by the truncation placeholder instead.
     const first = loop.getMessages()[0];
     expect(first?.role).toBe("user");
     expect(first?.content).toBe("[context compacted: 2 earlier messages dropped]");

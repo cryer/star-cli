@@ -10,6 +10,17 @@ export interface TokenUsage {
   cacheReadInputTokens?: number;
 }
 
+// Canonical total for a usage record: prompt + completion. Some providers
+// report a totalTokens that additionally counts reasoning or other hidden
+// classes, so summing the two billed classes keeps every aggregation
+// (subagent folding, session totals, cost) on one basis. Falls back to the
+// reported total when the per-class counts carry nothing (a total-only
+// report), so that spend is not dropped either.
+export function usageTotalTokens(usage: TokenUsage): number {
+  const summed = usage.promptTokens + usage.completionTokens;
+  return summed > 0 ? summed : usage.totalTokens;
+}
+
 export type StreamEvent =
   | { type: "text-delta"; text: string }
   | { type: "reasoning"; text: string }

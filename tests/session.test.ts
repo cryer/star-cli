@@ -374,8 +374,8 @@ describe("SessionStore", () => {
     const renameSpy = vi.spyOn(fsPromises, "rename");
     try {
       await store.replaceMessages([
-        { role: "user", content: "new" },
-        { role: "assistant", content: "reply" },
+        { message: { role: "user", content: "new" } },
+        { message: { role: "assistant", content: "reply" } },
       ]);
 
       // The rewrite never touches messages.jsonl directly: it writes a tmp
@@ -414,7 +414,7 @@ describe("SessionStore", () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       await expect(
-        store.replaceMessages([{ role: "user", content: "replacement" }]),
+        store.replaceMessages([{ message: { role: "user", content: "replacement" } }]),
       ).resolves.toBeUndefined();
 
       // The failed rewrite is dropped with a warning; the old messages.jsonl
@@ -577,7 +577,7 @@ describe("resumeSession", () => {
     const resumed = await resumeSession(store.id);
     expect(resumed?.meta.id).toBe(store.id);
     expect(resumed?.meta.title).toBe("恢复我");
-    expect(resumed?.messages).toEqual([{ role: "user", content: "恢复我" }]);
+    expect(resumed?.messages).toEqual([{ message: { role: "user", content: "恢复我" } }]);
   });
 
   it("returns null for a missing session", async () => {

@@ -1,19 +1,26 @@
 import { type LanguageModelV1, generateText } from "ai";
-import type { CoreMessage } from "../core/messages";
+import {
+  type CoreMessage,
+  type StarMessage,
+  isSyntheticUserMessage,
+  toCoreMessages,
+} from "../core/messages";
 import { estimateMessageTokens, estimateTokens } from "./tokens";
 
 export interface CompactionResult {
-  messages: CoreMessage[];
+  messages: StarMessage[];
   compacted: boolean;
   droppedCount: number;
 }
 
 const MIN_KEPT_MESSAGES = 4;
 
-function placeholderMessage(droppedCount: number): CoreMessage {
+function placeholderMessage(droppedCount: number): StarMessage {
   return {
-    role: "user",
-    content: `[context compacted: ${droppedCount} earlier messages dropped]`,
+    message: {
+      role: "user",
+      content: `[context compacted: ${droppedCount} earlier messages dropped]`,
+    },
   };
 }
 
@@ -88,19 +95,19 @@ export interface CompactOptions {
 }
 
 export function compactMessages(
-  messages: CoreMessage[],
+  messages: readonly StarMessage[],
   maxTokens: number,
   opts: CompactOptions = {},
 ): CompactionResult {
   // Forced compaction uses a zero budget: the under-budget exits below never
   // fire, so turns are dropped until only MIN_KEPT_MESSAGES would remain.
   const limit = opts.force ? 0 : maxTokens;
-  if (estimateTokens(messages) <= limit) {
-    return { messages, compacted: false, droppedCount: 0 };
+  if (estimateTokens(toCoreMessages(messages)) <= limit) {
+    return { messages: [...messages], compacted: false, droppedCount: 0 };
   }
 
   const first = messages[0];
-  const hasSystem = first?.role === "system";
+  const hasSystem = first?.message.role === "system";
   const head = hasSystem && first ? [first] : [];
   const rest = hasSystem ? messages.slice(1) : messages.slice();
 
@@ -109,11 +116,15 @@ export function compactMessages(
   // dropped turn made forced /compact O(n²) on long histories. Per-message
   // estimates are cached (tokens.ts), so the placeholder's tiny string is
   // the only fresh work per iteration.
-  const messageTokens = rest.map((message) => estimateMessageTokens(message));
+  const messageTokens = rest.map((star) => estimateMessageTokens(star.message));
+  // Turns split at real user messages only: a synthetic user message (an
+  // auto-continue nudge, a background subagent report, tool-attached images)
+  // belongs to the turn it sits in and must drop — and stay — with it.
   const turns: { length: number; tokens: number }[] = [];
   for (let i = 0; i < rest.length; i++) {
     const current = turns[turns.length - 1];
-    if (rest[i]?.role === "user" || !current) {
+    const star = rest[i];
+    if ((star && star.message.role === "user" && !isSyntheticUserMessage(star)) || !current) {
       turns.push({ length: 1, tokens: messageTokens[i] ?? 0 });
     } else {
       current.length += 1;
@@ -121,8 +132,8 @@ export function compactMessages(
     }
   }
 
-  const headTokens = estimateTokens(head);
-  const restTokens = estimateTokens(rest);
+  const headTokens = estimateTokens(head.map((star) => star.message));
+  const restTokens = rest.reduce((total, _star, i) => total + (messageTokens[i] ?? 0), 0);
   let droppedCount = 0;
   let droppedTokens = 0;
   for (const turn of turns) {
@@ -133,7 +144,7 @@ export function compactMessages(
     droppedTokens += turn.tokens;
     const candidateTokens =
       headTokens +
-      estimateMessageTokens(placeholderMessage(droppedCount)) +
+      estimateMessageTokens(placeholderMessage(droppedCount).message) +
       (restTokens - droppedTokens);
     if (candidateTokens <= limit) {
       break;
@@ -141,7 +152,7 @@ export function compactMessages(
   }
 
   if (droppedCount === 0) {
-    return { messages, compacted: false, droppedCount: 0 };
+    return { messages: [...messages], compacted: false, droppedCount: 0 };
   }
 
   return {

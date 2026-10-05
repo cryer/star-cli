@@ -1,7 +1,7 @@
 import { type LanguageModel, tool as aiTool, generateText } from "ai";
 import { type StarConfig, resolveCompactThreshold } from "../config/schema";
 import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
-import type { StreamEvent, TokenUsage } from "../core/events";
+import { type StreamEvent, type TokenUsage, usageTotalTokens } from "../core/events";
 import { formatGitSummary, getGitSummaryCached } from "../core/git";
 import {
   isOversizedImageError,
@@ -12,8 +12,13 @@ import {
 import {
   type ChatInput,
   type CoreMessage,
-  reconcileToolCalls,
+  type MessageMeta,
+  type StarMessage,
+  isSyntheticUserMessage,
+  reconcileStarMessages,
   retractLastTurn,
+  toCoreMessages,
+  toStarMessage,
 } from "../core/messages";
 import { type HookEvent, type HookRunResult, runHooks } from "../hooks/runner";
 import { createModel } from "../llm/provider";
@@ -67,11 +72,21 @@ export interface AgentLoopOptions {
   // MAX_SUBAGENT_DEPTH the subagent tool is not registered, so subagents
   // cannot spawn further subagents.
   subagentDepth?: number;
+  // Identity threaded into ToolContext: "root" (default) for the main loop;
+  // subagent.ts assigns each child loop a unique id (its background task id
+  // for run_in_background spawns) so the task_* tools can scope background
+  // task ownership per agent.
+  agentId?: string;
   // Whether the active model accepts image input (the model's [[models]]
   // vision key), resolved by the caller; undefined = images allowed.
   // Subagents inherit it. When false, read_image/screenshot decline with a
   // text error instead of attaching images the endpoint would reject.
   vision?: boolean;
+  // The [[models]] entry name opts.model was resolved from. Subagents
+  // inherit it, and it keys the price lookup when subagent usage is
+  // converted into this model's priced tokens (same model id can sit in
+  // several entries with different prices — the entry name is exact).
+  modelName?: string;
   // Base delay between stream retries (doubled per attempt); tests shrink it.
   retryDelayMs?: number;
 }
@@ -208,6 +223,11 @@ async function checkTaskComplete(
 
 const STREAM_RETRY_BASE_DELAY_MS = 1000;
 
+// Stop-hook timeout on the user-interrupt path: Esc hands the prompt back
+// immediately, so a hanging Stop hook gets seconds, not its configured
+// (default 30s) budget.
+const ABORT_STOP_HOOK_TIMEOUT_SEC = 3;
+
 // The redo stack labels each entry with the start of the undone turn's user
 // message, so the /redo prompt can say what restoring brings back.
 const REDO_LABEL_MAX = 40;
@@ -257,7 +277,10 @@ function sleep(ms: number, signal: AbortSignal): Promise<boolean> {
 }
 
 export class AgentLoop {
-  private messages: CoreMessage[] = [];
+  // History with side-band meta: synthetic user messages (nudges, background
+  // reports, tool images) carry a MessageMeta so turn-boundary scans skip
+  // them; the model only ever sees the mapped CoreMessage view.
+  private messages: StarMessage[] = [];
   private readonly opts: AgentLoopOptions;
   // Seq + user-message index of each turn started via stream(); lets /undo
   // match a retracted turn to the file snapshots it produced. `tree` is the
@@ -333,7 +356,7 @@ export class AgentLoop {
       });
     }
     if (opts.system) {
-      this.messages.push({ role: "system", content: opts.system });
+      this.messages.push({ message: { role: "system", content: opts.system } });
     }
     if (opts.sessionStore) {
       this.bindSnapshotHooks(opts.sessionStore);
@@ -358,14 +381,25 @@ export class AgentLoop {
           streamFirstChunkTimeoutSec: opts.streamFirstChunkTimeoutSec,
           vision: opts.vision,
           depth,
+          modelName: opts.modelName,
           getConfirmHandler: () => this.confirmHandler,
-          onUsage: (usage, childModel) => this.addSubagentUsage(usage, childModel),
+          onUsage: (usage, childModel, childModelName) =>
+            this.addSubagentUsage(usage, childModel, childModelName),
         }),
       );
     }
   }
 
+  // CoreMessage view of the history (meta stripped): what the model, the
+  // display and the token estimator consume. Element identity is preserved,
+  // so the estimator's per-object cache (context/tokens.ts) still hits.
   getMessages(): readonly CoreMessage[] {
+    return toCoreMessages(this.messages);
+  }
+
+  // Full-fidelity view including the side-band meta; for flows that must not
+  // lose synthetic-message markers (model switch, manual /compact).
+  getStarMessages(): readonly StarMessage[] {
     return this.messages;
   }
 
@@ -408,12 +442,15 @@ export class AgentLoop {
   // Title generation is re-armed so the new session gets one after its first
   // turn, and snapshot checkpoints now flow to the new store. The redo stack
   // dies with the old session context: its trees describe working-tree states
-  // that no longer line up with the new session's conversation.
+  // that no longer line up with the new session's conversation. Subagent
+  // usage still waiting to fold belongs to the old conversation too — it
+  // must not bill the new session's first finish.
   setSessionStore(store: SessionStore | null): void {
     this.opts.sessionStore = store;
     this.titleScheduled = false;
     this.titleInput = undefined;
     this.redoStack = [];
+    this.subagentUsage = null;
     if (store) this.bindSnapshotHooks(store);
   }
 
@@ -438,10 +475,14 @@ export class AgentLoop {
     });
   }
 
-  async loadMessages(messages: CoreMessage[]): Promise<void> {
-    this.messages = reconcileToolCalls(messages);
+  async loadMessages(messages: readonly (CoreMessage | StarMessage)[]): Promise<void> {
+    this.messages = reconcileStarMessages(messages.map(toStarMessage));
     this.turnMarkers = [];
     this.redoStack = [];
+    // A wholesale-loaded history starts a new billing context: subagent
+    // usage accumulated for the previous conversation must not fold into
+    // this one's first finish.
+    this.subagentUsage = null;
     this.opts.registry?.resetVolatileState();
   }
 
@@ -473,7 +514,7 @@ export class AgentLoop {
     const result = retractLastTurn([...this.messages]);
     if (result.removed === 0) return { removed: 0 };
     const userIndex = result.messages.length;
-    this.lastUndoneLabel = messageText(this.messages[userIndex]).slice(0, REDO_LABEL_MAX);
+    this.lastUndoneLabel = messageText(this.messages[userIndex]?.message).slice(0, REDO_LABEL_MAX);
     this.messages = result.messages;
     await this.opts.sessionStore?.replaceMessages([...this.messages]);
     this.opts.registry?.resetVolatileState();
@@ -545,14 +586,16 @@ export class AgentLoop {
 
   // Cut point for a rewind: messages[index] should be the user message that
   // started the rewound turn, but compaction may have shifted indices, so
-  // walk back to the nearest user message. Never touches a leading system
-  // message.
+  // walk back to the nearest real user message — a synthetic one (nudge,
+  // background report, tool image) belongs to the turn before it and is
+  // never a boundary. Never touches a leading system message.
   private retractionCut(index: number): number {
     const clamped = Math.max(0, Math.min(index, this.messages.length - 1));
     for (let i = clamped; i >= 0; i--) {
-      if (this.messages[i]?.role === "user") return i;
+      const star = this.messages[i];
+      if (star && star.message.role === "user" && !isSyntheticUserMessage(star)) return i;
     }
-    return this.messages[0]?.role === "system" ? 1 : 0;
+    return this.messages[0]?.message.role === "system" ? 1 : 0;
   }
 
   countRetraction(index: number): number {
@@ -579,22 +622,25 @@ export class AgentLoop {
 
   async appendContextMessage(text: string, role: "user" | "system" = "user"): Promise<void> {
     const message: CoreMessage = { role, content: text };
-    this.messages.push(message);
+    this.messages.push({ message });
     await this.persist(message);
   }
 
-  private async persist(message: CoreMessage): Promise<void> {
-    await this.opts.sessionStore?.append(message);
+  private async persist(message: CoreMessage, meta?: MessageMeta): Promise<void> {
+    await this.opts.sessionStore?.append(message, meta);
   }
 
   // Replaces oversized image parts in the in-memory history with text
   // placeholders and rewrites the persisted session, so the failed request
   // can be resent and a later resume never carries the offending images.
   private async stripOversizedImages(): Promise<number> {
-    const { messages, removed } = stripOversizedImages(this.messages);
+    const { messages, removed } = stripOversizedImages(toCoreMessages(this.messages));
     if (removed === 0) return 0;
-    this.messages = messages;
-    await this.opts.sessionStore?.replaceMessages([...this.messages]);
+    this.messages = this.messages.map((star, i) => ({
+      message: messages[i] ?? star.message,
+      meta: star.meta,
+    }));
+    await this.opts.sessionStore?.replaceMessages(this.messages);
     return removed;
   }
 
@@ -602,10 +648,13 @@ export class AgentLoop {
   // at all: every image part in the history is replaced with a placeholder,
   // which also heals sessions already poisoned by an attached image.
   private async stripAllImages(): Promise<number> {
-    const { messages, removed } = stripAllImages(this.messages);
+    const { messages, removed } = stripAllImages(toCoreMessages(this.messages));
     if (removed === 0) return 0;
-    this.messages = messages;
-    await this.opts.sessionStore?.replaceMessages([...this.messages]);
+    this.messages = this.messages.map((star, i) => ({
+      message: messages[i] ?? star.message,
+      meta: star.meta,
+    }));
+    await this.opts.sessionStore?.replaceMessages(this.messages);
     return removed;
   }
 
@@ -648,7 +697,7 @@ export class AgentLoop {
         })),
       ],
     };
-    this.messages.push(assistantMessage);
+    this.messages.push({ message: assistantMessage });
     await this.persist(assistantMessage);
     for (const call of toolCalls) {
       const content = "Tool execution interrupted by user.";
@@ -663,7 +712,7 @@ export class AgentLoop {
           },
         ],
       };
-      this.messages.push(synthetic);
+      this.messages.push({ message: synthetic });
       await this.persist(synthetic).catch(() => {});
       yield { type: "tool-result", id: call.id, name: call.name, content, isError: true };
     }
@@ -715,7 +764,7 @@ export class AgentLoop {
       isRoot && this.opts.config.gitSnapshots
         ? ((await trackTree(this.opts.cwd)) ?? undefined)
         : undefined;
-    this.messages.push(userMessage);
+    this.messages.push({ message: userMessage });
     // Only the root loop opens a new snapshot turn: a subagent runs inside the
     // parent's turn, and its file changes must keep the parent's turn seq and
     // message index so /undo and /rewind attribute them correctly.
@@ -785,8 +834,11 @@ export class AgentLoop {
             role: "user",
             content: `[background subagent ${finished.id}${label} ${finished.status}]\n${finished.result}`,
           };
-          this.messages.push(note);
-          await this.persist(note);
+          // Synthetic: the report lands mid-turn but belongs to the turn in
+          // progress — it must not become a turn boundary for /undo.
+          const meta: MessageMeta = { synthetic: "bg-report" };
+          this.messages.push({ message: note, meta });
+          await this.persist(note, meta);
         }
       }
       const maxTokens = this.opts.contextMaxTokens ?? config.contextMaxTokens;
@@ -1004,8 +1056,9 @@ export class AgentLoop {
             role: "user",
             content: EMPTY_REPLY_NUDGE + finalNudgeWarning(autoContinues, config.maxAutoContinues),
           };
-          this.messages.push(nudge);
-          await this.persist(nudge);
+          const meta: MessageMeta = { synthetic: "nudge" };
+          this.messages.push({ message: nudge, meta });
+          await this.persist(nudge, meta);
           continue;
         }
         yield {
@@ -1028,7 +1081,7 @@ export class AgentLoop {
           })),
         ],
       };
-      this.messages.push(assistantMessage);
+      this.messages.push({ message: assistantMessage });
       await this.persist(assistantMessage);
 
       if (toolCalls.length === 0) {
@@ -1046,8 +1099,9 @@ export class AgentLoop {
               message: `reply cut short by a stream timeout; asking the model to resume where it stopped (${streamCutContinues}/${config.streamMaxRetries}).`,
             };
             const nudge: CoreMessage = { role: "user", content: TRUNCATED_CONTINUE_NUDGE };
-            this.messages.push(nudge);
-            await this.persist(nudge);
+            const meta: MessageMeta = { synthetic: "nudge" };
+            this.messages.push({ message: nudge, meta });
+            await this.persist(nudge, meta);
             continue;
           }
           if (config.permissionMode !== "plan") {
@@ -1119,8 +1173,9 @@ export class AgentLoop {
             role: "user",
             content: nudgeText + finalNudgeWarning(autoContinues, config.maxAutoContinues),
           };
-          this.messages.push(nudge);
-          await this.persist(nudge);
+          const meta: MessageMeta = { synthetic: "nudge" };
+          this.messages.push({ message: nudge, meta });
+          await this.persist(nudge, meta);
           continue;
         }
         if (reason !== null && config.permissionMode !== "plan") {
@@ -1170,12 +1225,14 @@ export class AgentLoop {
               },
             ],
           };
-          this.messages.push(toolMessage);
+          this.messages.push({ message: toolMessage });
           await this.persist(toolMessage);
           answered.add(call.id);
           // Tool-attached images (read_image, screenshot) ride as a follow-up user message
           // with real image parts — tool results are text-only on every
           // protocol, and this is the same shape pasted images arrive in.
+          // Synthetic like the nudges: it lands mid-turn, so it must not
+          // become a turn boundary for /undo.
           if (result.images && result.images.length > 0) {
             const imageMessage: CoreMessage = {
               role: "user",
@@ -1191,8 +1248,9 @@ export class AgentLoop {
                 })),
               ],
             };
-            this.messages.push(imageMessage);
-            await this.persist(imageMessage);
+            const meta: MessageMeta = { synthetic: "tool-image" };
+            this.messages.push({ message: imageMessage, meta });
+            await this.persist(imageMessage, meta);
           }
           if (call.name === "todo_write" && !result.isError) {
             openTodos = pendingTodoTitles(call.args);
@@ -1226,7 +1284,7 @@ export class AgentLoop {
               },
             ],
           };
-          this.messages.push(synthetic);
+          this.messages.push({ message: synthetic });
           await this.persist(synthetic).catch(() => {});
           yield { type: "tool-result", id: call.id, name: call.name, content, isError: true };
         }
@@ -1263,26 +1321,30 @@ export class AgentLoop {
     if (parts.length === 0) return;
     const content = parts.join("\n\n");
     const head = this.messages[0];
-    if (head?.role === "system" && typeof head.content === "string") {
+    if (head?.message.role === "system" && typeof head.message.content === "string") {
       // Replace rather than mutate in place: history messages are treated
       // as immutable so the token estimator's per-object cache
       // (context/tokens.ts) never serves a stale count for an edited one.
-      if (head.content !== content) this.messages[0] = { role: "system", content };
-    } else if (head?.role !== "system") {
-      this.messages.unshift({ role: "system", content });
+      if (head.message.content !== content) {
+        this.messages[0] = { message: { role: "system", content } };
+      }
+    } else if (head?.message.role !== "system") {
+      this.messages.unshift({ message: { role: "system", content } });
     }
   }
 
   private async applyCompactionSummary(
     compacted: CompactionResult,
     signal?: AbortSignal,
-  ): Promise<CoreMessage[]> {
+  ): Promise<StarMessage[]> {
     const { config } = this.opts;
     if (config.contextCompaction !== "summary") {
       return compacted.messages;
     }
-    const headCount = compacted.messages[0]?.role === "system" ? 1 : 0;
-    const dropped = this.messages.slice(headCount, headCount + compacted.droppedCount);
+    const headCount = compacted.messages[0]?.message.role === "system" ? 1 : 0;
+    const dropped = toCoreMessages(
+      this.messages.slice(headCount, headCount + compacted.droppedCount),
+    );
     try {
       const summary = await summarizeMessages(
         dropped,
@@ -1290,10 +1352,15 @@ export class AgentLoop {
         signal,
         this.getAuxTemperature(),
       );
+      // An empty summary must not replace real history with an empty shell:
+      // fall back to the truncation placeholder like a summary failure does.
+      if (summary.trim().length === 0) return compacted.messages;
       const messages = compacted.messages.slice();
       messages[headCount] = {
-        role: "user",
-        content: `[earlier conversation summarized]\n${summary}`,
+        message: {
+          role: "user",
+          content: `[earlier conversation summarized]\n${summary}`,
+        },
       };
       return messages;
     } catch {
@@ -1308,7 +1375,7 @@ export class AgentLoop {
   ): AsyncGenerator<StreamEvent> {
     for await (const event of streamChat({
       model: this.opts.model,
-      messages: attachTurnContext(this.messages, this.turnGitContext),
+      messages: attachTurnContext(toCoreMessages(this.messages), this.turnGitContext),
       tools: aiTools,
       abortSignal: signal,
       providerMetadata: this.opts.providerMetadata,
@@ -1355,25 +1422,38 @@ export class AgentLoop {
   // completion, Esc abort, exhausted stream retries, terminal empty replies,
   // the maxSteps no-progress stop). The reason rides in STAR_TOOL_INPUT as
   // {"reason": ...}: Stop hooks ignore tool matchers and the variable was
-  // never set for Stop before, so existing hooks are unaffected.
+  // never set for Stop before, so existing hooks are unaffected. An abort is
+  // the user waiting at the prompt, so its hooks get a short leash instead
+  // of the hooks' own (default 30s) timeouts.
   private async runStopHooks(reason: string): Promise<void> {
-    await this.runEventHooks("Stop", undefined, { reason });
+    await this.runEventHooks(
+      "Stop",
+      undefined,
+      { reason },
+      reason === "aborted" ? ABORT_STOP_HOOK_TIMEOUT_SEC : undefined,
+    );
   }
 
   private async runEventHooks(
     event: HookEvent,
     toolName?: string,
     toolInput?: unknown,
+    timeoutSec?: number,
   ): Promise<HookRunResult> {
     const empty: HookRunResult = { blocked: false, warnings: [] };
     if (this.opts.config.hooks.length === 0) return empty;
     try {
-      const result = await runHooks(event, this.opts.config.hooks, {
-        cwd: this.opts.cwd,
-        sessionId: this.opts.sessionStore?.id,
-        toolName,
-        toolInput,
-      });
+      const result = await runHooks(
+        event,
+        this.opts.config.hooks,
+        {
+          cwd: this.opts.cwd,
+          sessionId: this.opts.sessionStore?.id,
+          toolName,
+          toolInput,
+        },
+        timeoutSec !== undefined ? { timeoutSec } : undefined,
+      );
       for (const warning of result.warnings) this.onHookWarning?.(warning);
       return result;
     } catch {
@@ -1386,9 +1466,17 @@ export class AgentLoop {
   // different, fully priced model, the counts are first converted into
   // this-model-priced equivalents (convertUsagePricing): session cost is
   // token totals × the active model's price, so the conversion keeps the $
-  // estimate accurate where raw sums would misprice.
-  private addSubagentUsage(usage: TokenUsage, childModel: LanguageModel): void {
-    const converted = convertUsagePricing(usage, childModel, this.opts.model, this.opts.config);
+  // estimate accurate where raw sums would misprice. Price lookup goes by
+  // the [[models]] entry names both loops were resolved from, not model id.
+  private addSubagentUsage(
+    usage: TokenUsage,
+    childModel: LanguageModel,
+    childModelName?: string,
+  ): void {
+    const converted = convertUsagePricing(usage, childModel, this.opts.model, this.opts.config, {
+      fromName: childModelName,
+      toName: this.opts.modelName,
+    });
     const pending = this.subagentUsage ?? {
       promptTokens: 0,
       completionTokens: 0,
@@ -1396,7 +1484,7 @@ export class AgentLoop {
     };
     pending.promptTokens += converted.promptTokens;
     pending.completionTokens += converted.completionTokens;
-    pending.totalTokens += converted.totalTokens;
+    pending.totalTokens += usageTotalTokens(converted);
     if (converted.cachedPromptTokens) {
       pending.cachedPromptTokens = (pending.cachedPromptTokens ?? 0) + converted.cachedPromptTokens;
     }
@@ -1409,7 +1497,9 @@ export class AgentLoop {
 
   // Folds pending subagent usage into an outgoing finish event (and clears
   // it). A finish without usage reports nothing to consumers, so the pending
-  // amount is kept for the next finish that carries usage instead.
+  // amount is kept for the next finish that carries usage instead. Totals
+  // sum the billed classes (usageTotalTokens), not whatever extra classes a
+  // provider folded into its reported totalTokens.
   private foldSubagentUsage(
     event: Extract<StreamEvent, { type: "finish" }>,
   ): Extract<StreamEvent, { type: "finish" }> {
@@ -1419,7 +1509,7 @@ export class AgentLoop {
     const usage: TokenUsage = {
       promptTokens: event.usage.promptTokens + pending.promptTokens,
       completionTokens: event.usage.completionTokens + pending.completionTokens,
-      totalTokens: event.usage.totalTokens + pending.totalTokens,
+      totalTokens: usageTotalTokens(event.usage) + usageTotalTokens(pending),
     };
     const cachedPromptTokens =
       (event.usage.cachedPromptTokens ?? 0) + (pending.cachedPromptTokens ?? 0);
@@ -1461,6 +1551,7 @@ export class AgentLoop {
       { cwd },
       config.permissions.allow,
       config.permissions.deny,
+      config.permissions.ask,
     );
 
     if (decision === "deny") {
@@ -1502,6 +1593,7 @@ export class AgentLoop {
       result = await tool.execute(parsed.data, {
         cwd,
         abortSignal: signal,
+        agentId: this.opts.agentId ?? "root",
         visionEnabled: this.opts.vision !== false,
         snapshotContext: {
           owner: (this.opts.subagentDepth ?? 0) > 0 ? "subagent" : "root",

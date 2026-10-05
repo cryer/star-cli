@@ -1,7 +1,8 @@
+import { randomUUID } from "node:crypto";
 import type { LanguageModel } from "ai";
 import { z } from "zod";
-import type { StarConfig } from "../config/schema";
-import type { TokenUsage } from "../core/events";
+import type { ModelConfig, StarConfig } from "../config/schema";
+import { type TokenUsage, usageTotalTokens } from "../core/events";
 import type { PermissionRequest } from "../permissions/types";
 import { createDefaultRegistry } from "../tools";
 import type { Tool, ToolResult } from "../tools/types";
@@ -34,13 +35,18 @@ export interface SubagentDeps {
   // false the child's read_image/screenshot decline with a text error too.
   vision?: boolean;
   depth: number;
+  // The [[models]] entry name deps.model was resolved from, inherited from
+  // the parent loop; forwarded to onUsage so price conversion keys on the
+  // entry, not the model id (several entries can share one id with
+  // different prices).
+  modelName?: string;
   getConfirmHandler?: () => ((req: PermissionRequest) => Promise<boolean>) | undefined;
   // Receives the child loop's accumulated token usage once the run settles
   // (sync or background, success or failure), along with the model the
-  // child ran on. The parent loop folds it into its own finish events, so
-  // subagent spend flows into /cost, /usage and sessionBudgetUsd without
-  // those consumers changing.
-  onUsage?: (usage: TokenUsage, model: LanguageModel) => void;
+  // child ran on and its [[models]] entry name. The parent loop folds it
+  // into its own finish events, so subagent spend flows into /cost, /usage
+  // and sessionBudgetUsd without those consumers changing.
+  onUsage?: (usage: TokenUsage, model: LanguageModel, modelName?: string) => void;
 }
 
 interface SubagentArgs {
@@ -58,15 +64,20 @@ interface SubagentArgs {
 // side lacks full pricing (or the parent prices a class at 0, making
 // dollars inexpressible as tokens) the raw counts pass through — the same
 // approximation the session total already makes.
+// Price entries resolve by [[models]] name first (names.fromName/toName):
+// two entries can share one model id with different prices, and the id
+// lookup would pick the first. Without a name, the model id match is the
+// fallback.
 export function convertUsagePricing(
   usage: TokenUsage,
   from: LanguageModel,
   to: LanguageModel,
   config: StarConfig,
+  names?: { fromName?: string; toName?: string },
 ): TokenUsage {
   if (from === to) return usage;
-  const fromCfg = config.models.find((m) => m.model === from.modelId);
-  const toCfg = config.models.find((m) => m.model === to.modelId);
+  const fromCfg = findModelPricing(config, names?.fromName, from.modelId);
+  const toCfg = findModelPricing(config, names?.toName, to.modelId);
   if (
     fromCfg?.promptPrice === undefined ||
     fromCfg.completionPrice === undefined ||
@@ -113,13 +124,32 @@ export function convertUsagePricing(
   return result;
 }
 
+// The [[models]] entry whose price applies to a run: the entry name the
+// model was resolved from when known (exact), else the first entry carrying
+// the same model id (legacy fallback).
+function findModelPricing(
+  config: StarConfig,
+  name: string | undefined,
+  modelId: string,
+): ModelConfig | undefined {
+  if (name !== undefined) {
+    const byName = config.models.find((m) => m.name === name);
+    if (byName) return byName;
+  }
+  return config.models.find((m) => m.model === modelId);
+}
+
 // Runs a child loop to completion and returns its formatted report; the
-// sync tool path and background agent tasks share this.
+// sync tool path and background agent tasks share this. agentIdRef carries
+// the child loop's task ownership id: for background spawns it is filled
+// with the agent task's id (see execute below), so background shell tasks
+// the child starts belong to the child, not to root.
 async function runSubagent(
   deps: SubagentDeps,
   args: SubagentArgs,
   cwd: string,
   signal: AbortSignal,
+  agentIdRef?: { id?: string },
 ): Promise<string> {
   const { AgentLoop } = await import("./loop");
   const child = new AgentLoop({
@@ -134,6 +164,11 @@ async function runSubagent(
     streamFirstChunkTimeoutSec: deps.streamFirstChunkTimeoutSec,
     vision: deps.vision,
     subagentDepth: deps.depth + 1,
+    modelName: deps.modelName,
+    // Read after the dynamic-import await: defaultAgentTasks.start() has
+    // returned by then, so a background spawn's ref.id is already assigned.
+    // Foreground spawns get a throwaway id.
+    agentId: agentIdRef?.id ?? `subagent-${randomUUID().slice(0, 8)}`,
   });
   const confirmHandler = deps.getConfirmHandler?.();
   if (confirmHandler) child.confirmHandler = confirmHandler;
@@ -151,7 +186,10 @@ async function runSubagent(
       } else if (event.type === "finish" && event.usage) {
         usage.promptTokens += event.usage.promptTokens;
         usage.completionTokens += event.usage.completionTokens;
-        usage.totalTokens += event.usage.totalTokens;
+        // Sum the billed classes, not the provider's reported total: a
+        // totalTokens that also counts reasoning would double-bill those
+        // classes here and again in the parent's fold.
+        usage.totalTokens += usageTotalTokens(event.usage);
         usage.cachedPromptTokens =
           (usage.cachedPromptTokens ?? 0) + (event.usage.cachedPromptTokens ?? 0);
         usage.cacheReadInputTokens =
@@ -163,7 +201,7 @@ async function runSubagent(
   } finally {
     // The child spent tokens even when it errored or was aborted — report
     // whatever accumulated so the parent can bill it.
-    if (usage.totalTokens > 0) deps.onUsage?.(usage, deps.model);
+    if (usage.totalTokens > 0) deps.onUsage?.(usage, deps.model, deps.modelName);
   }
 
   // A user abort ends the child loop without an error event; surface it
@@ -220,10 +258,19 @@ export function createSubagentTool(deps: SubagentDeps): Tool {
     }),
     async execute(args, ctx): Promise<ToolResult> {
       if (args.run_in_background) {
-        const task = defaultAgentTasks.start((signal) => runSubagent(deps, args, ctx.cwd, signal), {
-          prompt: args.prompt,
-          description: args.description,
-        });
+        // start() invokes the closure synchronously, but runSubagent's first
+        // await (the dynamic import) only continues after start() returns
+        // and ref.id is assigned — so the child loop's agentId is its own
+        // background task id.
+        const ref: { id?: string } = {};
+        const task = defaultAgentTasks.start(
+          (signal) => runSubagent(deps, args, ctx.cwd, signal, ref),
+          {
+            prompt: args.prompt,
+            description: args.description,
+          },
+        );
+        ref.id = task.id;
         const label = args.description ? ` "${args.description}"` : "";
         return {
           content: `Background subagent ${task.id}${label} started. Its report will be delivered as a message when it finishes; use task_list/task_output to check progress.`,

@@ -86,10 +86,11 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     maxAutoContinues: 2,
     notifyBell: true,
     notifyBellThresholdSec: 10,
-    permissions: { allow: [], deny: [] },
+    permissions: { allow: [], deny: [], ask: [], sensitive: [] },
     hooks: [],
     doomLoopThreshold: 3,
     gitSnapshots: true,
+    webFetchAllowPrivateHosts: false,
     ...overrides,
   };
 }
@@ -367,8 +368,9 @@ describe("resumeSession repair", () => {
     const resumed = await resumeSession(store.id);
 
     expect(resumed).not.toBeNull();
-    expect(resumed?.messages).toHaveLength(3);
-    expect(resumed?.messages[2]).toEqual({
+    const coreMessages = (resumed?.messages ?? []).map((star) => star.message);
+    expect(coreMessages).toHaveLength(3);
+    expect(coreMessages[2]).toEqual({
       role: "tool",
       content: [
         {
@@ -379,7 +381,7 @@ describe("resumeSession repair", () => {
         },
       ],
     });
-    expect(danglingToolCallIds(resumed?.messages ?? [])).toEqual([]);
+    expect(danglingToolCallIds(coreMessages)).toEqual([]);
 
     const reopened = await SessionStore.open(store.id);
     const persisted = await reopened?.messages();
@@ -400,7 +402,7 @@ describe("resumeSession repair", () => {
 
     const resumed = await resumeSession(store.id);
 
-    expect(resumed?.messages).toEqual(before);
+    expect((resumed?.messages ?? []).map((star) => star.message)).toEqual(before);
     const reopened = await SessionStore.open(store.id);
     expect(await reopened?.messages()).toEqual(before);
   });

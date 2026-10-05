@@ -67,6 +67,7 @@ function runCommand(
   hook: HookConfig,
   event: HookEvent,
   ctx: HookRunContext,
+  timeoutSec: number,
 ): Promise<CommandOutcome> {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -126,7 +127,7 @@ function runCommand(
         finish({ code: 1, stderr, timedOut: true });
       }, 2000);
       fallback.unref?.();
-    }, hook.timeoutSec * 1000);
+    }, timeoutSec * 1000);
     let fallback: NodeJS.Timeout;
     child.stderr?.on("data", (chunk: Buffer) => {
       if (stderr.length < STDERR_CAPTURE_LIMIT) stderr += stderrDecoder.write(chunk);
@@ -155,17 +156,26 @@ function hookMatches(hook: HookConfig, event: HookEvent, toolName?: string): boo
   }
 }
 
+export interface RunHooksOptions {
+  // Per-invocation timeout override (seconds), replacing each hook's own
+  // timeoutSec — e.g. the abort path keeps Stop hooks on a short leash so a
+  // hanging hook cannot hold the user's prompt hostage.
+  timeoutSec?: number;
+}
+
 export async function runHooks(
   event: HookEvent,
   hooks: HookConfig[],
   ctx: HookRunContext,
+  opts?: RunHooksOptions,
 ): Promise<HookRunResult> {
   const result: HookRunResult = { blocked: false, warnings: [] };
   for (const hook of hooks) {
     if (!hookMatches(hook, event, ctx.toolName)) continue;
+    const timeoutSec = opts?.timeoutSec ?? hook.timeoutSec;
     let outcome: CommandOutcome;
     try {
-      outcome = await runCommand(hook, event, ctx);
+      outcome = await runCommand(hook, event, ctx, timeoutSec);
     } catch (error) {
       result.warnings.push(
         `Hook "${hook.command}" (${event}) failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -180,7 +190,7 @@ export async function runHooks(
       return result;
     }
     const detail = outcome.timedOut
-      ? `timed out after ${hook.timeoutSec}s`
+      ? `timed out after ${timeoutSec}s`
       : outcome.spawnError
         ? `failed to start: ${outcome.spawnError}`
         : `exited with code ${outcome.code}`;

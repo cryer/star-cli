@@ -8,7 +8,12 @@ import { UsageTracker, eventToJsonLine } from "./cli/print-json";
 import { SYSTEM_PROMPT } from "./cli/system-prompt";
 import { loadConfigSync } from "./config/loader";
 import { type StarConfig, contextWindowTokens } from "./config/schema";
-import { type CoreMessage, type ImageInput, reconcileToolCalls } from "./core/messages";
+import {
+  type ImageInput,
+  type StarMessage,
+  reconcileStarMessages,
+  toCoreMessages,
+} from "./core/messages";
 import { createModel, reasoningEffortMetadata } from "./llm/provider";
 import { resolveModelConfig, resolveStartupModel } from "./llm/registry";
 import { loadSessionSnapshots } from "./session/checkpoints";
@@ -42,6 +47,7 @@ async function createLoop(
     cwd,
     system: SYSTEM_PROMPT,
     sessionStore,
+    modelName,
     contextMaxTokens: contextWindowTokens(config, modelName),
     providerMetadata: reasoningEffortMetadata(config, modelName),
     temperature: modelConfig.temperature,
@@ -252,7 +258,7 @@ program
     }
 
     let sessionStore: SessionStore | null = null;
-    let resumed: { meta: SessionMeta; messages: CoreMessage[] } | null = null;
+    let resumed: { meta: SessionMeta; messages: StarMessage[] } | null = null;
     let resumeId: string | null = null;
     if (typeof opts.resume === "string") {
       resumeId = await resolveSessionId(opts.resume);
@@ -278,8 +284,8 @@ program
         console.error(`Session not found: ${resumeId}`);
         process.exit(1);
       }
-      const [meta, loaded] = await Promise.all([sessionStore.meta(), sessionStore.messages()]);
-      const messages = reconcileToolCalls(loaded);
+      const [meta, loaded] = await Promise.all([sessionStore.meta(), sessionStore.starMessages()]);
+      const messages = reconcileStarMessages(loaded);
       if (messages.length !== loaded.length) {
         await sessionStore.replaceMessages(messages);
       }
@@ -352,7 +358,7 @@ program
       config,
       cwd,
       sessionStore,
-      initialMessages: resumed?.messages,
+      initialMessages: resumed ? toCoreMessages(resumed.messages) : undefined,
       initialUsage: resumed?.meta.usage,
     });
   });

@@ -111,10 +111,11 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     maxAutoContinues: 2,
     notifyBell: true,
     notifyBellThresholdSec: 10,
-    permissions: { allow: [], deny: [] },
+    permissions: { allow: [], deny: [], ask: [], sensitive: [] },
     hooks: [],
     doomLoopThreshold: 3,
     gitSnapshots: true,
+    webFetchAllowPrivateHosts: false,
     ...overrides,
   };
 }
@@ -1605,5 +1606,70 @@ describe("AgentLoop", () => {
     expect(seen?.owner).toBe("root");
     expect(seen?.messageIndex).toBe(0);
     expect(seen?.turn).toBeGreaterThan(0);
+  });
+});
+
+describe("pending subagent usage reset", () => {
+  let cwd: string;
+  let home: string;
+
+  beforeEach(() => {
+    cwd = mkdtempSync(path.join(tmpdir(), "star-usage-reset-"));
+    home = mkdtempSync(path.join(tmpdir(), "star-usage-reset-home-"));
+    vi.stubEnv("STAR_HOME", home);
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await rmWithRetry(cwd);
+    await rmWithRetry(home);
+  });
+
+  // Seeds the loop's pending-fold buffer directly: a settled child's usage
+  // that no finish event has carried yet.
+  function seedPending(loop: AgentLoop): void {
+    (loop as unknown as { subagentUsage: unknown }).subagentUsage = {
+      promptTokens: 900,
+      completionTokens: 900,
+      totalTokens: 1800,
+    };
+  }
+
+  function lastFinish(events: StreamEvent[]): Extract<StreamEvent, { type: "finish" }> | undefined {
+    return [...events]
+      .reverse()
+      .find((e): e is Extract<StreamEvent, { type: "finish" }> => e.type === "finish");
+  }
+
+  it("setSessionStore drops usage the old session has not folded yet", async () => {
+    const loop = new AgentLoop({
+      model: mockModel([textRound("fresh turn")]),
+      registry: createDefaultRegistry(),
+      config: makeConfig(),
+      cwd,
+    });
+    seedPending(loop);
+
+    loop.setSessionStore(null);
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    // A stale buffer would ride this finish (905/903); cleared, only the
+    // turn's own 5/3 is billed.
+    expect(lastFinish(events)?.usage).toMatchObject({ promptTokens: 5, completionTokens: 3 });
+  });
+
+  it("loadMessages drops usage the replaced history has not folded yet", async () => {
+    const loop = new AgentLoop({
+      model: mockModel([textRound("fresh turn")]),
+      registry: createDefaultRegistry(),
+      config: makeConfig(),
+      cwd,
+    });
+    seedPending(loop);
+
+    await loop.loadMessages([]);
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    expect(lastFinish(events)?.usage).toMatchObject({ promptTokens: 5, completionTokens: 3 });
   });
 });

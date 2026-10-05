@@ -6,7 +6,7 @@ import type { StarConfig } from "../../config/schema";
 import { compactMessages, summarizeMessages } from "../../context/compaction";
 import type { CompactionResult } from "../../context/compaction";
 import { estimateTokens } from "../../context/tokens";
-import type { CoreMessage } from "../../core/messages";
+import { type CoreMessage, type StarMessage, toCoreMessages } from "../../core/messages";
 import type { SessionStore } from "../../session/store";
 import type { ChatBackend } from "../backend";
 import { formatTokens } from "../cost";
@@ -17,6 +17,10 @@ export interface CompactSessionOptions {
   backend: ChatBackend;
   sessionStore: SessionStore | null;
   config: StarConfig;
+  // Esc while /compact holds the busy flag: cancels the in-flight summary
+  // call. Compaction is read-compute-write, so an abort landing before the
+  // write leaves history and the session store untouched.
+  signal?: AbortSignal;
 }
 
 export interface CompactSessionResult {
@@ -30,14 +34,14 @@ export async function compactSession(opts: CompactSessionOptions): Promise<Compa
   if (!(backend instanceof AgentLoop)) {
     return { message: "Current backend does not support compaction.", compacted: false };
   }
-  const messages = [...backend.getMessages()];
+  const messages = [...backend.getStarMessages()];
   if (messages.length < MIN_COMPACT_MESSAGES) {
     return {
       message: `Nothing to compact: history has only ${messages.length} message(s).`,
       compacted: false,
     };
   }
-  const beforeTokens = estimateTokens(messages);
+  const beforeTokens = estimateTokens(toCoreMessages(messages));
   // Manual compaction is explicit user intent: force it regardless of the
   // token budget instead of refusing while under contextMaxTokens.
   const compacted = compactMessages(messages, config.contextMaxTokens, { force: true });
@@ -53,38 +57,54 @@ export async function compactSession(opts: CompactSessionOptions): Promise<Compa
     config,
     backend.getAuxModel(),
     backend.getAuxTemperature(),
+    opts.signal,
   );
+  if (next === null || opts.signal?.aborted) {
+    return { message: "Compaction cancelled — history left unchanged.", compacted: false };
+  }
   await backend.loadMessages(next);
   await sessionStore?.replaceMessages(next);
-  const afterTokens = estimateTokens(next);
+  const coreNext = toCoreMessages(next);
+  const afterTokens = estimateTokens(coreNext);
   return {
     message: `Compacted context: ${messages.length} -> ${next.length} messages (~${formatTokens(beforeTokens)} -> ~${formatTokens(afterTokens)} estimated tokens).`,
     compacted: true,
-    messages: next,
+    messages: coreNext,
   };
 }
 
 async function applyCompactionSummary(
-  original: CoreMessage[],
+  original: StarMessage[],
   compacted: CompactionResult,
   config: StarConfig,
   model: LanguageModel,
   temperature?: number,
-): Promise<CoreMessage[]> {
+  signal?: AbortSignal,
+): Promise<StarMessage[] | null> {
   if (config.contextCompaction !== "summary") {
     return compacted.messages;
   }
-  const headCount = compacted.messages[0]?.role === "system" ? 1 : 0;
-  const dropped = original.slice(headCount, headCount + compacted.droppedCount);
+  const headCount = compacted.messages[0]?.message.role === "system" ? 1 : 0;
+  const dropped = toCoreMessages(original.slice(headCount, headCount + compacted.droppedCount));
   try {
-    const summary = await summarizeMessages(dropped, model, undefined, temperature);
-    const messages = compacted.messages.slice();
-    messages[headCount] = {
-      role: "user",
-      content: `[earlier conversation summarized]\n${summary}`,
-    };
-    return messages;
+    const summary = await summarizeMessages(dropped, model, signal, temperature);
+    // An empty summary must not replace real history with an empty shell:
+    // fall back to the truncation placeholder like a summary failure does.
+    if (summary.trim().length > 0) {
+      const messages = compacted.messages.slice();
+      messages[headCount] = {
+        message: {
+          role: "user",
+          content: `[earlier conversation summarized]\n${summary}`,
+        },
+      };
+      return messages;
+    }
+    return compacted.messages;
   } catch {
+    // A cancel aborts the whole compaction (null); any other failure just
+    // degrades to the truncation placeholder as before.
+    if (signal?.aborted) return null;
     return compacted.messages;
   }
 }

@@ -10,7 +10,7 @@ import type { ChatBackend } from "../src/cli/backend";
 import { coreMessageText } from "../src/cli/format";
 import type { StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
-import type { ChatInput } from "../src/core/messages";
+import type { ChatInput, CoreMessage } from "../src/core/messages";
 import type { PermissionRequest } from "../src/permissions/types";
 import { SessionStore } from "../src/session/store";
 import { createDefaultRegistry } from "../src/tools";
@@ -21,6 +21,7 @@ process.env.STAR_NO_UPDATE_CHECK = "1";
 const { Repl, BUSY_BLOCKED_COMMANDS, REPL_RENDER_OPTIONS } = await import("../src/cli/repl");
 
 const ESC = String.fromCharCode(27);
+const SHIFT_TAB = `${ESC}[Z`;
 
 function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
   return {
@@ -37,10 +38,11 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     maxAutoContinues: 2,
     notifyBell: false,
     notifyBellThresholdSec: 10,
-    permissions: { allow: [], deny: [] },
+    permissions: { allow: [], deny: [], ask: [], sensitive: [] },
     hooks: [],
     doomLoopThreshold: 3,
     gitSnapshots: true,
+    webFetchAllowPrivateHosts: false,
     ...overrides,
   };
 }
@@ -383,6 +385,162 @@ describe("REPL turn guards", () => {
         },
         { timeout: 15_000 },
       );
+      app.unmount();
+    },
+  );
+
+  it(
+    "Esc cancels a running /compact instead of editing the last message",
+    { timeout: 30_000 },
+    async () => {
+      let summaryCalls = 0;
+      const model = new MockLanguageModelV1({
+        doStream: async () => ({
+          stream: convertArrayToReadableStream([
+            { type: "text-delta", textDelta: "pong" },
+            {
+              type: "finish",
+              finishReason: "stop",
+              usage: { promptTokens: 5, completionTokens: 3 },
+            },
+          ]),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        }),
+        doGenerate: async (options) => {
+          summaryCalls += 1;
+          if (summaryCalls === 1) {
+            // The first compaction's summary hangs until the Esc abort cuts it.
+            await new Promise<void>((resolve) => {
+              if (options.abortSignal?.aborted) resolve();
+              else options.abortSignal?.addEventListener("abort", () => resolve(), { once: true });
+            });
+            throw new Error("This operation was aborted");
+          }
+          return {
+            text: "SUMMARY",
+            finishReason: "stop",
+            usage: { promptTokens: 5, completionTokens: 3 },
+            rawCall: { rawPrompt: null, rawSettings: {} },
+          };
+        },
+      });
+      const store = await SessionStore.create(cwd, "test");
+      const loop = new AgentLoop({
+        model,
+        registry: createDefaultRegistry(),
+        config: makeConfig(),
+        cwd,
+        sessionStore: store,
+      });
+      const pad = (n: number) => "x".repeat(n);
+      const history: CoreMessage[] = [
+        { role: "user", content: pad(400) },
+        { role: "assistant", content: pad(400) },
+        { role: "user", content: "u2" },
+        { role: "assistant", content: "a2" },
+        { role: "user", content: "u3" },
+        { role: "assistant", content: "a3" },
+      ];
+      await loop.loadMessages(history);
+      for (const message of history) await store.append(message);
+
+      const app = renderRepl(loop, cwd, store);
+      await tick();
+      await typeText(app.stdin, "/compact", "\r");
+      await vi.waitFor(
+        () => {
+          expect(stripAnsi(app.lastFrame() ?? "")).toContain("compacting context…");
+        },
+        { timeout: 15_000 },
+      );
+      // Double-Esc during the busy command used to run editLastMessage: its
+      // retraction raced the compaction rewrite and was resurrected by it.
+      app.stdin.write(ESC);
+      await tick();
+      app.stdin.write(ESC);
+      await vi.waitFor(
+        () => {
+          expect(stripAnsi(app.lastFrame() ?? "")).toContain("Compaction cancelled");
+        },
+        { timeout: 15_000 },
+      );
+      expect(stripAnsi(app.allOutput())).not.toContain("restored for editing");
+      // Cancelled before the rewrite: history and the persisted file are as-is.
+      expect(loop.getMessages()).toEqual(history);
+      expect(await store.messages()).toEqual(history);
+      // A follow-up /compact is unaffected and completes normally.
+      await typeText(app.stdin, "/compact", "\r");
+      await vi.waitFor(
+        () => {
+          expect(stripAnsi(app.lastFrame() ?? "")).toContain("Compacted context");
+        },
+        { timeout: 15_000 },
+      );
+      app.unmount();
+    },
+  );
+
+  it(
+    "Shift+Tab does not cycle the permission mode while /compact runs",
+    { timeout: 30_000 },
+    async () => {
+      const model = new MockLanguageModelV1({
+        doGenerate: async (options) => {
+          await new Promise<void>((resolve) => {
+            if (options.abortSignal?.aborted) resolve();
+            else options.abortSignal?.addEventListener("abort", () => resolve(), { once: true });
+          });
+          throw new Error("This operation was aborted");
+        },
+      });
+      const loop = new AgentLoop({
+        model,
+        registry: createDefaultRegistry(),
+        config: makeConfig(),
+        cwd,
+      });
+      const pad = (n: number) => "x".repeat(n);
+      await loop.loadMessages([
+        { role: "user", content: pad(400) },
+        { role: "assistant", content: pad(400) },
+        { role: "user", content: "u2" },
+        { role: "assistant", content: "a2" },
+        { role: "user", content: "u3" },
+        { role: "assistant", content: "a3" },
+      ]);
+      const config = makeConfig();
+      const app = renderApp(
+        createElement(Repl, {
+          backend: loop,
+          model: "test",
+          permissionMode: "auto",
+          config,
+          cwd,
+          sessionStore: null,
+        }),
+      );
+      await tick();
+      await typeText(app.stdin, "/compact", "\r");
+      await vi.waitFor(
+        () => {
+          expect(stripAnsi(app.lastFrame() ?? "")).toContain("compacting context…");
+        },
+        { timeout: 15_000 },
+      );
+      app.stdin.write(SHIFT_TAB);
+      await tick();
+      expect(config.permissionMode).toBe("auto");
+      // Esc cancels the compaction; once the busy flag clears Shift+Tab cycles.
+      app.stdin.write(ESC);
+      await vi.waitFor(
+        () => {
+          expect(stripAnsi(app.lastFrame() ?? "")).toContain("Compaction cancelled");
+        },
+        { timeout: 15_000 },
+      );
+      app.stdin.write(SHIFT_TAB);
+      await tick();
+      expect(config.permissionMode).toBe("readonly");
       app.unmount();
     },
   );

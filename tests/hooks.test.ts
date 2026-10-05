@@ -86,10 +86,11 @@ function makeConfig(hooks: HookConfig[]): StarConfig {
     maxAutoContinues: 2,
     notifyBell: true,
     notifyBellThresholdSec: 10,
-    permissions: { allow: [], deny: [] },
+    permissions: { allow: [], deny: [], ask: [], sensitive: [] },
     hooks,
     doomLoopThreshold: 3,
     gitSnapshots: true,
+    webFetchAllowPrivateHosts: false,
   };
 }
 
@@ -643,4 +644,64 @@ describe("Stop hooks on abnormal turn ends", () => {
     expect(events.some((e) => e.type === "error")).toBe(true);
     expect(readReason("stop-steps.json")).toBe("max-steps");
   });
+});
+
+describe("Stop hook timeout on the abort path", () => {
+  const hangingStop = (timeoutSec: number): HookConfig =>
+    makeHook({ event: "Stop", command: 'node -e "setTimeout(() => {}, 30000)"', timeoutSec });
+
+  // Streams one chunk, then waits for the caller's abort.
+  const abortableModel = (): MockLanguageModelV1 =>
+    new MockLanguageModelV1({
+      doStream: async (options) => ({
+        stream: new ReadableStream({
+          start(controller) {
+            controller.enqueue({ type: "text-delta", textDelta: "partial" });
+            const cut = () => {
+              try {
+                controller.enqueue({
+                  type: "error",
+                  error: new Error("This operation was aborted"),
+                });
+                controller.close();
+              } catch {
+                // already closed
+              }
+            };
+            if (options.abortSignal?.aborted) cut();
+            else options.abortSignal?.addEventListener("abort", cut, { once: true });
+          },
+        }),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+
+  it("caps a hanging Stop hook at ~3s when the turn is aborted", async () => {
+    const warnings: string[] = [];
+    const loop = makeLoop(abortableModel(), [hangingStop(30)], warnings);
+
+    const controller = new AbortController();
+    const start = Date.now();
+    for await (const event of loop.stream("hi", controller.signal)) {
+      if (event.type === "text-delta") controller.abort();
+    }
+    const elapsed = Date.now() - start;
+
+    // The hook's own 30s budget would hold the interrupt hostage; the abort
+    // path overrides it to 3s.
+    expect(elapsed).toBeLessThan(20_000);
+    expect(warnings.some((w) => w.includes("timed out after 3s"))).toBe(true);
+  }, 40_000);
+
+  it("keeps the hook's own timeout on the normal completion path", async () => {
+    const warnings: string[] = [];
+    const loop = makeLoop(mockModel([textRound("done")]), [hangingStop(1)], warnings);
+
+    const start = Date.now();
+    await collect(loop.stream("hi", new AbortController().signal));
+    const elapsed = Date.now() - start;
+
+    expect(elapsed).toBeLessThan(20_000);
+    expect(warnings.some((w) => w.includes("timed out after 1s"))).toBe(true);
+  }, 40_000);
 });

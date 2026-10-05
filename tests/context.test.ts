@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { compactMessages, truncateSummaryInput } from "../src/context/compaction";
 import { estimateMessageTokens, estimateTokens } from "../src/context/tokens";
-import type { CoreMessage } from "../src/core/messages";
+import type { CoreMessage, StarMessage } from "../src/core/messages";
 
 const system = (text: string): CoreMessage => ({ role: "system", content: text });
 const user = (text: string): CoreMessage => ({ role: "user", content: text });
@@ -14,6 +14,9 @@ const toolResult = (id: string, result: unknown): CoreMessage => ({
   role: "tool",
   content: [{ type: "tool-result", toolCallId: id, toolName: "read_file", result }],
 });
+
+const star = (messages: CoreMessage[]): StarMessage[] => messages.map((message) => ({ message }));
+const core = (messages: StarMessage[]): CoreMessage[] => messages.map((star) => star.message);
 
 const pad = (n: number) => "x".repeat(n);
 
@@ -63,10 +66,10 @@ describe("estimateTokens", () => {
 describe("compactMessages", () => {
   it("returns messages unchanged when under budget", () => {
     const messages = [system("sys"), user("hi"), assistant("hello")];
-    const result = compactMessages(messages, 10_000);
+    const result = compactMessages(star(messages), 10_000);
     expect(result.compacted).toBe(false);
     expect(result.droppedCount).toBe(0);
-    expect(result.messages).toEqual(messages);
+    expect(core(result.messages)).toEqual(messages);
   });
 
   it("drops the earliest turn first when over budget", () => {
@@ -79,17 +82,17 @@ describe("compactMessages", () => {
       user("u3"),
       assistant("a3"),
     ];
-    const result = compactMessages(messages, 90);
+    const result = compactMessages(star(messages), 90);
     expect(result.compacted).toBe(true);
     expect(result.droppedCount).toBe(2);
-    expect(result.messages[0]?.role).toBe("system");
-    expect(result.messages.slice(2)).toEqual(messages.slice(3));
+    expect(result.messages[0]?.message.role).toBe("system");
+    expect(core(result.messages.slice(2))).toEqual(messages.slice(3));
   });
 
   it("always keeps the system message", () => {
     const messages = [system("sys"), ...Array.from({ length: 6 }, () => user(pad(400)))];
-    const result = compactMessages(messages, 10);
-    expect(result.messages[0]).toEqual(system("sys"));
+    const result = compactMessages(star(messages), 10);
+    expect(result.messages[0]?.message).toEqual(system("sys"));
   });
 
   it("keeps the last 4 messages even when still over budget", () => {
@@ -104,10 +107,10 @@ describe("compactMessages", () => {
       user("keep3"),
       assistant("keep4"),
     ];
-    const result = compactMessages(messages, 1);
+    const result = compactMessages(star(messages), 1);
     expect(result.compacted).toBe(true);
-    expect(result.messages.slice(-4)).toEqual(messages.slice(-4));
-    expect(estimateTokens(result.messages)).toBeGreaterThan(1);
+    expect(core(result.messages.slice(-4))).toEqual(messages.slice(-4));
+    expect(estimateTokens(core(result.messages))).toBeGreaterThan(1);
   });
 
   it("drops tool messages together with their assistant tool-call turn", () => {
@@ -121,16 +124,16 @@ describe("compactMessages", () => {
       user("u3"),
       assistant("a3"),
     ];
-    const result = compactMessages(messages, 90);
+    const result = compactMessages(star(messages), 90);
     expect(result.compacted).toBe(true);
     expect(result.droppedCount).toBe(3);
-    expect(result.messages.some((m) => m.role === "tool")).toBe(false);
+    expect(result.messages.some((m) => m.message.role === "tool")).toBe(false);
     for (const m of result.messages) {
-      if (m.role === "tool") {
+      if (m.message.role === "tool") {
         throw new Error("orphan tool message");
       }
     }
-    expect(result.messages.slice(2)).toEqual(messages.slice(4));
+    expect(core(result.messages.slice(2))).toEqual(messages.slice(4));
   });
 
   it("inserts a placeholder with the correct dropped count", () => {
@@ -143,10 +146,10 @@ describe("compactMessages", () => {
       user("u3"),
       assistant("a3"),
     ];
-    const result = compactMessages(messages, 90);
+    const result = compactMessages(star(messages), 90);
     const placeholder = result.messages[1];
-    expect(placeholder?.role).toBe("user");
-    expect(placeholder?.content).toBe("[context compacted: 2 earlier messages dropped]");
+    expect(placeholder?.message.role).toBe("user");
+    expect(placeholder?.message.content).toBe("[context compacted: 2 earlier messages dropped]");
   });
 
   it("drops multiple turns incrementally until the budget is met", () => {
@@ -163,10 +166,10 @@ describe("compactMessages", () => {
     ];
     // Dropping only the first big turn still exceeds 100; both must go, and
     // the last 4 messages stay.
-    const result = compactMessages(messages, 100);
+    const result = compactMessages(star(messages), 100);
     expect(result.compacted).toBe(true);
     expect(result.droppedCount).toBe(4);
-    expect(result.messages).toEqual([
+    expect(core(result.messages)).toEqual([
       system("sys"),
       { role: "user", content: "[context compacted: 4 earlier messages dropped]" },
       user("u3"),
@@ -174,6 +177,42 @@ describe("compactMessages", () => {
       user("u4"),
       assistant("a4"),
     ]);
+  });
+
+  it("counts a synthetic user message as part of its turn, never a turn start", () => {
+    const nudge: StarMessage = {
+      message: user("[auto-continue] keep going"),
+      meta: { synthetic: "nudge" },
+    };
+    const report: StarMessage = {
+      message: user("[background subagent agent-1 completed]\nresult"),
+      meta: { synthetic: "bg-report" },
+    };
+    const messages = [
+      { message: system("sys") },
+      { message: user(pad(400)) },
+      { message: assistant(pad(400)) },
+      nudge,
+      report,
+      { message: assistant("a1b") },
+      { message: user("u2") },
+      { message: assistant("a2") },
+      { message: user("u3") },
+      { message: assistant("a3") },
+    ];
+    const result = compactMessages(messages, 90);
+    expect(result.compacted).toBe(true);
+    // The first real turn spans five messages (user + assistant + nudge +
+    // report + assistant): a boundary at the nudge would have dropped only
+    // two and stranded the synthetic messages at the head.
+    expect(result.droppedCount).toBe(5);
+    expect(core(result.messages.slice(2))).toEqual([
+      user("u2"),
+      assistant("a2"),
+      user("u3"),
+      assistant("a3"),
+    ]);
+    expect(result.messages.some((m) => m.meta?.synthetic)).toBe(false);
   });
 
   it("force compacts even when under budget, keeping the last 4 messages", () => {
@@ -186,19 +225,21 @@ describe("compactMessages", () => {
       user("u3"),
       assistant("a3"),
     ];
-    const result = compactMessages(messages, 10_000, { force: true });
+    const result = compactMessages(star(messages), 10_000, { force: true });
     expect(result.compacted).toBe(true);
     expect(result.droppedCount).toBe(2);
-    expect(result.messages[0]?.role).toBe("system");
-    expect(result.messages[1]?.content).toBe("[context compacted: 2 earlier messages dropped]");
-    expect(result.messages.slice(2)).toEqual(messages.slice(3));
+    expect(result.messages[0]?.message.role).toBe("system");
+    expect(result.messages[1]?.message.content).toBe(
+      "[context compacted: 2 earlier messages dropped]",
+    );
+    expect(core(result.messages.slice(2))).toEqual(messages.slice(3));
   });
 
   it("force still refuses when no whole turn can be dropped", () => {
     const messages = [user("u1"), assistant("a1"), user("u2"), assistant("a2"), user("u3")];
-    const result = compactMessages(messages, 10_000, { force: true });
+    const result = compactMessages(star(messages), 10_000, { force: true });
     expect(result.compacted).toBe(false);
-    expect(result.messages).toEqual(messages);
+    expect(core(result.messages)).toEqual(messages);
   });
 });
 

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentLoop } from "../src/agent/loop";
 import type { StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
-import { type CoreMessage, retractLastTurn } from "../src/core/messages";
+import { type CoreMessage, type StarMessage, retractLastTurn } from "../src/core/messages";
 import { SessionStore } from "../src/session/store";
 import { createDefaultRegistry } from "../src/tools";
 import { clearSnapshots, undoTurnSnapshots } from "../src/tools/fs/snapshots";
@@ -27,10 +27,11 @@ function makeConfig(): StarConfig {
     maxAutoContinues: 2,
     notifyBell: true,
     notifyBellThresholdSec: 10,
-    permissions: { allow: [], deny: [] },
+    permissions: { allow: [], deny: [], ask: [], sensitive: [] },
     hooks: [],
     doomLoopThreshold: 3,
     gitSnapshots: true,
+    webFetchAllowPrivateHosts: false,
   };
 }
 
@@ -96,22 +97,28 @@ async function collect(gen: AsyncGenerator<StreamEvent>): Promise<StreamEvent[]>
 }
 
 describe("retractLastTurn", () => {
+  const sm = (message: CoreMessage, meta?: StarMessage["meta"]): StarMessage => ({
+    message,
+    meta,
+  });
+  const core = (messages: StarMessage[]): CoreMessage[] => messages.map((star) => star.message);
+
   it("drops the last user message and everything after it", () => {
-    const messages: CoreMessage[] = [
-      { role: "system", content: "sys" },
-      { role: "user", content: "first" },
-      { role: "assistant", content: [{ type: "text", text: "reply one" }] },
-      { role: "user", content: "second" },
-      { role: "assistant", content: [{ type: "text", text: "reply two" }] },
-      {
+    const messages: StarMessage[] = [
+      sm({ role: "system", content: "sys" }),
+      sm({ role: "user", content: "first" }),
+      sm({ role: "assistant", content: [{ type: "text", text: "reply one" }] }),
+      sm({ role: "user", content: "second" }),
+      sm({ role: "assistant", content: [{ type: "text", text: "reply two" }] }),
+      sm({
         role: "tool",
         content: [{ type: "tool-result", toolCallId: "c1", toolName: "bash", result: "ok" }],
-      },
+      }),
     ];
     const result = retractLastTurn(messages);
     expect(result.removed).toBe(3);
     expect(result.messages).toHaveLength(3);
-    expect(result.messages.at(-1)).toEqual({
+    expect(result.messages.at(-1)?.message).toEqual({
       role: "assistant",
       content: [{ type: "text", text: "reply one" }],
     });
@@ -119,10 +126,10 @@ describe("retractLastTurn", () => {
 
   it("retracts again after a previous retraction", () => {
     const once = retractLastTurn([
-      { role: "user", content: "a" },
-      { role: "assistant", content: "b" },
-      { role: "user", content: "c" },
-      { role: "assistant", content: "d" },
+      sm({ role: "user", content: "a" }),
+      sm({ role: "assistant", content: "b" }),
+      sm({ role: "user", content: "c" }),
+      sm({ role: "assistant", content: "d" }),
     ]);
     const twice = retractLastTurn(once.messages);
     expect(twice.removed).toBe(2);
@@ -130,19 +137,50 @@ describe("retractLastTurn", () => {
   });
 
   it("keeps a leading system message and reports zero when there is no user turn", () => {
-    const onlySystem: CoreMessage[] = [{ role: "system", content: "sys" }];
+    const onlySystem: StarMessage[] = [sm({ role: "system", content: "sys" })];
     expect(retractLastTurn(onlySystem)).toEqual({ messages: onlySystem, removed: 0 });
     expect(retractLastTurn([])).toEqual({ messages: [], removed: 0 });
   });
 
   it("retracts a dangling user message with no reply yet", () => {
     const result = retractLastTurn([
-      { role: "user", content: "a" },
-      { role: "assistant", content: "b" },
-      { role: "user", content: "unanswered" },
+      sm({ role: "user", content: "a" }),
+      sm({ role: "assistant", content: "b" }),
+      sm({ role: "user", content: "unanswered" }),
     ]);
     expect(result.removed).toBe(1);
     expect(result.messages).toHaveLength(2);
+  });
+
+  it("skips synthetic user messages: they belong to the turn they sit in", () => {
+    const result = retractLastTurn([
+      sm({ role: "user", content: "earlier task" }),
+      sm({ role: "assistant", content: "earlier reply" }),
+      sm({ role: "user", content: "real task" }),
+      sm({ role: "assistant", content: "announce" }),
+      sm({ role: "user", content: "[auto-continue] …" }, { synthetic: "nudge" }),
+      sm({ role: "assistant", content: "worked" }),
+      sm(
+        { role: "user", content: "[background subagent agent-1 completed]" },
+        { synthetic: "bg-report" },
+      ),
+      sm({ role: "assistant", content: "wrapped up" }),
+    ]);
+    // One retraction drops the whole real turn, nudge and report included.
+    expect(result.removed).toBe(6);
+    expect(core(result.messages)).toEqual([
+      { role: "user", content: "earlier task" },
+      { role: "assistant", content: "earlier reply" },
+    ]);
+  });
+
+  it("does not treat a synthetic user message as the only turn", () => {
+    const result = retractLastTurn([
+      sm({ role: "user", content: "real" }),
+      sm({ role: "user", content: "[auto-continue] …" }, { synthetic: "nudge" }),
+    ]);
+    expect(result.removed).toBe(2);
+    expect(result.messages).toHaveLength(0);
   });
 });
 
@@ -175,7 +213,7 @@ describe("AgentLoop.retractLastTurn", () => {
       { role: "user", content: "second" },
       { role: "assistant", content: "two" },
     ]);
-    await store.replaceMessages([...loop.getMessages()]);
+    await store.replaceMessages([...loop.getStarMessages()]);
 
     // History loaded wholesale carries no turn marker, so no file snapshots
     // may be reverted for it.

@@ -14,6 +14,7 @@ import { AgentLoop, type AgentLoopOptions } from "../src/agent/loop";
 import { convertUsagePricing } from "../src/agent/subagent";
 import type { ModelConfig, StarConfig } from "../src/config/schema";
 import type { StreamEvent, TokenUsage } from "../src/core/events";
+import { usageTotalTokens } from "../src/core/events";
 import { createDefaultRegistry } from "../src/tools";
 import type { ToolRegistry } from "../src/tools";
 import { createTodoTools, resetTodos } from "../src/tools/todo";
@@ -30,7 +31,7 @@ type Chunk =
   | {
       type: "finish";
       finishReason: "stop" | "tool-calls";
-      usage: { promptTokens: number; completionTokens: number };
+      usage: { promptTokens: number; completionTokens: number; totalTokens?: number };
     };
 
 function textRound(text: string): Chunk[] {
@@ -90,10 +91,11 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     maxAutoContinues: 2,
     notifyBell: true,
     notifyBellThresholdSec: 10,
-    permissions: { allow: [], deny: [] },
+    permissions: { allow: [], deny: [], ask: [], sensitive: [] },
     hooks: [],
     doomLoopThreshold: 3,
     gitSnapshots: false,
+    webFetchAllowPrivateHosts: false,
     ...overrides,
   };
 }
@@ -526,6 +528,82 @@ describe("convertUsagePricing", () => {
     expect(convertUsagePricing(usage, fakeModel("child"), fakeModel("parent"), zeroParent)).toBe(
       usage,
     );
+  });
+
+  it("prices by the [[models]] entry names when two entries share one model id", () => {
+    const dear = { ...priced("shared", 4, 16), name: "dear" };
+    const cheap = { ...priced("shared", 2, 4), name: "cheap" };
+    const config = configWith([dear, cheap]);
+    // Same model id on both sides: the id-only lookup cannot tell the runs
+    // apart and converts dear -> dear (a no-op). The entry names convert
+    // dear -> cheap: 100 prompt @4 → 200 @2; 50 completion @16 → 200 @4.
+    const converted = convertUsagePricing(usage, fakeModel("shared"), fakeModel("shared"), config, {
+      fromName: "dear",
+      toName: "cheap",
+    });
+    expect(converted).toEqual({ promptTokens: 200, completionTokens: 200, totalTokens: 400 });
+  });
+
+  it("falls back to the model-id lookup when the named entry is gone", () => {
+    const config = configWith([priced("child", 4, 16), priced("parent", 2, 4)]);
+    const converted = convertUsagePricing(usage, fakeModel("child"), fakeModel("parent"), config, {
+      fromName: "renamed-away",
+    });
+    expect(converted).toEqual({ promptTokens: 200, completionTokens: 200, totalTokens: 400 });
+  });
+});
+
+describe("usageTotalTokens", () => {
+  it("sums the billed classes, ignoring extra classes inside a reported total", () => {
+    // 10 reasoning tokens inside totalTokens must not bill twice.
+    expect(usageTotalTokens({ promptTokens: 5, completionTokens: 3, totalTokens: 18 })).toBe(8);
+  });
+
+  it("falls back to the reported total for a total-only report", () => {
+    expect(usageTotalTokens({ promptTokens: 0, completionTokens: 0, totalTokens: 12 })).toBe(12);
+  });
+});
+
+describe("subagent usage folding normalization", () => {
+  let cwd: string;
+
+  beforeEach(() => {
+    cwd = mkdtempSync(path.join(tmpdir(), "star-subagent-fold-"));
+  });
+
+  afterEach(() => {
+    defaultAgentTasks.cleanup();
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("does not double-bill reasoning classes hidden inside totalTokens", async () => {
+    // Every finish reports 10 reasoning tokens on top of the billed 5/3.
+    const withRichUsage = (chunks: Chunk[]): Chunk[] =>
+      chunks.map((chunk) =>
+        chunk.type === "finish"
+          ? { ...chunk, usage: { promptTokens: 5, completionTokens: 3, totalTokens: 18 } }
+          : chunk,
+      );
+    const loop = new AgentLoop({
+      model: mockModel([
+        withRichUsage(toolCallRound("call-1", "subagent", { prompt: "investigate" })),
+        withRichUsage(textRound("child report")),
+        withRichUsage(textRound("parent done")),
+      ]),
+      registry: createDefaultRegistry(),
+      config: makeConfig(),
+      cwd,
+    });
+
+    const events = await collect(loop.stream("survey", new AbortController().signal));
+
+    const finishes = events.filter(
+      (e): e is Extract<StreamEvent, { type: "finish" }> => e.type === "finish",
+    );
+    expect(finishes).toHaveLength(2);
+    // The step after the child ran folds parent (5/3) + child (5/3); the
+    // total sums the billed classes (8+8), not the reported 18+18.
+    expect(finishes[1]?.usage).toEqual({ promptTokens: 10, completionTokens: 6, totalTokens: 16 });
   });
 });
 

@@ -12,7 +12,7 @@ import { type StarConfig, contextWindowTokens } from "../config/schema";
 import { estimateTokens } from "../context/tokens";
 import { getGitSummaryCached } from "../core/git";
 import { MAX_IMAGE_DIMENSION } from "../core/image";
-import type { CoreMessage, ImageInput } from "../core/messages";
+import { type CoreMessage, type ImageInput, toCoreMessages } from "../core/messages";
 import { createModel, reasoningEffortMetadata } from "../llm/provider";
 import { listModels, resolveModelConfig } from "../llm/registry";
 import { buildAllowRule, isAllowedByRules } from "../permissions/allow";
@@ -267,6 +267,9 @@ export function Repl({
   // like during a stream — /compact ends with backend.loadMessages(), which
   // would clobber any turn that ran concurrently with it.
   const busyCommandRef = useRef<string | null>(null);
+  // Abort handle for the in-flight busy command: Esc while no turn is running
+  // cancels it (e.g. a /compact summary call that can take up to 60s).
+  const busyAbortRef = useRef<AbortController | null>(null);
   const streamedRef = useRef("");
   const turnStartedAtRef = useRef(0);
   // Chars of streamedRef already committed to static history by the ticker.
@@ -709,6 +712,14 @@ export function Repl({
         lastEscRef.current = null;
         return;
       }
+      // A long-running slash command owns Esc over the double-Esc edit below:
+      // retracting the last turn now would race the command's history rewrite
+      // (a /compact loadMessages would resurrect the retracted turn).
+      if (busyCommandRef.current) {
+        lastEscRef.current = null;
+        busyAbortRef.current?.abort();
+        return;
+      }
       const busy = abortRef.current !== null || pendingRef.current !== null;
       if (busy) {
         lastEscRef.current = null;
@@ -730,6 +741,7 @@ export function Repl({
       if (
         abortRef.current ||
         pendingRef.current ||
+        busyCommandRef.current ||
         planApprovalRef.current ||
         pendingRewindRef.current ||
         pendingConnectRef.current ||
@@ -787,10 +799,13 @@ export function Repl({
           streamIdleTimeoutSec: modelConfig.streamIdleTimeoutSec,
           streamFirstChunkTimeoutSec: modelConfig.streamFirstChunkTimeoutSec,
           vision: modelConfig.vision,
+          modelName: name,
         });
         const prev = backendRef.current;
         if (prev instanceof AgentLoop) {
-          await loop.loadMessages([...prev.getMessages()]);
+          // Star view: synthetic-message markers (nudges, background
+          // reports) must survive the model switch or /undo boundaries break.
+          await loop.loadMessages([...prev.getStarMessages()]);
         }
         attachConfirmHandler(loop);
         backendRef.current = loop;
@@ -893,7 +908,7 @@ export function Repl({
       setTodoSession(store.id);
       setTodos(await loadTodos(cwd, store.id));
       hydrateSnapshots(await loadSessionSnapshots(store.dir));
-      const display = buildDisplayMessages(resumed.messages);
+      const display = buildDisplayMessages(toCoreMessages(resumed.messages));
       nextIdRef.current = display.length;
       applyMessages(display);
       usageRef.current = resumed.meta.usage ? { ...resumed.meta.usage } : emptyUsage();
@@ -1370,7 +1385,7 @@ export function Repl({
         if (!(current instanceof AgentLoop) || !store) {
           return "Nothing to fork — no active session.";
         }
-        const messages = await store.messages();
+        const messages = await store.starMessages();
         if (messages.length === 0) {
           return "Nothing to fork — the current session has no messages yet.";
         }
@@ -1398,8 +1413,8 @@ export function Repl({
         sessionStoreRef.current = store;
         setTodoSession(store.id);
         // Keep the leading system prompt, drop everything else.
-        const [first] = current.getMessages();
-        await current.loadMessages(first?.role === "system" ? [first] : []);
+        const [first] = current.getStarMessages();
+        await current.loadMessages(first?.message.role === "system" ? [first] : []);
         clearSnapshots();
         redrawMessages([]);
         // A new session no longer carries the project's persisted todo list.
@@ -1447,6 +1462,8 @@ export function Repl({
           return `Busy — /${busyCommandRef.current} is still running.`;
         }
         busyCommandRef.current = "compact";
+        const controller = new AbortController();
+        busyAbortRef.current = controller;
         // /compact is refused mid-turn, so the stream ticker is free to reuse:
         // drive the spinner with a busy label while compaction runs — the
         // summary call alone can take up to 60s on a slow relay. Stamp the
@@ -1460,6 +1477,7 @@ export function Repl({
             backend: backendRef.current,
             sessionStore: sessionStoreRef.current,
             config,
+            signal: controller.signal,
           });
           if (result.compacted && result.messages) {
             const display = buildDisplayMessages(result.messages);
@@ -1472,6 +1490,7 @@ export function Repl({
           tickerStopRef.current = null;
           setActivity(null);
           busyCommandRef.current = null;
+          busyAbortRef.current = null;
           // Prompts queued while compaction ran start now that the history
           // rewrite is done (same drain as the end of a stream turn).
           const nextPrompt = queueRef.current.dequeue();

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { sessionsDir } from "../config/paths";
-import type { CoreMessage } from "../core/messages";
+import type { CoreMessage, MessageMeta, StarMessage } from "../core/messages";
 import {
   type CheckpointRecord,
   appendCheckpointRecord,
@@ -110,6 +110,29 @@ const META_FLUSH_INTERVAL_MS = 2000;
 // messages.jsonl is read back in chunks of this size instead of buffering
 // the whole file (a resume used to peak at 3-4x the file size in memory).
 const MESSAGES_READ_CHUNK_BYTES = 64 * 1024;
+
+// Loop side-band metadata (MessageMeta) persists as an extra key on the
+// message's jsonl row; readers strip it, so older rows without the key and
+// older readers unaware of it both keep working.
+const STAR_META_KEY = "__starMeta";
+
+function serializeMessage(star: StarMessage): string {
+  if (!star.meta) return JSON.stringify(star.message);
+  return JSON.stringify({ ...star.message, [STAR_META_KEY]: star.meta });
+}
+
+function parseMessageLine(line: string): StarMessage | null {
+  try {
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    if (parsed !== null && typeof parsed === "object" && STAR_META_KEY in parsed) {
+      const { [STAR_META_KEY]: meta, ...message } = parsed;
+      return { message: message as unknown as CoreMessage, meta: meta as MessageMeta };
+    }
+    return { message: parsed as unknown as CoreMessage };
+  } catch {
+    return null;
+  }
+}
 
 export function dayKey(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -312,7 +335,7 @@ export class SessionStore {
     );
   }
 
-  async append(message: CoreMessage): Promise<void> {
+  async append(message: CoreMessage, meta?: MessageMeta): Promise<void> {
     await this.ensureInitialized();
     // Appends get the same transient-failure retries as meta writes, and a
     // failure that outlasts them degrades to a warning instead of throwing:
@@ -322,21 +345,21 @@ export class SessionStore {
     // missing from messages.jsonl after a resume.
     try {
       await withTransientFsRetry(() =>
-        fs.appendFile(this.messagesPath(), `${JSON.stringify(message)}\n`),
+        fs.appendFile(this.messagesPath(), `${serializeMessage({ message, meta })}\n`),
       );
     } catch (error) {
       warn(
         `session ${this.id}: message append failed (${(error as NodeJS.ErrnoException).code ?? String(error)}), message kept in memory only`,
       );
     }
-    const meta = await this.meta();
-    meta.updatedAt = Date.now();
+    const sessionMeta = await this.meta();
+    sessionMeta.updatedAt = Date.now();
     this.markMetaDirty();
   }
 
-  async replaceMessages(messages: CoreMessage[]): Promise<void> {
+  async replaceMessages(messages: readonly StarMessage[]): Promise<void> {
     await this.ensureInitialized();
-    const content = messages.map((message) => JSON.stringify(message)).join("\n");
+    const content = messages.map(serializeMessage).join("\n");
     // tmp + rename like writeMeta: messages.jsonl is the session's only
     // durable record, and a crash mid-writeFile must not leave it truncated.
     // A rewrite that fails past its retries is dropped with a warning rather
@@ -360,6 +383,10 @@ export class SessionStore {
   }
 
   async messages(): Promise<CoreMessage[]> {
+    return (await this.starMessages()).map((star) => star.message);
+  }
+
+  async starMessages(): Promise<StarMessage[]> {
     // Read in fixed-size chunks through a StringDecoder instead of buffering
     // the whole file: a resume used to hold the raw string, the split line
     // array and the parsed objects at once (3-4x the file size at peak). The
@@ -368,16 +395,17 @@ export class SessionStore {
     let handle: fs.FileHandle | null = null;
     try {
       handle = await fs.open(this.messagesPath(), "r");
-      const messages: CoreMessage[] = [];
+      const messages: StarMessage[] = [];
       const decoder = new StringDecoder("utf8");
       const buffer = Buffer.alloc(MESSAGES_READ_CHUNK_BYTES);
       let tail = "";
       const pushLine = (line: string) => {
         const trimmed = line.trim();
         if (!trimmed) return;
-        try {
-          messages.push(JSON.parse(trimmed) as CoreMessage);
-        } catch {
+        const parsed = parseMessageLine(trimmed);
+        if (parsed) {
+          messages.push(parsed);
+        } else {
           debugWarn(`session ${this.id}: skipping corrupt messages.jsonl line`);
         }
       };
@@ -447,7 +475,7 @@ export class SessionStore {
     await this.flushMetaNow();
   }
 
-  async appendCheckpoint(record: CheckpointRecord, content: string | null): Promise<void> {
+  async appendCheckpoint(record: CheckpointRecord, content: string | Buffer | null): Promise<void> {
     await this.ensureInitialized();
     await appendCheckpointRecord(this.dir, record, content);
   }
