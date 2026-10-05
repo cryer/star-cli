@@ -2,7 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { isSensitivePath } from "../core/sensitive";
 import { isAllowedByRules, isAskedByRules, isDeniedByRules } from "./allow";
-import { type ShellToken, lexShell, segmentWords, splitShellSegments } from "./shell";
+import { type LexCache, lexCached } from "./lex-cache";
+import { type ShellToken, segmentWords, splitShellSegments } from "./shell";
 import type {
   PermissionContext,
   PermissionDecision,
@@ -87,7 +88,7 @@ function rmIsDangerous(args: string[]): boolean {
   return recursive && targets.some(isDangerousDeleteTarget);
 }
 
-function findIsDangerous(args: string[], depth: number): boolean {
+function findIsDangerous(args: string[], depth: number, lex?: LexCache): boolean {
   const paths: string[] = [];
   for (const arg of args) {
     if (arg.startsWith("-") || arg === "(" || arg === ")" || arg === "!" || arg === ",") {
@@ -118,9 +119,9 @@ function findIsDangerous(args: string[], depth: number): boolean {
     if (SH_FAMILY.has(name)) {
       const idx = argv.indexOf("-c");
       const script = idx >= 0 ? argv[idx + 1] : undefined;
-      if (script !== undefined && commandLineIsDangerous(script, depth + 1)) return true;
+      if (script !== undefined && commandLineIsDangerous(script, depth + 1, lex)) return true;
     }
-    if (commandLineIsDangerous(argv.join(" "), depth + 1)) return true;
+    if (commandLineIsDangerous(argv.join(" "), depth + 1, lex)) return true;
   }
   return false;
 }
@@ -150,7 +151,7 @@ const XARGS_VALUE_OPTS = new Set([
 // the payload is a shell (-c script), the script is analyzed after replacing
 // the -I placeholder with a root-ish target, since it too stands in for
 // arbitrary stdin-supplied paths.
-function xargsIsDangerous(args: string[], depth: number): boolean {
+function xargsIsDangerous(args: string[], depth: number, lex?: LexCache): boolean {
   let replstr: string | undefined;
   for (let k = 0; k < args.length; k += 1) {
     const arg = args[k] as string;
@@ -183,7 +184,7 @@ function xargsIsDangerous(args: string[], depth: number): boolean {
     const script = idx >= 0 ? scriptArgs[idx + 1] : undefined;
     if (script === undefined) return false;
     const substituted = replstr !== undefined ? script.split(replstr).join("~") : script;
-    return commandLineIsDangerous(substituted, depth + 1);
+    return commandLineIsDangerous(substituted, depth + 1, lex);
   }
   return false;
 }
@@ -320,15 +321,15 @@ function commandInvocation(words: string[]): CommandInvocation | null {
   }
 }
 
-function commandLineIsDangerous(command: string, depth: number): boolean {
+function commandLineIsDangerous(command: string, depth: number, lex?: LexCache): boolean {
   if (depth > MAX_ANALYSIS_DEPTH) return true;
-  const tokens = lexShell(command);
+  const tokens = lexCached(lex, command);
   for (const token of tokens) {
-    if (token.kind === "subst" && commandLineIsDangerous(token.inner, depth + 1)) {
+    if (token.kind === "subst" && commandLineIsDangerous(token.inner, depth + 1, lex)) {
       return true;
     }
   }
-  return splitShellSegments(tokens).some((segment) => segmentIsDangerous(segment, depth));
+  return splitShellSegments(tokens).some((segment) => segmentIsDangerous(segment, depth, lex));
 }
 
 // PowerShell -EncodedCommand payloads are UTF-16LE base64; input that does
@@ -342,7 +343,7 @@ function decodePowerShellEncoded(encoded: string): string | null {
   }
 }
 
-function segmentIsDangerous(segment: ShellToken[], depth: number): boolean {
+function segmentIsDangerous(segment: ShellToken[], depth: number, lex?: LexCache): boolean {
   const { words, redirectTargets } = segmentWords(segment);
   if (redirectTargets.some((target) => BLOCK_DEVICE.test(target))) {
     return true;
@@ -393,9 +394,9 @@ function segmentIsDangerous(segment: ShellToken[], depth: number): boolean {
           arg.startsWith("if=") || (arg.startsWith("of=") && BLOCK_DEVICE.test(arg.slice(3))),
       );
     case "find":
-      return findIsDangerous(rest, depth);
+      return findIsDangerous(rest, depth, lex);
     case "xargs":
-      return xargsIsDangerous(rest, depth);
+      return xargsIsDangerous(rest, depth, lex);
     case "chmod":
       return chmodIsDangerous(rest);
     case "systemctl":
@@ -423,17 +424,17 @@ function segmentIsDangerous(segment: ShellToken[], depth: number): boolean {
     case "ash": {
       const idx = rest.indexOf("-c");
       const script = idx >= 0 ? rest[idx + 1] : undefined;
-      return script !== undefined && commandLineIsDangerous(script, depth + 1);
+      return script !== undefined && commandLineIsDangerous(script, depth + 1, lex);
     }
     case "eval":
-      return rest.length > 0 && commandLineIsDangerous(rest.join(" "), depth + 1);
+      return rest.length > 0 && commandLineIsDangerous(rest.join(" "), depth + 1, lex);
     case "cmd": {
       const idx = rest.findIndex((arg) => /^\/[ck]$/i.test(arg));
       if (idx < 0) return false;
       const script = rest.slice(idx + 1).join(" ");
       if (script.length === 0) return false;
       // cmd's escape character: `rmdir ^/s` parses as `rmdir /s`.
-      return commandLineIsDangerous(script.replace(/\^(.)/gs, "$1"), depth + 1);
+      return commandLineIsDangerous(script.replace(/\^(.)/gs, "$1"), depth + 1, lex);
     }
     case "powershell":
     case "pwsh": {
@@ -441,14 +442,14 @@ function segmentIsDangerous(segment: ShellToken[], depth: number): boolean {
         const arg = rest[k] as string;
         if (/^-(c|command)$/i.test(arg)) {
           const script = rest.slice(k + 1).join(" ");
-          return script.length > 0 && commandLineIsDangerous(script, depth + 1);
+          return script.length > 0 && commandLineIsDangerous(script, depth + 1, lex);
         }
         if (/^-(enc|encodedcommand)$/i.test(arg)) {
           const encoded = rest[k + 1];
           if (encoded === undefined) return true;
           const script = decodePowerShellEncoded(encoded);
           if (script === null) return true;
-          return commandLineIsDangerous(script, depth + 1);
+          return commandLineIsDangerous(script, depth + 1, lex);
         }
       }
       return false;
@@ -462,9 +463,9 @@ function segmentIsDangerous(segment: ShellToken[], depth: number): boolean {
 // $VAR/${VAR} normalized, $(...)/backtick/`sh -c` arguments recursed into),
 // so flag order, quoting and wrapper commands cannot smuggle a blocked
 // payload past it. yolo mode bypasses even this.
-export function isDangerousCommand(command: string): boolean {
+export function isDangerousCommand(command: string, lex?: LexCache): boolean {
   if (FORK_BOMB.test(command)) return true;
-  return commandLineIsDangerous(command, 0);
+  return commandLineIsDangerous(command, 0, lex);
 }
 
 // Directories whose contents must never leave the machine: the CLI's own
@@ -498,13 +499,13 @@ interface BashHygiene {
 // command. Command substitutions and sh/cmd/eval scripts are scanned
 // recursively. bash otherwise never looks at what a command reads, so this
 // is the only tripwire between "cat ~/.star-cli/.env" and "curl evil/$(...)".
-function bashHygiene(command: string): BashHygiene {
+function bashHygiene(command: string, lex?: LexCache): BashHygiene {
   let sensitive = false;
   let egress = false;
   const visit = (tokens: ShellToken[], depth: number) => {
     if (depth > MAX_ANALYSIS_DEPTH) return;
     for (const token of tokens) {
-      if (token.kind === "subst") visit(lexShell(token.inner), depth + 1);
+      if (token.kind === "subst") visit(lexCached(lex, token.inner), depth + 1);
     }
     for (const segment of splitShellSegments(tokens)) {
       const { words, redirectTargets } = segmentWords(segment);
@@ -524,10 +525,10 @@ function bashHygiene(command: string): BashHygiene {
       } else if (invocation.name === "eval" && invocation.rest.length > 0) {
         script = invocation.rest.join(" ");
       }
-      if (script !== undefined) visit(lexShell(script), depth + 1);
+      if (script !== undefined) visit(lexCached(lex, script), depth + 1);
     }
   };
-  visit(lexShell(command), 0);
+  visit(lexCached(lex, command), 0);
   return { sensitive, egress };
 }
 
@@ -552,21 +553,98 @@ function isOutsideCwd(p: string, cwd: string): boolean {
   return abs !== base && !abs.startsWith(`${base}/`);
 }
 
+// Short-TTL (≤5s) caches for filesystem resolution, keyed by path string and
+// bounded so a long session cannot grow them without limit. The TTL is
+// deliberately brief because resolution is part of a security boundary: a
+// symlink swapped within the window keeps its old verdict — the accepted
+// trade-off for keeping repeated realpathSync calls (and multi-second
+// unreachable-UNC hangs) off the render thread.
+const REALPATH_TTL_MS = 5_000;
+const REALPATH_CACHE_MAX = 1000;
+
+interface RealpathEntry {
+  value: string | null;
+  expires: number;
+}
+
+// Map iterates in insertion order: hits re-insert to stay recent, and a full
+// cache drops the oldest entry — a simple LRU.
+class RealpathCache {
+  private readonly map = new Map<string, RealpathEntry>();
+
+  get(key: string): string | null | undefined {
+    const entry = this.map.get(key);
+    if (entry === undefined) return undefined;
+    if (entry.expires <= Date.now()) {
+      this.map.delete(key);
+      return undefined;
+    }
+    this.map.delete(key);
+    this.map.set(key, entry);
+    return entry.value;
+  }
+
+  set(key: string, value: string | null): void {
+    this.map.delete(key);
+    if (this.map.size >= REALPATH_CACHE_MAX) {
+      const oldest = this.map.keys().next().value;
+      if (oldest !== undefined) this.map.delete(oldest);
+    }
+    this.map.set(key, { value, expires: Date.now() + REALPATH_TTL_MS });
+  }
+}
+
+const realpathCache = new RealpathCache();
+const resolvedPathCache = new RealpathCache();
+
+// fs.realpathSync through the TTL cache; null means missing/unresolvable
+// (negative results are cached too — a not-yet-created file is re-asked on
+// every write attempt otherwise).
+function realpathCached(p: string): string | null {
+  const hit = realpathCache.get(p);
+  if (hit !== undefined) return hit;
+  let value: string | null;
+  try {
+    value = fs.realpathSync(p);
+  } catch {
+    value = null;
+  }
+  realpathCache.set(p, value);
+  return value;
+}
+
 // Resolves symlinks for a target: the file itself when it exists, otherwise
 // the nearest existing ancestor with the missing tail re-attached. Returns
 // null when nothing on the path can be resolved.
 function resolveRealPath(p: string, cwd: string): string | null {
-  let current = path.isAbsolute(p) ? path.normalize(p) : path.resolve(cwd, p);
+  const start = path.isAbsolute(p) ? path.normalize(p) : path.resolve(cwd, p);
+  const hit = resolvedPathCache.get(start);
+  if (hit !== undefined) return hit;
+  const value = resolveRealPathUncached(start);
+  resolvedPathCache.set(start, value);
+  return value;
+}
+
+function resolveRealPathUncached(start: string): string | null {
+  // win32 UNC paths (\\host\share\...) hang for seconds per realpathSync when
+  // the host is unreachable, and the per-component walk below would multiply
+  // that by the path depth. Try the full path once; when it fails, judge the
+  // boundary by the normalized spelling (the same string-based fallback the
+  // unresolvable case has always used).
+  if (process.platform === "win32" && start.startsWith("\\\\")) {
+    return realpathCached(start) ?? start;
+  }
+  let current = start;
   const missing: string[] = [];
   for (;;) {
-    try {
-      return path.join(fs.realpathSync(current), ...missing.reverse());
-    } catch {
-      const parent = path.dirname(current);
-      if (parent === current) return null;
-      missing.push(path.basename(current));
-      current = parent;
+    const resolved = realpathCached(current);
+    if (resolved !== null) {
+      return path.join(resolved, ...missing.reverse());
     }
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    missing.push(path.basename(current));
+    current = parent;
   }
 }
 
@@ -578,12 +656,8 @@ function resolveRealPath(p: string, cwd: string): string | null {
 function isOutsideResolved(p: string, cwd: string): boolean {
   const resolved = resolveRealPath(p, cwd);
   if (resolved === null) return isOutsideCwd(p, cwd);
-  let realCwd: string;
-  try {
-    realCwd = fs.realpathSync(cwd);
-  } catch {
-    return isOutsideCwd(p, cwd);
-  }
+  const realCwd = realpathCached(cwd);
+  if (realCwd === null) return isOutsideCwd(p, cwd);
   return isOutsideCwd(resolved, realCwd);
 }
 
@@ -603,12 +677,18 @@ export function checkPermission(
   const command = getStringArg(req.args, "command");
   const filePath = getStringArg(req.args, "path");
 
+  // One lexer memo shared by every bash stage below (dangerous-command
+  // analysis, sensitive-path tripwire, allow/deny/ask rule matching), so the
+  // command line and its substitution bodies are lexed once per check.
+  const lex: LexCache | undefined =
+    req.toolName === "bash" && command !== undefined ? new Map() : undefined;
+
   let bashTouchesSensitive = false;
   if (req.toolName === "bash" && command !== undefined) {
-    if (isDangerousCommand(command)) {
+    if (isDangerousCommand(command, lex)) {
       return "deny";
     }
-    const hygiene = bashHygiene(command);
+    const hygiene = bashHygiene(command, lex);
     // Secret read + network egress in one chain = exfiltration signature.
     if (hygiene.sensitive && hygiene.egress) {
       return "deny";
@@ -629,7 +709,7 @@ export function checkPermission(
     }
   }
 
-  if (isDeniedByRules(denyRules, req)) {
+  if (isDeniedByRules(denyRules, req, lex)) {
     return "deny";
   }
 
@@ -639,7 +719,7 @@ export function checkPermission(
     if (bashTouchesSensitive) {
       return "ask";
     }
-    if (isAskedByRules(askRules, req)) {
+    if (isAskedByRules(askRules, req, lex)) {
       return "ask";
     }
     return "allow";
@@ -650,10 +730,10 @@ export function checkPermission(
   if (mode === "plan") {
     return req.level === "read" ? "allow" : "deny";
   }
-  if (isAskedByRules(askRules, req)) {
+  if (isAskedByRules(askRules, req, lex)) {
     return "ask";
   }
-  if (isAllowedByRules(allowRules, req)) {
+  if (isAllowedByRules(allowRules, req, lex)) {
     return "allow";
   }
   return req.level === "read" ? "allow" : "ask";
