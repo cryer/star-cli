@@ -5,6 +5,12 @@ import { formatTokens } from "./cli/cost";
 import { formatStreamError } from "./cli/format";
 import { MAX_IMAGE_BYTES, imageMimeType, readImageInput, resolveMentions } from "./cli/mentions";
 import { UsageTracker, eventToJsonLine } from "./cli/print-json";
+import {
+  imageRequiresPrintError,
+  installStdoutEpipeGuard,
+  interactiveRequiresTtyError,
+  reportResumeSessions,
+} from "./cli/startup";
 import { SYSTEM_PROMPT } from "./cli/system-prompt";
 import { loadConfigSync } from "./config/loader";
 import { type StarConfig, contextWindowTokens } from "./config/schema";
@@ -18,12 +24,7 @@ import { createModel, reasoningEffortMetadata } from "./llm/provider";
 import { resolveModelConfig, resolveStartupModel } from "./llm/registry";
 import { loadSessionSnapshots } from "./session/checkpoints";
 import { clearSessions } from "./session/clear";
-import {
-  findLatestSession,
-  formatSessionEntries,
-  listSessionEntries,
-  resolveSessionId,
-} from "./session/list";
+import { findLatestSession, resolveSessionId } from "./session/list";
 import { type SessionMeta, SessionStore } from "./session/store";
 import { defaultTaskManager } from "./tasks/manager";
 import { createDefaultRegistry } from "./tools";
@@ -209,6 +210,7 @@ program
     "delete stored sessions for the current directory ('all' deletes every session) and exit",
   )
   .action(async (opts) => {
+    installStdoutEpipeGuard();
     const cwd = process.cwd();
 
     if (opts.json && opts.print === undefined) {
@@ -218,19 +220,19 @@ program
       process.exit(1);
     }
 
+    const imageError = imageRequiresPrintError(opts.print, opts.image ?? []);
+    if (imageError) {
+      console.error(imageError);
+      process.exit(1);
+    }
+
     if (opts.resume !== undefined && opts.continue) {
       console.error("Options --resume and --continue are mutually exclusive: pick one.");
       process.exit(1);
     }
 
     if (opts.resume === true) {
-      const entries = await listSessionEntries(cwd);
-      if (entries.length === 0) {
-        console.error("No sessions found for this directory.");
-      } else {
-        console.log(formatSessionEntries(entries));
-      }
-      process.exit(0);
+      process.exit(await reportResumeSessions(cwd));
     }
 
     if (opts.clearSessions !== undefined) {
@@ -346,6 +348,17 @@ program
         sessionStore,
       );
       return;
+    }
+
+    // The REPL needs a real terminal on both ends; check before paying for
+    // the Ink import so a piped launch fails fast with a clear message.
+    const ttyError = interactiveRequiresTtyError({
+      stdinTTY: Boolean(process.stdin.isTTY),
+      stdoutTTY: Boolean(process.stdout.isTTY),
+    });
+    if (ttyError) {
+      console.error(ttyError);
+      process.exit(1);
     }
 
     // The REPL pulls in Ink and every interactive component (~0.4s of module

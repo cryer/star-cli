@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sessionsDir } from "../src/config/paths";
 import type { CoreMessage } from "../src/core/messages";
+import { listCheckpointRecords } from "../src/session/checkpoints";
 import { resumeSession } from "../src/session/resume";
 import { type SessionMeta, SessionStore } from "../src/session/store";
 import { rmWithRetry } from "./test-fs";
@@ -51,6 +52,61 @@ describe("SessionStore", () => {
     for (const message of messages) await store.append(message);
 
     expect(await store.messages()).toEqual(messages);
+  });
+
+  it("regenerates the session id when its directory already exists", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2025-06-01T12:00:00"));
+      const randomSpy = vi
+        .spyOn(Math, "random")
+        .mockReturnValueOnce(0.5)
+        .mockReturnValueOnce(0.5)
+        .mockReturnValue(0.8);
+      try {
+        const first = await SessionStore.create("/a", "m");
+        await first.append({ role: "user", content: "hi" });
+
+        // Two processes starting in the same second share the timestamp
+        // stamp; the second one's colliding candidate must be redrawn or both
+        // sessions would write into one directory.
+        const second = await SessionStore.create("/a", "m");
+        expect(second.id).not.toBe(first.id);
+        expect(second.dir).not.toBe(first.dir);
+        const suffix = (id: string) => id.slice(id.lastIndexOf("-") + 1);
+        expect(suffix(first.id)).toBe("800000");
+        expect(suffix(second.id)).toBe("cccccc");
+      } finally {
+        randomSpy.mockRestore();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("widens the id with a uuid segment when collisions persist", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2025-06-01T12:00:00"));
+      const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
+      try {
+        const first = await SessionStore.create("/a", "m");
+        await first.append({ role: "user", content: "hi" });
+
+        const second = await SessionStore.create("/a", "m");
+        expect(second.id).not.toBe(first.id);
+        expect(second.dir).not.toBe(first.dir);
+
+        // Both stores keep their own directory and their own history.
+        await second.append({ role: "user", content: "second" });
+        expect(await first.messages()).toEqual([{ role: "user", content: "hi" }]);
+        expect(await second.messages()).toEqual([{ role: "user", content: "second" }]);
+      } finally {
+        randomSpy.mockRestore();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("leaves the meta title empty on append", async () => {
@@ -565,6 +621,99 @@ describe("SessionStore", () => {
     expect(records.map((record) => record.id).sort((a, b) => a - b)).toEqual([
       1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
     ]);
+  });
+
+  function checkpointRecord(id: number) {
+    return {
+      id,
+      timestamp: Date.now(),
+      path: `f${id}.txt`,
+      existed: true,
+      toolName: "write_file",
+      turn: 1,
+      messageIndex: 0,
+    };
+  }
+
+  it("writes the checkpoint index atomically via tmp + rename", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "user", content: "hi" });
+    const writeFileSpy = vi.spyOn(fsPromises, "writeFile");
+    const renameSpy = vi.spyOn(fsPromises, "rename");
+    try {
+      await store.appendCheckpoint(checkpointRecord(1), "content");
+
+      // The index rewrite never touches index.json directly: a tmp sibling is
+      // renamed over it, so a crash mid-write cannot corrupt the whole
+      // /rewind index.
+      const tmpWrites = writeFileSpy.mock.calls.filter(([file]) =>
+        String(file).includes("index.json.tmp-"),
+      );
+      expect(tmpWrites).toHaveLength(1);
+      const tmpRenames = renameSpy.mock.calls.filter(
+        ([from, to]) =>
+          String(from).includes("index.json.tmp-") && String(to).endsWith("index.json"),
+      );
+      expect(tmpRenames).toHaveLength(1);
+      expect(await store.listCheckpoints()).toHaveLength(1);
+      expect(
+        fs
+          .readdirSync(path.join(store.dir, "checkpoints"))
+          .filter((entry) => entry.startsWith("index.json.tmp-")),
+      ).toEqual([]);
+    } finally {
+      writeFileSpy.mockRestore();
+      renameSpy.mockRestore();
+    }
+  });
+
+  it("retries checkpoint index writes past transient EPERM rename failures", async () => {
+    const realRename = fsPromises.rename;
+    let failuresLeft = 2;
+    const spy = vi.spyOn(fsPromises, "rename").mockImplementation(async (oldPath, newPath) => {
+      if (failuresLeft > 0 && String(newPath).endsWith("index.json")) {
+        failuresLeft--;
+        const error: NodeJS.ErrnoException = new Error("EPERM: operation not permitted, rename");
+        error.code = "EPERM";
+        throw error;
+      }
+      return realRename(oldPath, newPath);
+    });
+    try {
+      const store = await SessionStore.create("/a", "m");
+      await store.append({ role: "user", content: "hi" });
+      await store.appendCheckpoint(checkpointRecord(1), "content");
+
+      expect(failuresLeft).toBe(0);
+      expect(await store.listCheckpoints()).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("warns on stderr when the checkpoint index is corrupt instead of failing silently", async () => {
+    const store = await SessionStore.create("/a", "m");
+    await store.append({ role: "user", content: "hi" });
+    const dir = path.join(store.dir, "checkpoints");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "index.json"), "{not json");
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(await store.listCheckpoints()).toEqual([]);
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("checkpoints index"));
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it("returns no checkpoints silently when the index does not exist", async () => {
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      expect(await listCheckpointRecords(path.join(home, "no-such-session"))).toEqual([]);
+      expect(stderrSpy).not.toHaveBeenCalled();
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 });
 

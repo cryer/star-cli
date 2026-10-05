@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -49,6 +51,39 @@ function generateId(now: Date): string {
   return `${stamp}-${suffix}`;
 }
 
+// Two processes creating a session in the same second share the timestamp
+// stamp, and a colliding random suffix would merge both sessions into one
+// directory — so an occupied id is redrawn a few times and ultimately widened
+// with a randomUUID segment.
+const ID_COLLISION_MAX_ATTEMPTS = 5;
+
+function generateUniqueId(): string {
+  let id = generateId(new Date());
+  for (let attempt = 1; existsSync(path.join(sessionsDir(), id)); attempt++) {
+    if (attempt >= ID_COLLISION_MAX_ATTEMPTS) {
+      const stamp = id.slice(0, id.lastIndexOf("-"));
+      return `${stamp}-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    }
+    id = generateId(new Date());
+  }
+  return id;
+}
+
+// Sessions record their owning cwd as a raw string, but on Windows the same
+// directory shows up with different drive-letter casing and trailing
+// separators; comparing raw strings would orphan those sessions from the
+// `star -c` / list filter. win32 comparisons resolve both sides and fold
+// case; POSIX paths are case-sensitive and stay as recorded.
+export function normalizeCwdForCompare(
+  cwd: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform !== "win32") return cwd;
+  const resolved = path.win32.resolve(cwd);
+  const trimmed = resolved.replace(/[\\/]+$/, "");
+  return (trimmed === "" ? resolved : trimmed).toLowerCase();
+}
+
 function debugWarn(message: string): void {
   if (process.env.STAR_DEBUG === "1") process.stderr.write(`[star-cli] ${message}\n`);
 }
@@ -71,7 +106,7 @@ function isTransientFsError(error: unknown): boolean {
   return code === "EPERM" || code === "EACCES" || code === "EBUSY";
 }
 
-async function withTransientFsRetry(operation: () => Promise<unknown>): Promise<void> {
+export async function withTransientFsRetry(operation: () => Promise<unknown>): Promise<void> {
   let lastError: unknown;
   for (let attempt = 0; attempt < FS_WRITE_MAX_ATTEMPTS; attempt++) {
     try {
@@ -167,7 +202,7 @@ export class SessionStore {
   }
 
   static async create(cwd: string, model: string): Promise<SessionStore> {
-    const store = new SessionStore(generateId(new Date()));
+    const store = new SessionStore(generateUniqueId());
     store.pendingMeta = { cwd, model, createdAt: Date.now() };
     return store;
   }
@@ -200,12 +235,18 @@ export class SessionStore {
     } catch {
       return [];
     }
+    const wanted = cwd === undefined ? undefined : normalizeCwdForCompare(cwd);
     const metas = await Promise.all(
       entries.map(async (entry) => {
         try {
           const raw = await fs.readFile(path.join(sessionsDir(), entry, "meta.json"), "utf8");
           const meta = JSON.parse(raw) as SessionMeta;
-          if (meta.id === entry && (cwd === undefined || meta.cwd === cwd)) return meta;
+          if (
+            meta.id === entry &&
+            (wanted === undefined || normalizeCwdForCompare(meta.cwd) === wanted)
+          ) {
+            return meta;
+          }
         } catch {
           // 跳过损坏的会话目录
         }

@@ -11,7 +11,7 @@ import {
   sessionPreview,
   shortSessionId,
 } from "../src/session/list";
-import { SessionStore } from "../src/session/store";
+import { SessionStore, normalizeCwdForCompare } from "../src/session/store";
 import { rmWithRetry } from "./test-fs";
 
 let home: string;
@@ -152,6 +152,41 @@ describe("findLatestSession", () => {
 
     expect(await findLatestSession("/work/here")).toBeNull();
   });
+});
+
+describe("normalizeCwdForCompare", () => {
+  it("folds drive-letter casing and trailing separators on win32", () => {
+    expect(normalizeCwdForCompare("C:\\Work\\Proj", "win32")).toBe(
+      normalizeCwdForCompare("c:\\work\\proj\\", "win32"),
+    );
+    expect(normalizeCwdForCompare("C:\\Work\\Proj", "win32")).not.toBe(
+      normalizeCwdForCompare("c:\\work\\other", "win32"),
+    );
+  });
+
+  it("keeps POSIX paths byte-exact", () => {
+    expect(normalizeCwdForCompare("/Work/Here", "linux")).toBe("/Work/Here");
+    expect(normalizeCwdForCompare("/Work/Here", "linux")).not.toBe(
+      normalizeCwdForCompare("/work/here", "linux"),
+    );
+    expect(normalizeCwdForCompare("/work/here/", "linux")).toBe("/work/here/");
+  });
+});
+
+describe("cwd matching on win32", () => {
+  // Sessions record the raw cwd string; drive-letter casing and trailing
+  // separators must not orphan a session from `star -c`'s filter.
+  it.skipIf(process.platform !== "win32")(
+    "list(cwd) matches sessions recorded with different casing or a trailing separator",
+    async () => {
+      const store = await SessionStore.create("C:\\Work\\Here", "m");
+      await store.append({ role: "user", content: "hi" });
+
+      expect((await SessionStore.list("c:\\work\\here\\")).map((m) => m.id)).toEqual([store.id]);
+      expect((await SessionStore.list("C:\\Work\\Here")).map((m) => m.id)).toEqual([store.id]);
+      expect(await SessionStore.list("c:\\work\\elsewhere")).toEqual([]);
+    },
+  );
 });
 
 describe("resolveSessionId", () => {

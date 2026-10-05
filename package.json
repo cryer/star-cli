@@ -20,7 +20,7 @@
     "access": "public"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.3"
   },
   "scripts": {
     "build": "tsup",
