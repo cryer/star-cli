@@ -663,7 +663,14 @@ describe("AgentLoop", () => {
       doStream: async () => {
         calls++;
         const chunks: Chunk[] =
-          calls === 1 ? [{ type: "error", error: new Error("socket hang up") }] : textRound("ok");
+          calls === 1
+            ? [
+                {
+                  type: "error",
+                  error: Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }),
+                },
+              ]
+            : textRound("ok");
         return {
           stream: convertArrayToReadableStream(chunks),
           rawCall: { rawPrompt: null, rawSettings: {} },
@@ -738,7 +745,10 @@ describe("AgentLoop", () => {
         calls++;
         return {
           stream: convertArrayToReadableStream([
-            { type: "error", error: new Error("relay down") } satisfies Chunk,
+            {
+              type: "error",
+              error: Object.assign(new Error("relay down"), { code: "ECONNRESET" }),
+            } satisfies Chunk,
           ]),
           rawCall: { rawPrompt: null, rawSettings: {} },
         };
@@ -816,7 +826,10 @@ describe("AgentLoop", () => {
     const model = new MockLanguageModelV1({
       doStream: async () => ({
         stream: convertArrayToReadableStream([
-          { type: "error", error: new Error("relay down") } satisfies Chunk,
+          {
+            type: "error",
+            error: Object.assign(new Error("relay down"), { code: "ECONNRESET" }),
+          } satisfies Chunk,
         ]),
         rawCall: { rawPrompt: null, rawSettings: {} },
       }),

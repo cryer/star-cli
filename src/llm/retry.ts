@@ -30,6 +30,43 @@ const RETRYABLE_MESSAGE_PATTERNS = [
   /resource.?exhausted|try (?:your request )?again|at capacity/i,
 ];
 
+// Deterministic client failures resend identically forever, so these 4xx
+// codes fail fast even when the message or body sounds transient — "server
+// error" text on a relay's error page must not burn the retry budget.
+const NON_RETRYABLE_4XX = new Set([400, 401, 403, 404, 413, 422]);
+
+// Network-stack errnos worth a resend: the connection died before or during
+// the response, so a fresh attempt takes a different path.
+const NETWORK_ERROR_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "EPIPE",
+  "EAI_AGAIN",
+  "ENOTFOUND",
+  "ECONNABORTED",
+]);
+
+function networkCodeOf(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const code = (value as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+}
+
+// Without an HTTP status the only honest retry signal is a network-family
+// failure: Node's fetch reports those as TypeError("fetch failed") (usually
+// with the errno on error.cause.code), and the classic stack attaches the
+// errno to the error itself. Anything else statusless — above all a TypeError
+// from a code bug — fails deterministically and must fail fast instead of
+// resending the whole history five times.
+function isNetworkFailure(error: Error): boolean {
+  for (const candidate of [error, (error as { cause?: unknown }).cause]) {
+    const code = networkCodeOf(candidate);
+    if (code && (NETWORK_ERROR_CODES.has(code) || code.startsWith("UND_ERR_"))) return true;
+  }
+  return error.name === "TypeError" && /fetch failed|failed to fetch|network/i.test(error.message);
+}
+
 function statusCodeOf(error: Error): number | undefined {
   const status = (error as { statusCode?: unknown }).statusCode;
   return typeof status === "number" ? status : undefined;
@@ -49,13 +86,14 @@ export function isRetryableStreamError(error: Error): boolean {
     // cannot serve this request shape at all, so it falls through to the
     // message/body check like any other deterministic status.
     if (status === 408 || status === 429 || (status >= 500 && status !== 501)) return true;
-    // A 4xx is normally deterministic, but gateways and relays surface
-    // transient failures under 4xx codes (Cloudflare rate-limit 403s, a 400
-    // wrapping an upstream failure), recognizable only by what the error says.
+    if (NON_RETRYABLE_4XX.has(status)) return false;
+    // Other 4xx codes are normally deterministic too, but gateways and relays
+    // surface transient failures under odd ones (a 409 wrapping an upstream
+    // failure), recognizable only by what the error says.
     return matchesRetryablePattern(error.message) || matchesRetryablePattern(responseBodyOf(error));
   }
-  // No status at all: network/parse failure before or during the response.
-  return true;
+  // No status at all: only a genuine network failure merits a resend.
+  return isNetworkFailure(error);
 }
 
 export const RETRY_JITTER_FACTOR = 0.25;

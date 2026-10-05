@@ -255,7 +255,7 @@ describe("AgentLoop interrupt persistence", () => {
         doStream: async () => ({
           stream: convertArrayToReadableStream([
             { type: "text-delta", textDelta: "partial answer" },
-            { type: "error", error: new Error("fetch failed") },
+            { type: "error", error: new TypeError("fetch failed") },
           ]),
           rawCall: { rawPrompt: null, rawSettings: {} },
         }),

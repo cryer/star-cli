@@ -169,7 +169,13 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
     firstPartTimeoutMs,
   });
   try {
+    // At most one in-flight read, reused across watchdog wake-ups: fullStream
+    // wraps a ReadableStreamDefaultReader whose pending reads queue FIFO and
+    // each consume a DIFFERENT chunk, so a next() abandoned when the watchdog
+    // wins the race would silently eat the part that eventually settles it.
+    let pending: ReturnType<typeof iterator.next> | undefined;
     for (;;) {
+      pending ??= iterator.next();
       let timer: ReturnType<typeof setTimeout> | undefined;
       const windowMs = seenContent ? idleTimeoutMs : firstPartTimeoutMs;
       const idle = new Promise<null>((resolve) => {
@@ -177,7 +183,7 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
       });
       let next: Awaited<ReturnType<typeof iterator.next>> | null;
       try {
-        next = await Promise.race([iterator.next(), idle]);
+        next = await Promise.race([pending, idle]);
       } catch (error) {
         debugStreamLog("stream-throw", {
           seenContent,
@@ -186,11 +192,13 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
         });
         throw error;
       } finally {
-        // Clear in finally: when iterator.next() rejects, skipping this would
-        // leave the watchdog timer pending for up to the full first-part
-        // allowance.
+        // Clear in finally: when the read rejects, skipping this would leave
+        // the watchdog timer pending for up to the full first-part allowance.
         if (timer) clearTimeout(timer);
       }
+      // A settled read is consumed below; only a watchdog timeout leaves the
+      // pending read in flight for the next race.
+      if (next !== null) pending = undefined;
       if (next === null) {
         // Byte-level liveness check before cutting: relays fronting slow
         // upstreams often send SSE heartbeat comments while buffering, and
@@ -305,15 +313,20 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
           if (opts.abortSignal?.aborted) return;
           const error = part.error instanceof Error ? part.error : new Error(String(part.error));
           debugStreamLog("error-part", { seenContent, deltas, error: summarizeStreamError(error) });
+          // Errors are terminal: iterating past one would merge trailing
+          // parts into a turn already flagged failed.
           yield { type: "error", error };
-          break;
+          return;
         }
       }
     }
   } finally {
     opts.abortSignal?.removeEventListener("abort", onAbort);
-    // Cancels the upstream request if it is still open (e.g. a relay that
-    // sent its last byte but kept the connection alive).
+    // Release the stream when exiting mid-flight (idle cut, terminal error):
+    // ai@4's iterator has no return(), so the abort is what actually cancels
+    // the upstream request and settles any pending read — the last race still
+    // observes that read, so it cannot reject unhandled.
+    await iterator.return?.();
     controller.abort();
   }
 }

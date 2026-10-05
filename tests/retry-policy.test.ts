@@ -62,32 +62,59 @@ describe("isRetryableStreamError", () => {
     expect(isRetryableStreamError(apiError("invalid schema", { statusCode: 400 }))).toBe(false);
   });
 
-  it("retries a 4xx whose message or body reports a transient failure", () => {
-    // Cloudflare-style rate-limit page surfaced by a relay as a 403.
+  it("retries a non-whitelisted 4xx whose message or body reports a transient failure", () => {
+    // Odd 4xx codes are not on the deterministic whitelist: relays surface
+    // transient failures under them, recognizable only by what the error says.
     expect(
-      isRetryableStreamError(
-        apiError("Forbidden: you are being rate limited", { statusCode: 403 }),
-      ),
-    ).toBe(true);
-    // Relay wrapping an upstream failure in a 400.
-    expect(
-      isRetryableStreamError(
-        apiError("Bad Request", {
-          statusCode: 400,
-          responseBody: '{"error":"provider returned error: upstream connect timeout"}',
-        }),
-      ),
+      isRetryableStreamError(apiError("Conflict: you are being rate limited", { statusCode: 409 })),
     ).toBe(true);
     expect(
       isRetryableStreamError(
-        apiError("Bad Request", { statusCode: 400, responseBody: "service unavailable" }),
+        apiError("I am a teapot", { statusCode: 418, responseBody: "service unavailable" }),
       ),
     ).toBe(true);
   });
 
-  it("retries network failures without a status code", () => {
-    expect(isRetryableStreamError(new Error("socket hang up"))).toBe(true);
-    expect(isRetryableStreamError(new Error("fetch failed"))).toBe(true);
+  it("never retries whitelisted 4xx codes, however transient the body sounds", () => {
+    // A 400 fails identically on every resend; "server error" text on the
+    // relay's error page must not burn the retry budget.
+    for (const statusCode of [400, 401, 403, 404, 413, 422]) {
+      expect(
+        isRetryableStreamError(
+          apiError("Bad Request", { statusCode, responseBody: "internal server error" }),
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it("retries only network-family failures without a status code", () => {
+    // Node's fetch surfaces transport failures as TypeError("fetch failed"),
+    // usually with the errno on the cause.
+    const fetchFailed = new TypeError("fetch failed");
+    Object.assign(fetchFailed, { cause: { code: "ECONNRESET" } });
+    expect(isRetryableStreamError(fetchFailed)).toBe(true);
+    expect(isRetryableStreamError(new TypeError("fetch failed"))).toBe(true);
+    // The classic stack attaches the errno to the error itself.
+    const hangUp = new Error("socket hang up");
+    Object.assign(hangUp, { code: "ECONNRESET" });
+    expect(isRetryableStreamError(hangUp)).toBe(true);
+    const aborted = new Error("aborted");
+    Object.assign(aborted, { code: "ECONNABORTED" });
+    expect(isRetryableStreamError(aborted)).toBe(true);
+    const undici = new Error("connect timeout");
+    Object.assign(undici, { code: "UND_ERR_CONNECT_TIMEOUT" });
+    expect(isRetryableStreamError(undici)).toBe(true);
+  });
+
+  it("fails fast on statusless errors that are not network failures", () => {
+    // A TypeError from a code bug must not burn five full-history resends.
+    expect(isRetryableStreamError(new TypeError("Cannot read properties of undefined"))).toBe(
+      false,
+    );
+    expect(isRetryableStreamError(new Error("boom"))).toBe(false);
+    // A network-sounding message without an errno is not enough.
+    expect(isRetryableStreamError(new Error("socket hang up"))).toBe(false);
+    expect(isRetryableStreamError(new Error("fetch failed"))).toBe(false);
   });
 
   it("trusts the SDK's own retryable classification", () => {

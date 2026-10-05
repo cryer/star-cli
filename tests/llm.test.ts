@@ -394,6 +394,30 @@ describe("streamChat", () => {
     }
   });
 
+  it("treats an error part as terminal instead of consuming past it", async () => {
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: convertArrayToReadableStream([
+          { type: "error", error: new Error("boom") },
+          { type: "text-delta", textDelta: "late" },
+          {
+            type: "finish",
+            finishReason: "stop",
+            usage: { promptTokens: 1, completionTokens: 1 },
+          },
+        ]),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+
+    const events = await collect(
+      streamChat({ model, messages: [{ role: "user", content: "hi" }] }),
+    );
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe("error");
+  });
+
   it("ends via the idle watchdog when the source stays open after the finish chunk", async () => {
     // The AI SDK holds the finish part until the source stream closes, so a
     // relay that sends everything but keeps the socket open can only be
