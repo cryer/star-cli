@@ -137,6 +137,75 @@ describe("trackTree / restoreTree", () => {
   });
 });
 
+describe("line-ending integrity", () => {
+  it("restores files byte-identically under a global autocrlf=true", async () => {
+    // Simulates a Windows-style global config: without the forced -c flags
+    // the capture would normalize CRLF→LF and the restore LF→CRLF.
+    writeFileSync(path.join(home, ".gitconfig"), "[core]\n\tautocrlf = true\n");
+    vi.stubEnv("HOME", home);
+
+    const content = "lf line\ncrlf line\r\nlast lf\n";
+    writeFileSync(path.join(dir, "lines.txt"), content);
+    const tree = await trackTree(dir);
+    expect(tree).not.toBeNull();
+    if (!tree) return;
+
+    writeFileSync(path.join(dir, "lines.txt"), "changed\r\nchanged\r\n");
+    expect(await restoreTree(dir, tree)).toBe(true);
+    expect(readFileSync(path.join(dir, "lines.txt"), "utf8")).toBe(content);
+  });
+});
+
+describe("undo-target pinning", () => {
+  it("pins captured trees under refs/star/ so gc keeps old targets reachable", async () => {
+    writeFileSync(path.join(dir, "a.txt"), "v1");
+    const first = await trackTree(dir);
+    expect(first).not.toBeNull();
+    if (!first) return;
+    writeFileSync(path.join(dir, "a.txt"), "v2");
+    const second = await trackTree(dir);
+    expect(second).not.toBeNull();
+
+    const repoDir = treeRepoDir(dir);
+    const refs = git([`--git-dir=${repoDir}`, "for-each-ref", "--format=%(refname)", "refs/star/"])
+      .split("\n")
+      .filter(Boolean);
+    expect(refs.length).toBeGreaterThanOrEqual(2);
+
+    // even an aggressive prune must not drop a pinned undo target
+    git([`--git-dir=${repoDir}`, "gc", "--prune=now"]);
+    expect(git([`--git-dir=${repoDir}`, "cat-file", "-t", first])).toBe("tree");
+    expect(await restoreTree(dir, first)).toBe(true);
+    expect(readFileSync(path.join(dir, "a.txt"), "utf8")).toBe("v1");
+  });
+});
+
+describe("inherited git environment", () => {
+  it("ignores GIT_DIR/GIT_INDEX_FILE/GIT_WORK_TREE from the parent process", async () => {
+    const other = path.join(home, "other.git");
+    git(["init", "--bare", other]);
+    const indexFile = path.join(home, "polluted-index");
+    vi.stubEnv("GIT_DIR", other);
+    vi.stubEnv("GIT_INDEX_FILE", indexFile);
+    vi.stubEnv("GIT_WORK_TREE", home);
+
+    writeFileSync(path.join(dir, "a.txt"), "v1");
+    const tree = await trackTree(dir);
+    expect(tree).not.toBeNull();
+    if (!tree) return;
+
+    // the capture went to the internal repo, nowhere near the inherited env
+    expect(git([`--git-dir=${treeRepoDir(dir)}`, "cat-file", "-t", tree])).toBe("tree");
+    expect(git([`--git-dir=${other}`, "for-each-ref"])).toBe("");
+    expect(existsSync(indexFile)).toBe(false);
+
+    writeFileSync(path.join(dir, "a.txt"), "v2");
+    expect(await restoreTree(dir, tree)).toBe(true);
+    expect(readFileSync(path.join(dir, "a.txt"), "utf8")).toBe("v1");
+    expect(existsSync(indexFile)).toBe(false);
+  });
+});
+
 describe("sensitive file exclusion", () => {
   it("keeps likely-secret files out of the tree and untouched by a restore", async () => {
     writeFileSync(path.join(dir, ".env"), "SECRET=one");

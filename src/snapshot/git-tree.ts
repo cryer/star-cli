@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -18,6 +19,12 @@ const GC_INTERVAL = 50;
 // negative cache a directory whose tracking fails (huge tree hitting the git
 // timeout, unreadable repo) would burn that timeout on every single turn.
 const TRACK_FAILURE_TTL_MS = 5 * 60 * 1000;
+// Every captured tree is pinned under refs/star/<timestamp>-<random> so a
+// `gc --auto` prune (default gc.pruneExpire of two weeks) can never drop a
+// live /undo target. The namespace is trimmed to the newest this many refs,
+// matching the per-file snapshot stack cap.
+const MAX_PINNED_REFS = 50;
+const PINNED_REF_PREFIX = "refs/star/";
 
 // Likely-secret files that must never enter the internal snapshot repos,
 // pinned into each repo's info/exclude so `git add -A` skips them even in
@@ -45,6 +52,36 @@ const SENSITIVE_EXCLUDE_PATTERNS = [
   "**/.kube/config",
 ];
 
+// Forced config for every invocation: no CRLF translation (a file captured
+// with LF endings must restore byte-identically even on a machine whose
+// global config sets core.autocrlf=true) and no LFS filters rewriting blob
+// contents. Command-line -c beats repo/global/system config, so repos
+// created before this fix are covered too.
+const GIT_CONFIG_ARGS = [
+  "-c",
+  "core.autocrlf=false",
+  "-c",
+  "core.eol=native",
+  "-c",
+  "filter.lfs.process=",
+  "-c",
+  "filter.lfs.smudge=",
+  "-c",
+  "filter.lfs.clean=",
+];
+
+// The child gets the parent environment minus every GIT_* variable (matched
+// case-insensitively: Windows env keys are). A star launched from a git hook
+// or rebase inherits GIT_DIR/GIT_INDEX_FILE pointing at the user's repo, and
+// GIT_INDEX_FILE redirects index writes even past an explicit --git-dir.
+function gitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && !key.toUpperCase().startsWith("GIT_")) env[key] = value;
+  }
+  return env;
+}
+
 // Every git invocation goes through here: array arguments (never a shell), a
 // per-call timeout, and any failure — git missing, repo corrupt, timeout —
 // resolves null so the snapshot feature degrades silently instead of breaking
@@ -53,8 +90,8 @@ function runGit(args: string[], timeoutMs = GIT_TIMEOUT_MS): Promise<string | nu
   return new Promise((resolve) => {
     execFile(
       "git",
-      args,
-      { timeout: timeoutMs, maxBuffer: GIT_MAX_BUFFER, encoding: "utf8" },
+      [...GIT_CONFIG_ARGS, ...args],
+      { timeout: timeoutMs, maxBuffer: GIT_MAX_BUFFER, encoding: "utf8", env: gitEnv() },
       (error, stdout) => {
         resolve(error ? null : stdout.trim());
       },
@@ -155,6 +192,9 @@ async function ensureTreeRepo(cwd: string): Promise<string | null> {
     if (!existsSync(path.join(dir, "HEAD"))) {
       const out = await runGit(["init", "--bare", dir]);
       if (out === null) return null;
+      // Belt and braces for fresh repos; runGit's forced -c flags already
+      // cover repos created before the repo-local setting existed.
+      await runGit([`--git-dir=${dir}`, "config", "core.autocrlf", "false"]);
     }
     // Rewritten on every call: repos created before the exclusion existed
     // pick it up here without any migration step.
@@ -216,6 +256,21 @@ export async function trackTree(cwd: string): Promise<string | null> {
   return tree;
 }
 
+// Pins a captured tree under refs/star/<timestamp>-<random> so gc --auto
+// never prunes a live /undo target, then trims the namespace to the newest
+// MAX_PINNED_REFS refs: for-each-ref sorts by refname, and equal-length
+// millisecond timestamps make that order chronological. Pure housekeeping —
+// a failure here never fails the capture.
+async function pinTree(base: string[], tree: string): Promise<void> {
+  const ref = `${PINNED_REF_PREFIX}${Date.now()}-${randomBytes(4).toString("hex")}`;
+  if ((await runGit([...base, "update-ref", ref, tree])) === null) return;
+  const listed = await runGit([...base, "for-each-ref", "--format=%(refname)", PINNED_REF_PREFIX]);
+  if (listed === null) return;
+  const refs = listed.split("\n").filter(Boolean);
+  const stale = refs.slice(0, Math.max(0, refs.length - MAX_PINNED_REFS));
+  await Promise.all(stale.map((name) => runGit([...base, "update-ref", "-d", name])));
+}
+
 async function trackTreeUncached(cwd: string): Promise<string | null> {
   if (!(await isGitAvailable())) return null;
   const dir = await ensureTreeRepo(cwd);
@@ -228,6 +283,7 @@ async function trackTreeUncached(cwd: string): Promise<string | null> {
   if ((await runGit([...base, "add", "-A"])) === null) return null;
   const tree = await runGit([...base, "write-tree"]);
   if (tree === null) return null;
+  await pinTree(base, tree);
   const count = (trackCounts.get(dir) ?? 0) + 1;
   trackCounts.set(dir, count);
   if (count % GC_INTERVAL === 0) {

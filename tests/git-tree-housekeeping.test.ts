@@ -4,9 +4,13 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mocked git: every invocation succeeds and is recorded, write-tree returns a
-// stable hash. failOn simulates a failing subcommand. This keeps the gc and
-// failure-cache tests fast and deterministic (no 50 real git spawns).
+// stable hash, and a fake ref store backs update-ref/for-each-ref so the
+// undo-target pinning can be observed. failOn simulates a failing subcommand.
+// This keeps the gc, pruning, and failure-cache tests fast and deterministic
+// (no 50 real git spawns).
 const calls: string[][] = [];
+const pinnedRefs = new Map<string, string>();
+const createdRefs: string[] = [];
 let failOn: ((args: string[]) => boolean) | null = null;
 
 vi.mock("node:child_process", async (importOriginal) => {
@@ -19,6 +23,21 @@ vi.mock("node:child_process", async (importOriginal) => {
       calls.push(argv);
       if (failOn?.(argv)) {
         callback(new Error("git failed"), "");
+        return;
+      }
+      if (argv.includes("update-ref")) {
+        const refArgs = argv.slice(argv.indexOf("update-ref") + 1);
+        if (refArgs[0] === "-d") {
+          if (refArgs[1] !== undefined) pinnedRefs.delete(refArgs[1]);
+        } else if (refArgs[0] !== undefined && refArgs[1] !== undefined) {
+          pinnedRefs.set(refArgs[0], refArgs[1]);
+          createdRefs.push(refArgs[0]);
+        }
+        callback(null, "");
+        return;
+      }
+      if (argv.includes("for-each-ref")) {
+        callback(null, `${[...pinnedRefs.keys()].sort().join("\n")}\n`);
         return;
       }
       if (argv.includes("write-tree")) {
@@ -44,6 +63,8 @@ beforeEach(() => {
   dir = mkdtempSync(path.join(os.tmpdir(), "star-gt-hk-"));
   vi.stubEnv("STAR_HOME", home);
   calls.length = 0;
+  pinnedRefs.clear();
+  createdRefs.length = 0;
   failOn = null;
   resetGitTreeCaches();
 });
@@ -75,6 +96,40 @@ describe("periodic gc", () => {
     }
     expect(countCalls("gc")).toBe(1);
     // a failed gc must not trip the failure negative cache either
+    expect(await trackTree(dir)).not.toBeNull();
+  });
+});
+
+describe("undo-target ref pinning", () => {
+  it("pins every captured tree under refs/star/", async () => {
+    expect(await trackTree(dir)).not.toBeNull();
+    expect(pinnedRefs.size).toBe(1);
+    const entry = [...pinnedRefs.entries()][0];
+    expect(entry).toBeDefined();
+    if (!entry) return;
+    expect(entry[0].startsWith("refs/star/")).toBe(true);
+    expect(entry[1]).toBe("f".repeat(40));
+  });
+
+  it("prunes pins beyond the newest 50", async () => {
+    for (let i = 0; i < 55; i++) {
+      expect(await trackTree(dir)).not.toBeNull();
+    }
+    expect(createdRefs).toHaveLength(55);
+    expect(pinnedRefs.size).toBe(50);
+    // every survivor is a created pin, and the newest one survives
+    for (const ref of pinnedRefs.keys()) {
+      expect(createdRefs).toContain(ref);
+    }
+    const last = createdRefs[createdRefs.length - 1];
+    expect(last).toBeDefined();
+    if (last === undefined) return;
+    expect(pinnedRefs.has(last)).toBe(true);
+    expect(countCalls("update-ref")).toBe(55 + 5);
+  });
+
+  it("still returns the tree when pinning fails", async () => {
+    failOn = (argv) => argv.includes("update-ref");
     expect(await trackTree(dir)).not.toBeNull();
   });
 });
