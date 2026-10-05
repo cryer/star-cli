@@ -122,12 +122,13 @@ export function resetGitTreeAvailability(): void {
 }
 
 // Test hook: drop every piece of cached state (availability probe, failure
-// negative cache, gc counters, scrub bookkeeping).
+// negative cache, gc counters, scrub bookkeeping, capture chains).
 export function resetGitTreeCaches(): void {
   gitAvailable = null;
   trackFailureUntil.clear();
   trackCounts.clear();
   scrubbedRepos.clear();
+  trackChains.clear();
 }
 
 // One internal bare repo per project directory, named by the resolved path so
@@ -242,7 +243,25 @@ async function untrackExcluded(dir: string, cwd: string): Promise<boolean> {
 // likely-secret files never enter the tree, which is exactly what the restore
 // side relies on. A recent failure makes further attempts no-ops until
 // TRACK_FAILURE_TTL_MS has passed.
-export async function trackTree(cwd: string): Promise<string | null> {
+export function trackTree(cwd: string): Promise<string | null> {
+  // Serialize captures per directory: the agent loop starts a turn's capture
+  // concurrently and a quick second turn (or the /undo path) can arrive while
+  // it still runs — two overlapping captures would race on the internal
+  // repo's index.lock, and the loser's spurious failure would poison the
+  // negative cache for five minutes. trackTreeUncached never rejects, so the
+  // chain cannot wedge; each call still captures its own tree, in order.
+  const key = path.resolve(cwd);
+  const next = (trackChains.get(key) ?? Promise.resolve(null)).then(() => trackTreeGuarded(cwd));
+  trackChains.set(key, next);
+  return next;
+}
+
+// Per-cwd promise chains serializing trackTree (see above). Values stay
+// settled promises between captures; the map is keyed by directory, so it
+// stays tiny.
+const trackChains = new Map<string, Promise<string | null>>();
+
+async function trackTreeGuarded(cwd: string): Promise<string | null> {
   if (isGuardedDir(cwd)) return null;
   const key = path.resolve(cwd);
   const failedUntil = trackFailureUntil.get(key);

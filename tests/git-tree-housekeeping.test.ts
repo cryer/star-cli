@@ -12,6 +12,10 @@ const calls: string[][] = [];
 const pinnedRefs = new Map<string, string>();
 const createdRefs: string[] = [];
 let failOn: ((args: string[]) => boolean) | null = null;
+// When set, `git add -A` invocations don't complete until released by hand —
+// the overlap window for the capture-serialization test.
+let holdAdds = false;
+let heldAddRelease: (() => void) | null = null;
 
 vi.mock("node:child_process", async (importOriginal) => {
   const original = await importOriginal<typeof import("node:child_process")>();
@@ -23,6 +27,10 @@ vi.mock("node:child_process", async (importOriginal) => {
       calls.push(argv);
       if (failOn?.(argv)) {
         callback(new Error("git failed"), "");
+        return;
+      }
+      if (holdAdds && argv.includes("add")) {
+        heldAddRelease = () => callback(null, "");
         return;
       }
       if (argv.includes("update-ref")) {
@@ -66,6 +74,8 @@ beforeEach(() => {
   pinnedRefs.clear();
   createdRefs.length = 0;
   failOn = null;
+  holdAdds = false;
+  heldAddRelease = null;
   resetGitTreeCaches();
 });
 
@@ -174,5 +184,31 @@ describe("trackTree failure negative cache", () => {
   it("never spawns git for guarded directories, cache or not", async () => {
     expect(await trackTree(os.homedir())).toBeNull();
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("capture serialization", () => {
+  it("queues an overlapping capture instead of racing the repo's index", async () => {
+    holdAdds = true;
+    const first = trackTree(dir);
+    await vi.waitFor(() => expect(heldAddRelease).not.toBeNull());
+    const release = heldAddRelease as unknown as () => void;
+
+    const second = trackTree(dir);
+    // Flush the microtask queue: the second capture must not have started a
+    // single git invocation while the first is mid-flight (an unqueued race
+    // on index.lock would fail one side and poison the failure cache).
+    const callsDuringHold = calls.length;
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(calls.length).toBe(callsDuringHold);
+
+    holdAdds = false;
+    release();
+    expect(await first).not.toBeNull();
+    expect(await second).not.toBeNull();
+    // Both captured their own tree, in order — no shared result.
+    expect(countCalls("write-tree")).toBe(2);
   });
 });

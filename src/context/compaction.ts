@@ -1,11 +1,6 @@
 import { type LanguageModelV1, generateText } from "ai";
-import {
-  type CoreMessage,
-  type StarMessage,
-  isSyntheticUserMessage,
-  toCoreMessages,
-} from "../core/messages";
-import { estimateMessageTokens, estimateTokens } from "./tokens";
+import { type CoreMessage, type StarMessage, isSyntheticUserMessage } from "../core/messages";
+import { estimateMessageTokens } from "./tokens";
 
 export interface CompactionResult {
   messages: StarMessage[];
@@ -63,6 +58,58 @@ function serializeMessage(message: CoreMessage): string {
   return `${message.role}: ${parts.join("\n")}`;
 }
 
+// Collects the first `budget` chars of the virtual newline-joined transcript
+// without ever building it; exactly mirrors joined.slice(0, budget).
+function headSlice(parts: string[], budget: number): string {
+  const kept: string[] = [];
+  let used = 0;
+  for (const part of parts) {
+    if (used >= budget) break;
+    const sep = kept.length > 0 ? 1 : 0;
+    if (used + sep + part.length <= budget) {
+      kept.push(part);
+      used += sep + part.length;
+    } else {
+      kept.push(part.slice(0, budget - used - sep));
+      used = budget;
+    }
+  }
+  return kept.join("\n");
+}
+
+// Mirror of headSlice for the tail: exactly joined.slice(-budget).
+function tailSlice(parts: string[], budget: number): string {
+  const kept: string[] = [];
+  let used = 0;
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (used >= budget) break;
+    const part = parts[i] ?? "";
+    const sep = kept.length > 0 ? 1 : 0;
+    if (used + sep + part.length <= budget) {
+      kept.unshift(part);
+      used += sep + part.length;
+    } else {
+      kept.unshift(part.slice(part.length - (budget - used - sep)));
+      used = budget;
+    }
+  }
+  return kept.join("\n");
+}
+
+// Serializes messages straight into the capped summary input: per-message
+// strings are collected within the head/tail budgets and the megabyte-scale
+// joined transcript is never materialized. Output is byte-identical to
+// truncateSummaryInput(parts.join("\n")), omission count included.
+export function serializeSummaryInput(messages: CoreMessage[]): string {
+  const parts = messages.map(serializeMessage);
+  let total = Math.max(0, parts.length - 1);
+  for (const part of parts) total += part.length;
+  if (total <= MAX_SUMMARY_INPUT_CHARS) return parts.join("\n");
+  const head = headSlice(parts, SUMMARY_HEAD_CHARS);
+  const tail = tailSlice(parts, MAX_SUMMARY_INPUT_CHARS - SUMMARY_HEAD_CHARS);
+  return `${head}\n[... ${total - MAX_SUMMARY_INPUT_CHARS} characters omitted ...]\n${tail}`;
+}
+
 export async function summarizeMessages(
   messages: CoreMessage[],
   model: LanguageModelV1,
@@ -71,7 +118,7 @@ export async function summarizeMessages(
   // endpoints that mandate one explicit value don't reject the summary call.
   temperature?: number,
 ): Promise<string> {
-  const transcript = truncateSummaryInput(messages.map(serializeMessage).join("\n"));
+  const transcript = serializeSummaryInput(messages);
   const { text } = await generateText({
     model,
     system: SUMMARY_SYSTEM_PROMPT,
@@ -92,6 +139,11 @@ export interface CompactOptions {
   // turns down to MIN_KEPT_MESSAGES instead of refusing. Auto-compaction in
   // the agent loop never forces.
   force?: boolean;
+  // Fixed per-request overhead charged against the budget: the API window
+  // also carries the tool map's JSON schemas (estimateToolSchemaTokens), so
+  // the message estimate alone systematically under-reads how full the
+  // window is. Estimated once per built tool map by the agent loop.
+  overheadTokens?: number;
 }
 
 export function compactMessages(
@@ -102,47 +154,57 @@ export function compactMessages(
   // Forced compaction uses a zero budget: the under-budget exits below never
   // fire, so turns are dropped until only MIN_KEPT_MESSAGES would remain.
   const limit = opts.force ? 0 : maxTokens;
-  if (estimateTokens(toCoreMessages(messages)) <= limit) {
+  const overhead = opts.overheadTokens ?? 0;
+  // Estimate every message once, up front: estimates are cached per message
+  // object (tokens.ts), so across the loop's per-step calls this only pays
+  // for newly appended messages. The early exit, the turn sums and the
+  // incremental drop loop all read from this array — no CoreMessage[] copies
+  // and no re-estimation per step.
+  const tokens = messages.map((star) => estimateMessageTokens(star.message));
+  let total = overhead;
+  for (const messageTokens of tokens) total += messageTokens;
+  if (total <= limit) {
     return { messages: [...messages], compacted: false, droppedCount: 0 };
   }
 
-  const first = messages[0];
-  const hasSystem = first?.message.role === "system";
-  const head = hasSystem && first ? [first] : [];
-  const rest = hasSystem ? messages.slice(1) : messages.slice();
+  const hasSystem = messages[0]?.message.role === "system";
+  const head = hasSystem ? [messages[0] as StarMessage] : [];
+  const restStart = hasSystem ? 1 : 0;
+  const restCount = messages.length - restStart;
 
   // Sum each turn's tokens once and subtract incrementally while dropping:
   // rebuilding the candidate array and re-estimating it whole after every
   // dropped turn made forced /compact O(n²) on long histories. Per-message
   // estimates are cached (tokens.ts), so the placeholder's tiny string is
   // the only fresh work per iteration.
-  const messageTokens = rest.map((star) => estimateMessageTokens(star.message));
+  const headTokens = hasSystem ? (tokens[0] ?? 0) : 0;
+  let restTokens = 0;
+  for (let i = restStart; i < tokens.length; i++) restTokens += tokens[i] ?? 0;
   // Turns split at real user messages only: a synthetic user message (an
   // auto-continue nudge, a background subagent report, tool-attached images)
   // belongs to the turn it sits in and must drop — and stay — with it.
   const turns: { length: number; tokens: number }[] = [];
-  for (let i = 0; i < rest.length; i++) {
+  for (let i = restStart; i < messages.length; i++) {
     const current = turns[turns.length - 1];
-    const star = rest[i];
+    const star = messages[i];
     if ((star && star.message.role === "user" && !isSyntheticUserMessage(star)) || !current) {
-      turns.push({ length: 1, tokens: messageTokens[i] ?? 0 });
+      turns.push({ length: 1, tokens: tokens[i] ?? 0 });
     } else {
       current.length += 1;
-      current.tokens += messageTokens[i] ?? 0;
+      current.tokens += tokens[i] ?? 0;
     }
   }
 
-  const headTokens = estimateTokens(head.map((star) => star.message));
-  const restTokens = rest.reduce((total, _star, i) => total + (messageTokens[i] ?? 0), 0);
   let droppedCount = 0;
   let droppedTokens = 0;
   for (const turn of turns) {
-    if (rest.length - droppedCount - turn.length < MIN_KEPT_MESSAGES) {
+    if (restCount - droppedCount - turn.length < MIN_KEPT_MESSAGES) {
       break;
     }
     droppedCount += turn.length;
     droppedTokens += turn.tokens;
     const candidateTokens =
+      overhead +
       headTokens +
       estimateMessageTokens(placeholderMessage(droppedCount).message) +
       (restTokens - droppedTokens);
@@ -156,7 +218,11 @@ export function compactMessages(
   }
 
   return {
-    messages: [...head, placeholderMessage(droppedCount), ...rest.slice(droppedCount)],
+    messages: [
+      ...head,
+      placeholderMessage(droppedCount),
+      ...messages.slice(restStart + droppedCount),
+    ],
     compacted: true,
     droppedCount,
   };

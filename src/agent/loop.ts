@@ -1,6 +1,7 @@
 import { type LanguageModel, tool as aiTool, generateText } from "ai";
 import { type StarConfig, resolveCompactThreshold } from "../config/schema";
 import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
+import { estimateToolSchemaTokens } from "../context/tokens";
 import { type StreamEvent, type TokenUsage, usageTotalTokens } from "../core/events";
 import { formatGitSummary, getGitSummaryCached } from "../core/git";
 import {
@@ -322,6 +323,31 @@ export class AgentLoop {
   // Rendered git context for the in-flight turn (null when unavailable);
   // snapshotted at turn start so every step of the turn sends the same block.
   private turnGitContext: string | null = null;
+  // Request-view cache: the CoreMessage[] sent to the model, with the turn's
+  // volatile context already attached. Rebuilt only when the history actually
+  // changed — the cache key is the history array's identity plus its length
+  // (wholesale rewrites like compaction/image-stripping replace the array,
+  // appends grow it; history messages are never mutated in place) and the
+  // turn context string. Saves a full toCoreMessages + attachTurnContext copy
+  // per stream attempt, which retried steps used to pay every time.
+  private requestMessagesCache: {
+    source: readonly StarMessage[];
+    length: number;
+    context: string | null;
+    result: CoreMessage[];
+  } | null = null;
+  // Memoized per (registry, plan flag): tools register on the registry only
+  // at loop construction, and the plan filter re-reads the live permission
+  // mode on every call — so a built map stays valid until either input
+  // changes, and a runtime mode switch rebuilds exactly once. schemaTokens
+  // (the tool map's share of the request window) is computed alongside since
+  // it depends on the same inputs.
+  private aiToolsCache: {
+    registry: ToolRegistry;
+    plan: boolean;
+    tools: Record<string, unknown>;
+    schemaTokens: number;
+  } | null = null;
   // Lazily resolved auxiliary model (config.smallModel) for cheap side calls
   // — compaction summaries, session titles, completion checks. Undefined =
   // use the main model; a resolution failure is surfaced once as a notice.
@@ -401,6 +427,13 @@ export class AgentLoop {
   // lose synthetic-message markers (model switch, manual /compact).
   getStarMessages(): readonly StarMessage[] {
     return this.messages;
+  }
+
+  // Wire-schema token overhead of the active tool set (memoized by
+  // buildAiTools). The auto-compact budget includes it; surfaced here so the
+  // status bar ctx% can show the same total the compaction decision uses.
+  getToolSchemaTokens(): number {
+    return this.buildAiTools().schemaTokens;
   }
 
   // Auxiliary model for cheap side calls: config.smallModel, resolved once.
@@ -729,6 +762,10 @@ export class AgentLoop {
     // degrade to no context (getGitSummaryCached returns null).
     const git = getGitSummaryCached(this.opts.cwd);
     this.turnGitContext = git ? formatGitSummary(git) : null;
+    // New turn: drop the previous turn's request view (the key check in
+    // buildRequestMessages would catch every append/rewrite anyway, but a
+    // turn boundary is the cheap place to be explicit).
+    this.requestMessagesCache = null;
     this.resolveAuxModel();
     if (this.auxModelError) {
       yield { type: "notice", message: this.auxModelError };
@@ -756,29 +793,49 @@ export class AgentLoop {
         : { role: "user", content: inputText };
     // Root loop only: capture the whole working tree before the turn can
     // change anything (a subagent shares the parent's cwd, and the parent's
-    // turn-start tree already covers its changes). Silent no-op when git
-    // snapshots are off or git fails — /undo then falls back to per-file
-    // snapshots.
+    // turn-start tree already covers its changes). Kicked off WITHOUT
+    // awaiting so a slow repo (trackTree can burn its 10s timeout) no longer
+    // delays the first model request; the capture is awaited before the
+    // turn's first tool execution — the first action that can change files —
+    // and patched into this turn's marker as soon as it settles. A failure
+    // resolves null (silent per-file snapshot fallback) exactly like the old
+    // serial call.
     const isRoot = (this.opts.subagentDepth ?? 0) === 0;
-    const tree =
-      isRoot && this.opts.config.gitSnapshots
-        ? ((await trackTree(this.opts.cwd)) ?? undefined)
-        : undefined;
+    const trackTreePromise =
+      isRoot && this.opts.config.gitSnapshots ? trackTree(this.opts.cwd) : null;
     this.messages.push({ message: userMessage });
     // Only the root loop opens a new snapshot turn: a subagent runs inside the
     // parent's turn, and its file changes must keep the parent's turn seq and
     // message index so /undo and /rewind attribute them correctly.
     const seq = isRoot ? beginTurn(this.messages.length - 1) : currentTurnSeq();
-    this.turnMarkers.push({ seq, userIndex: this.messages.length - 1, tree });
+    const turnMarker: { seq: number; userIndex: number; tree?: string } = {
+      seq,
+      userIndex: this.messages.length - 1,
+    };
+    this.turnMarkers.push(turnMarker);
     this.activeTurnSeq = seq;
     this.activeTurnUserIndex = this.messages.length - 1;
+    // Settles the turn-start tree capture: patches this turn's marker, but
+    // only while that exact marker is still registered — compaction clears
+    // the markers and retraction pops them, and a stale tree must never land
+    // on another turn's entry. Awaited before the first tool execution below.
+    let turnTreeReady: Promise<void> | null = null;
+    if (trackTreePromise !== null) {
+      turnTreeReady = trackTreePromise
+        .catch(() => null)
+        .then((tree) => {
+          if (tree !== null && this.turnMarkers.includes(turnMarker)) {
+            turnMarker.tree = tree;
+          }
+        });
+    }
     await this.persist(
       opts?.persistAs !== undefined ? { role: "user", content: opts.persistAs } : userMessage,
     );
     this.maybeScheduleTitle();
 
     const { config, registry, cwd } = this.opts;
-    const aiTools = this.buildAiTools();
+    const { tools: aiTools, schemaTokens: toolSchemaTokens } = this.buildAiTools();
     // A new user turn restarts the doom-loop streak: the counter spans the
     // steps of one turn only, so a legitimate repeat of a call that ended
     // the previous turn isn't refused on sight.
@@ -843,11 +900,14 @@ export class AgentLoop {
       }
       const maxTokens = this.opts.contextMaxTokens ?? config.contextMaxTokens;
       // Auto-compaction fires at compactThresholdTokens when configured
-      // (clamped to the window), otherwise only once the window is full.
-      const compacted = compactMessages(
-        [...this.messages],
-        resolveCompactThreshold(config, maxTokens),
-      );
+      // (clamped to the window), otherwise only once the window is full. The
+      // tool map's JSON schemas ride every request too, so their estimated
+      // tokens count against the threshold — otherwise a 15+ tool setup
+      // under-reads the real window usage by several thousand tokens.
+      // this.messages is passed directly: compactMessages never mutates it.
+      const compacted = compactMessages(this.messages, resolveCompactThreshold(config, maxTokens), {
+        overheadTokens: toolSchemaTokens,
+      });
       if (compacted.compacted) {
         this.messages = await this.applyCompactionSummary(compacted, signal);
         // Persist the rewritten history like manual /compact does. Memory
@@ -1196,6 +1256,16 @@ export class AgentLoop {
       // long productive task is no longer cut off mid-way.
       autoContinues = 0;
 
+      // The turn-start whole-tree capture runs concurrently with the first
+      // model request; it must be settled before the turn's first tool
+      // execution (the first action that can change files) so a git-path
+      // /undo restores the pre-turn tree. Never rejects — a failed capture
+      // resolves to the per-file snapshot fallback.
+      if (turnTreeReady !== null) {
+        await turnTreeReady;
+        turnTreeReady = null;
+      }
+
       const answered = new Set<string>();
       try {
         for (const call of toolCalls) {
@@ -1375,7 +1445,7 @@ export class AgentLoop {
   ): AsyncGenerator<StreamEvent> {
     for await (const event of streamChat({
       model: this.opts.model,
-      messages: attachTurnContext(toCoreMessages(this.messages), this.turnGitContext),
+      messages: this.buildRequestMessages(),
       tools: aiTools,
       abortSignal: signal,
       providerMetadata: this.opts.providerMetadata,
@@ -1403,10 +1473,41 @@ export class AgentLoop {
     }
   }
 
-  private buildAiTools(): Record<string, unknown> {
+  // The CoreMessage[] view sent to the model, with the turn's volatile git
+  // context attached to the latest user message (request-only — the result is
+  // never persisted, see attachTurnContext). Memoized within a turn: stream
+  // retries and multi-step turns rebuild only when the history changed
+  // (new array identity after a wholesale rewrite, or a new length after
+  // appends) or the turn context changed.
+  private buildRequestMessages(): CoreMessage[] {
+    const cached = this.requestMessagesCache;
+    if (
+      cached &&
+      cached.source === this.messages &&
+      cached.length === this.messages.length &&
+      cached.context === this.turnGitContext
+    ) {
+      return cached.result;
+    }
+    const result = attachTurnContext(toCoreMessages(this.messages), this.turnGitContext);
+    this.requestMessagesCache = {
+      source: this.messages,
+      length: this.messages.length,
+      context: this.turnGitContext,
+      result,
+    };
+    return result;
+  }
+
+  private buildAiTools(): { tools: Record<string, unknown>; schemaTokens: number } {
     const plan = this.opts.config.permissionMode === "plan";
+    const registry = this.opts.registry;
+    const cached = this.aiToolsCache;
+    if (cached && cached.registry === registry && cached.plan === plan) {
+      return { tools: cached.tools, schemaTokens: cached.schemaTokens };
+    }
     const tools: Record<string, unknown> = {};
-    for (const t of this.opts.registry.list()) {
+    for (const t of registry.list()) {
       // Plan mode hides write/exec tools from the model entirely; the
       // permission gate stays as a backstop for anything still attempted.
       if (plan && t.permission !== "read") continue;
@@ -1415,7 +1516,9 @@ export class AgentLoop {
         parameters: t.parameters as never,
       });
     }
-    return tools;
+    const schemaTokens = estimateToolSchemaTokens(tools);
+    this.aiToolsCache = { registry, plan, tools, schemaTokens };
+    return { tools, schemaTokens };
   }
 
   // Fires the Stop hooks for a turn's end, on every termination path (normal

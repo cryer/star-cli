@@ -1,3 +1,5 @@
+import { zodSchema } from "ai";
+import type { z } from "zod";
 import type { CoreMessage } from "../core/messages";
 
 const CHARS_PER_TOKEN = 4;
@@ -77,6 +79,50 @@ export function estimateMessageTokens(message: CoreMessage): number {
   return tokens;
 }
 
-export function estimateTokens(messages: CoreMessage[]): number {
+export function estimateTokens(messages: readonly CoreMessage[]): number {
   return messages.reduce((total, message) => total + estimateMessageTokens(message), 0);
+}
+
+// Serializes a tool's parameters the way the request carries them. Zod
+// schemas (what every registered tool declares) convert to their wire JSON
+// schema through the AI SDK — serializing the zod object itself would skip
+// the shape (it sits behind a closure) and under-read badly. An SDK Schema
+// wrapper (jsonSchema()) is unwrapped directly.
+function parametersWireJson(parameters: unknown): string {
+  if (parameters == null) return "";
+  const wrapper = parameters as { jsonSchema?: unknown };
+  if (wrapper.jsonSchema !== undefined) {
+    try {
+      return JSON.stringify(wrapper.jsonSchema) ?? "";
+    } catch {
+      return "";
+    }
+  }
+  try {
+    return JSON.stringify(zodSchema(parameters as z.ZodType).jsonSchema) ?? "";
+  } catch {
+    try {
+      return JSON.stringify(parameters) ?? "";
+    } catch {
+      return "";
+    }
+  }
+}
+
+// The fixed per-request overhead the message-only estimate never sees: every
+// request carries the whole tool map as JSON schemas, and on a 15+ tool setup
+// that is several thousand tokens — ignoring it systematically under-reads
+// how full the window really is. The agent loop estimates this once per built
+// tool map (registry and plan filter are stable while it lives) and charges
+// it into the auto-compaction check; a schema that cannot be serialized
+// contributes nothing rather than failing the estimate.
+export function estimateToolSchemaTokens(tools: Record<string, unknown>): number {
+  let weight = 0;
+  for (const [name, tool] of Object.entries(tools)) {
+    weight += textWeight(name);
+    const description = (tool as { description?: unknown }).description;
+    if (typeof description === "string") weight += textWeight(description);
+    weight += textWeight(parametersWireJson((tool as { parameters?: unknown }).parameters));
+  }
+  return Math.ceil(weight / CHARS_PER_TOKEN);
 }

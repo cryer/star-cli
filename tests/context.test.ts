@@ -1,7 +1,18 @@
+import { tool as aiTool, jsonSchema } from "ai";
 import { describe, expect, it } from "vitest";
-import { compactMessages, truncateSummaryInput } from "../src/context/compaction";
-import { estimateMessageTokens, estimateTokens } from "../src/context/tokens";
+import { z } from "zod";
+import {
+  compactMessages,
+  serializeSummaryInput,
+  truncateSummaryInput,
+} from "../src/context/compaction";
+import {
+  estimateMessageTokens,
+  estimateTokens,
+  estimateToolSchemaTokens,
+} from "../src/context/tokens";
 import type { CoreMessage, StarMessage } from "../src/core/messages";
+import { createDefaultRegistry } from "../src/tools";
 
 const system = (text: string): CoreMessage => ({ role: "system", content: text });
 const user = (text: string): CoreMessage => ({ role: "user", content: text });
@@ -241,6 +252,40 @@ describe("compactMessages", () => {
     expect(result.compacted).toBe(false);
     expect(core(result.messages)).toEqual(messages);
   });
+
+  it("counts overheadTokens against the budget", () => {
+    const messages = [
+      system("sys"),
+      user(pad(400)),
+      assistant(pad(400)),
+      user("u2"),
+      assistant("a2"),
+      user("u3"),
+      assistant("a3"),
+    ];
+    // ~210 estimated tokens: under a 500 budget without overhead…
+    const plain = compactMessages(star(messages), 500);
+    expect(plain.compacted).toBe(false);
+    // …but over it once a tool-schema-sized overhead is charged.
+    const withOverhead = compactMessages(star(messages), 500, { overheadTokens: 1000 });
+    expect(withOverhead.compacted).toBe(true);
+    expect(withOverhead.droppedCount).toBeGreaterThan(0);
+  });
+
+  it("keeps the last 4 messages when overhead alone exceeds the budget", () => {
+    const messages = [
+      user(pad(400)),
+      assistant(pad(400)),
+      user("u2"),
+      assistant("a2"),
+      user("u3"),
+      assistant("a3"),
+    ];
+    const result = compactMessages(star(messages), 90, { overheadTokens: 5000 });
+    expect(result.compacted).toBe(true);
+    expect(result.droppedCount).toBe(2);
+    expect(core(result.messages.slice(-4))).toEqual(messages.slice(-4));
+  });
 });
 
 describe("truncateSummaryInput", () => {
@@ -260,5 +305,95 @@ describe("truncateSummaryInput", () => {
     expect(result).toContain("54001 characters omitted");
     // Only part of the middle survives inside the kept tail window.
     expect((result.match(/m/g) ?? []).length).toBeLessThan(50_000);
+  });
+});
+
+describe("serializeSummaryInput", () => {
+  // String-content messages serialize trivially as `${role}: ${content}`, so
+  // the reference pipeline (join everything, then truncate) can be rebuilt
+  // exactly and the budgeted serializer compared byte-for-byte.
+  const reference = (messages: CoreMessage[]): string =>
+    truncateSummaryInput(messages.map((m) => `${m.role}: ${m.content as string}`).join("\n"));
+
+  it("matches the join-then-truncate reference on short input", () => {
+    const messages = [user("hello"), assistant("hi there"), user("next")];
+    expect(serializeSummaryInput(messages)).toBe(reference(messages));
+  });
+
+  it("matches the reference on a long transcript, omission count included", () => {
+    const messages = [user(pad(24_000)), assistant(pad(100_000)), user(pad(10_000))];
+    const result = serializeSummaryInput(messages);
+    expect(result).toBe(reference(messages));
+    expect(result).toContain("characters omitted");
+  });
+
+  it("matches the reference when a separator lands exactly on the head budget", () => {
+    // "user: " + content = 23_999 chars, so the head budget ends on the "\n".
+    const messages = [user(pad(23_993)), assistant(pad(100_000)), user(pad(10_000))];
+    expect(serializeSummaryInput(messages)).toBe(reference(messages));
+  });
+
+  it("matches the reference across a deterministic sweep of message sizes", () => {
+    let seed = 42;
+    const rand = (n: number) => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed % n;
+    };
+    for (let round = 0; round < 30; round++) {
+      const messages = Array.from({ length: 3 + rand(8) }, (_, i) =>
+        i % 2 === 0 ? user(pad(rand(40_000))) : assistant(pad(rand(40_000))),
+      );
+      expect(serializeSummaryInput(messages)).toBe(reference(messages));
+    }
+  });
+});
+
+describe("estimateToolSchemaTokens", () => {
+  it("returns 0 for an empty tool map", () => {
+    expect(estimateToolSchemaTokens({})).toBe(0);
+  });
+
+  it("estimates zod-backed tools from their wire JSON schema", () => {
+    const tools = {
+      read_file: aiTool({
+        description: "Reads a file from disk",
+        parameters: z.object({ path: z.string().describe("the file path") }),
+      }),
+    };
+    const tokens = estimateToolSchemaTokens(tools);
+    expect(tokens).toBeGreaterThan(0);
+    // The zod shape must actually be counted: adding fields grows the estimate.
+    const bigger = {
+      read_file: aiTool({
+        description: "Reads a file from disk",
+        parameters: z.object({
+          path: z.string().describe("the file path"),
+          offset: z.number().describe("line offset"),
+          limit: z.number().describe("max lines"),
+        }),
+      }),
+    };
+    expect(estimateToolSchemaTokens(bigger)).toBeGreaterThan(tokens);
+  });
+
+  it("estimates the default registry's tool map at a meaningful size", () => {
+    // Guards the premise of the compaction charge: a real tool set is
+    // thousands of tokens, not a rounding error.
+    const tools: Record<string, unknown> = {};
+    for (const t of createDefaultRegistry().list()) {
+      tools[t.name] = aiTool({ description: t.description, parameters: t.parameters as never });
+    }
+    expect(Object.keys(tools).length).toBeGreaterThan(10);
+    expect(estimateToolSchemaTokens(tools)).toBeGreaterThan(1000);
+  });
+
+  it("handles SDK jsonSchema wrappers and unserializable tools without throwing", () => {
+    const wrapped = aiTool({
+      description: "wrapped",
+      parameters: jsonSchema({ type: "object", properties: { a: { type: "string" } } }),
+    });
+    expect(estimateToolSchemaTokens({ wrapped })).toBeGreaterThan(0);
+    const weird = { description: "no schema", parameters: { not: "a zod schema" } };
+    expect(estimateToolSchemaTokens({ weird })).toBeGreaterThanOrEqual(0);
   });
 });
