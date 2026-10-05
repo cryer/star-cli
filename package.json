@@ -1,6 +1,6 @@
 {
   "name": "@cryer/star-cli",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "An AI agent command-line interface",
   "type": "module",
   "license": "MIT",

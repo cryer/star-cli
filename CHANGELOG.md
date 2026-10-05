@@ -10,6 +10,8 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-10-05
+
 ### Security
 
 - **bash exfiltration chain closed**: child processes no longer inherit API keys loaded
