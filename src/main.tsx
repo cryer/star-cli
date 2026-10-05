@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { defaultAgentTasks } from "./agent/agent-tasks";
-import { AgentLoop } from "./agent/loop";
+import type { AgentLoop } from "./agent/loop";
 import { formatTokens } from "./cli/cost";
 import { formatStreamError } from "./cli/format";
 import { MAX_IMAGE_BYTES, imageMimeType, readImageInput, resolveMentions } from "./cli/mentions";
@@ -20,14 +20,12 @@ import {
   reconcileStarMessages,
   toCoreMessages,
 } from "./core/messages";
-import { createModel, reasoningEffortMetadata } from "./llm/provider";
 import { resolveModelConfig, resolveStartupModel } from "./llm/registry";
 import { loadSessionSnapshots } from "./session/checkpoints";
 import { clearSessions } from "./session/clear";
 import { findLatestSession, resolveSessionId } from "./session/list";
 import { type SessionMeta, SessionStore } from "./session/store";
 import { defaultTaskManager } from "./tasks/manager";
-import { createDefaultRegistry } from "./tools";
 import { hydrateSnapshots } from "./tools/fs/snapshots";
 import { loadTodos, setTodoSession } from "./tools/todo";
 import { VERSION } from "./version";
@@ -38,6 +36,11 @@ async function createLoop(
   cwd: string,
   sessionStore: SessionStore | null,
 ) {
+  // Dynamic like the REPL import below: the agent loop pulls in the ai SDK
+  // and every @ai-sdk provider (~100ms of module evaluation) that --version,
+  // --help, session listing and --clear-sessions never need.
+  const [{ AgentLoop }, { createModel, reasoningEffortMetadata }, { createDefaultRegistry }] =
+    await Promise.all([import("./agent/loop"), import("./llm/provider"), import("./tools")]);
   const model = createModel(config, modelName);
   const registry = createDefaultRegistry();
   const modelConfig = resolveModelConfig(config, modelName);

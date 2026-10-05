@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type UpdateFetcher, checkForUpdate, isNewerVersion } from "../src/cli/update-check";
+import { rmWithRetry } from "./test-fs";
 
 describe("isNewerVersion", () => {
   it("detects newer versions", () => {
@@ -20,6 +24,20 @@ function fakeFetcher(body: unknown, ok = true): UpdateFetcher {
 }
 
 describe("checkForUpdate", () => {
+  // checkForUpdate throttles via <STAR_HOME>/update-check.json; isolate it so
+  // tests never touch the real home and always start with an empty cache.
+  let home: string;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "star-update-check-"));
+    vi.stubEnv("STAR_HOME", home);
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await rmWithRetry(home);
+  });
+
   it("returns a notice when a newer version exists", async () => {
     const message = await checkForUpdate("0.1.1", fakeFetcher({ version: "0.2.0" }));
     expect(message).toBe("New version available: 0.1.1 -> 0.2.0 — run: npm i -g @cryer/star-cli");
