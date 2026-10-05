@@ -4,7 +4,12 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config/loader";
 import { globalConfigPath } from "../src/config/paths";
-import { addAllowRule, addDenyRule, savePermissionMode } from "../src/config/save";
+import {
+  addAllowRule,
+  addDenyRule,
+  savePermissionMode,
+  saveReasoningEffort,
+} from "../src/config/save";
 import {
   buildAllowRule,
   isAllowedByRules,
@@ -490,5 +495,30 @@ describe("addAllowRule/addDenyRule comment preservation", () => {
     expect(await addAllowRule("bash(npm test)")).toBe(true);
     const text = fs.readFileSync(globalConfigPath(), "utf8");
     expect(text).toBe('[permissions]\nallow = ["bash(npm test)"]\n');
+  });
+});
+
+describe("config.toml file permissions", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "star-home-"));
+    vi.stubEnv("STAR_HOME", home);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it("writes config.toml owner-only (0600) on every save path", async () => {
+    if (process.platform === "win32") return;
+    await addAllowRule("bash(npm test)");
+    expect(fs.statSync(globalConfigPath()).mode & 0o777).toBe(0o600);
+    await savePermissionMode("auto");
+    expect(fs.statSync(globalConfigPath()).mode & 0o777).toBe(0o600);
+    fs.writeFileSync(globalConfigPath(), '[[models]]\nname = "m"\nprovider = "p"\nmodel = "x"\n');
+    await saveReasoningEffort("m", "high");
+    expect(fs.statSync(globalConfigPath()).mode & 0o777).toBe(0o600);
   });
 });

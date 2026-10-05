@@ -20,6 +20,11 @@ async function writeFileAtomic(filePath: string, content: string): Promise<void>
   const tmpPath = `${filePath}.${process.pid}.tmp`;
   await fs.promises.writeFile(tmpPath, content, "utf8");
   await fs.promises.rename(tmpPath, filePath);
+  try {
+    // config.toml may hold plaintext apiKeys — keep it owner-only (0600).
+    // Best-effort: chmod is effectively a no-op on Windows.
+    await fs.promises.chmod(filePath, 0o600);
+  } catch {}
 }
 
 // Text-level upsert of a rule list into the [permissions] table so comments

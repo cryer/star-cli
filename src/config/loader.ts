@@ -126,21 +126,77 @@ function sanitizeProjectConfig(project: PartialConfig, filePath: string): Partia
   return sanitized as PartialConfig;
 }
 
+// Project [[models]] merge with the global table by name: a project entry
+// replaces the same-named global entry, every other global entry survives.
+// (Shallow-spreading the array would let a repo silently swap the user's
+// whole model table — and orphan a global defaultModel pointing into it.)
+function mergeModelsByName(
+  globalModels: ModelConfig[],
+  projectModels: ModelConfig[],
+): ModelConfig[] {
+  const projectByName = new Map(projectModels.map((model) => [model.name, model]));
+  const merged = globalModels.map((model) => projectByName.get(model.name) ?? model);
+  const globalNames = new Set(globalModels.map((model) => model.name));
+  for (const model of projectModels) {
+    if (!globalNames.has(model.name)) merged.push(model);
+  }
+  return merged;
+}
+
+// 0 disables these protections (unlimited), so normalize it to +∞ before the
+// min: a project must be able to tighten a globally-disabled guard (global
+// maxSteps = 0, project 5 → 5), never to relax one.
+function protectiveMin(a: number, b: number): number {
+  const result = Math.min(
+    a === 0 ? Number.POSITIVE_INFINITY : a,
+    b === 0 ? Number.POSITIVE_INFINITY : b,
+  );
+  return result === Number.POSITIVE_INFINITY ? 0 : result;
+}
+
 // Project values merge protectively: a repo can tighten safeguards but never
 // relax them. Budgets take the lower bound; guard thresholds take the lower
-// bound too (0 = disabled was already filtered out above).
-function mergeProjectConfig(global: PartialConfig, project: PartialConfig): PartialConfig {
+// bound too (a project-side 0 = disabled was already filtered out above, and
+// a global 0 normalizes to +∞ via protectiveMin).
+function mergeProjectConfig(
+  global: PartialConfig,
+  project: PartialConfig,
+  projectPath: string,
+): PartialConfig {
   const merged: PartialConfig = { ...global, ...project };
+  if (project.models !== undefined) {
+    merged.models = mergeModelsByName(global.models ?? [], project.models);
+    warnProject(projectPath, `project config overrides ${project.models.length} model(s)`);
+  }
   if (project.sessionBudgetUsd !== undefined && global.sessionBudgetUsd !== undefined) {
     merged.sessionBudgetUsd = Math.min(global.sessionBudgetUsd, project.sessionBudgetUsd);
   }
   if (project.maxSteps !== undefined) {
-    merged.maxSteps = Math.min(global.maxSteps ?? 100, project.maxSteps);
+    merged.maxSteps = protectiveMin(global.maxSteps ?? 100, project.maxSteps);
   }
   if (project.doomLoopThreshold !== undefined) {
-    merged.doomLoopThreshold = Math.min(global.doomLoopThreshold ?? 3, project.doomLoopThreshold);
+    merged.doomLoopThreshold = protectiveMin(
+      global.doomLoopThreshold ?? 3,
+      project.doomLoopThreshold,
+    );
   }
   return merged;
+}
+
+// Plaintext keys still work, but config.toml is world-readable by default on
+// some setups and gets committed by accident — point users at apiKeyEnv.
+function warnPlaintextApiKey(config: PartialConfig): void {
+  const offenders: string[] = [];
+  for (const provider of config.providers ?? []) {
+    if (provider.apiKey !== undefined) offenders.push(`provider "${provider.name}"`);
+  }
+  for (const model of config.models ?? []) {
+    if ("apiKey" in model && model.apiKey !== undefined) offenders.push(`model "${model.name}"`);
+  }
+  if (offenders.length === 0) return;
+  process.stderr.write(
+    `[star] plaintext apiKey in config (${offenders.join(", ")}) is deprecated: store keys in ~/.star-cli/.env and reference them with apiKeyEnv instead\n`,
+  );
 }
 
 function applyOverrides(config: PartialConfig, overrides?: CliOverrides): PartialConfig {
@@ -173,7 +229,8 @@ export async function loadConfig(cwd: string, overrides?: CliOverrides): Promise
   const global = await readTomlFile(globalConfigPath());
   const projectPath = projectConfigPath(cwd);
   const project = sanitizeProjectConfig(await readTomlFile(projectPath), projectPath);
-  const merged = applyOverrides(mergeProjectConfig(global, project), overrides);
+  const merged = applyOverrides(mergeProjectConfig(global, project, projectPath), overrides);
+  warnPlaintextApiKey(merged);
   return ConfigSchema.parse(merged);
 }
 
@@ -182,6 +239,7 @@ export function loadConfigSync(cwd: string, overrides?: CliOverrides): StarConfi
   const global = readTomlFileSync(globalConfigPath());
   const projectPath = projectConfigPath(cwd);
   const project = sanitizeProjectConfig(readTomlFileSync(projectPath), projectPath);
-  const merged = applyOverrides(mergeProjectConfig(global, project), overrides);
+  const merged = applyOverrides(mergeProjectConfig(global, project, projectPath), overrides);
+  warnPlaintextApiKey(merged);
   return ConfigSchema.parse(merged);
 }

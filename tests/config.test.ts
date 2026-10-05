@@ -281,7 +281,7 @@ command = "curl https://evil.example.com"
     }
   });
 
-  it("keeps whitelisted project keys without warning", async () => {
+  it("keeps whitelisted project keys with only the models-override notice", async () => {
     writeFile(globalConfigPath(), "maxSteps = 10\nnotifyBell = true\n");
     writeFile(
       projectConfigPath(cwd),
@@ -324,7 +324,10 @@ model = "m"
     expect(config.doomLoopThreshold).toBe(2);
     expect(config.gitSnapshots).toBe(true);
     expect(config.models).toHaveLength(1);
-    expect(stderrOutput()).toBe("");
+    // Declaring [[models]] always logs a one-line notice; nothing else warns.
+    expect(stderrOutput()).toBe(
+      `[star] project config overrides 1 model(s) in ${projectConfigPath(cwd)}\n`,
+    );
   });
 
   it("sanitizes project config in loadConfigSync too", () => {
@@ -383,6 +386,64 @@ model = "m"
     expect(config.doomLoopThreshold).toBe(2);
   });
 
+  it("lets a project tighten a globally disabled guard (0 = unlimited)", async () => {
+    writeFile(globalConfigPath(), "maxSteps = 0\ndoomLoopThreshold = 0\n");
+    writeFile(projectConfigPath(cwd), "maxSteps = 5\ndoomLoopThreshold = 2\n");
+    const config = await loadConfig(cwd);
+    expect(config.maxSteps).toBe(5);
+    expect(config.doomLoopThreshold).toBe(2);
+    expect(loadConfigSync(cwd).maxSteps).toBe(5);
+
+    // A project 0 never disables a finite global guard either.
+    writeFile(globalConfigPath(), "maxSteps = 100\n");
+    writeFile(projectConfigPath(cwd), "maxSteps = 0\n");
+    expect((await loadConfig(cwd)).maxSteps).toBe(100);
+    expect(stderrOutput()).toContain('ignoring "maxSteps = 0"');
+  });
+
+  it("merges project [[models]] into the global table by name instead of replacing it", async () => {
+    writeFile(
+      globalConfigPath(),
+      `defaultModel = "other"
+
+[[models]]
+name = "main"
+provider = "p"
+model = "global-main"
+
+[[models]]
+name = "other"
+provider = "p"
+model = "global-other"
+`,
+    );
+    writeFile(
+      projectConfigPath(cwd),
+      `[[models]]
+name = "main"
+provider = "p"
+model = "project-main"
+
+[[models]]
+name = "extra"
+provider = "p"
+model = "project-extra"
+`,
+    );
+    const config = await loadConfig(cwd);
+    // Same-name override, unrelated global entry kept, new entry appended —
+    // and the global defaultModel still resolves inside the merged table.
+    expect(config.models.map((model) => [model.name, model.model])).toEqual([
+      ["main", "project-main"],
+      ["other", "global-other"],
+      ["extra", "project-extra"],
+    ]);
+    expect(config.defaultModel).toBe("other");
+    expect(stderrOutput()).toContain(
+      `[star] project config overrides 2 model(s) in ${projectConfigPath(cwd)}`,
+    );
+  });
+
   it("clamps project streaming retries/timeouts to safe ranges", async () => {
     writeFile(
       projectConfigPath(cwd),
@@ -423,11 +484,16 @@ cacheReadPrice = 0
 `,
     );
     const config = await loadConfig(cwd);
-    expect(config.models).toHaveLength(1);
-    expect(config.models[0]?.name).toBe("free");
-    expect(config.models[0]?.promptPrice).toBeUndefined();
-    expect(config.models[0]?.completionPrice).toBeUndefined();
-    expect(config.models[0]?.cacheReadPrice).toBeUndefined();
+    // The project model merges into the global table by name: the global
+    // "main" survives with its prices, "free" is appended price-stripped.
+    expect(config.models).toHaveLength(2);
+    expect(config.models[0]?.name).toBe("main");
+    expect(config.models[0]?.promptPrice).toBe(3);
+    expect(config.models[0]?.completionPrice).toBe(15);
+    expect(config.models[1]?.name).toBe("free");
+    expect(config.models[1]?.promptPrice).toBeUndefined();
+    expect(config.models[1]?.completionPrice).toBeUndefined();
+    expect(config.models[1]?.cacheReadPrice).toBeUndefined();
     expect(stderrOutput()).toContain("price fields");
   });
 
@@ -437,6 +503,71 @@ cacheReadPrice = 0
     const config = loadConfigSync(cwd);
     expect(config.sessionBudgetUsd).toBe(4);
     expect(config.gitSnapshots).toBe(true);
+  });
+});
+
+describe("plaintext apiKey hygiene", () => {
+  let stderrSpy: MockInstance;
+
+  beforeEach(() => {
+    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    stderrSpy.mockRestore();
+  });
+
+  function stderrOutput(): string {
+    return stderrSpy.mock.calls.map((call) => String(call[0])).join("");
+  }
+
+  it("warns once (listing every offender) but keeps the key working", async () => {
+    writeFile(
+      globalConfigPath(),
+      `[[providers]]
+name = "openai"
+baseURL = "https://api.openai.com/v1"
+apiKey = "sk-plaintext"
+
+[[providers]]
+name = "relay"
+baseURL = "https://relay.example.com/v1"
+apiKey = "sk-also-plaintext"
+`,
+    );
+    const config = await loadConfig(cwd);
+    expect(config.providers[0]?.apiKey).toBe("sk-plaintext");
+    const out = stderrOutput();
+    expect(out).toContain('provider "openai"');
+    expect(out).toContain('provider "relay"');
+    expect(out).toContain("apiKeyEnv");
+    expect(out.match(/deprecated/g)).toHaveLength(1);
+  });
+
+  it("stays silent when providers reference apiKeyEnv", async () => {
+    writeFile(
+      globalConfigPath(),
+      `[[providers]]
+name = "openai"
+baseURL = "https://api.openai.com/v1"
+apiKeyEnv = "TEST_STAR_API_KEY"
+`,
+    );
+    await loadConfig(cwd);
+    expect(stderrOutput()).toBe("");
+  });
+
+  it("warns in loadConfigSync too", () => {
+    writeFile(
+      globalConfigPath(),
+      `[[providers]]
+name = "p"
+baseURL = "https://relay.example.com/v1"
+apiKey = "sk-plaintext"
+`,
+    );
+    loadConfigSync(cwd);
+    expect(stderrOutput()).toContain("apiKeyEnv");
   });
 });
 
