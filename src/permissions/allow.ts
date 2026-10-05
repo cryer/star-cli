@@ -85,6 +85,20 @@ export function isDeniedByRules(rules: readonly string[], req: PermissionRequest
   return segments.some((segment) => matchesAnyRule(rules, withCommand(req, segment)));
 }
 
+// Ask rules force a confirmation prompt (auto mode's "still ask me about
+// git push"). They use the same per-segment bash analysis as allow/deny
+// rules, but — like deny — a single matching segment is enough: "git push &&
+// git status" must still prompt about the push. A command that cannot be
+// segmented falls back to whole-command matching.
+export function isAskedByRules(rules: readonly string[], req: PermissionRequest): boolean {
+  if (req.toolName !== "bash") return matchesAnyRule(rules, req);
+  const command = requestTarget(req);
+  if (command === undefined) return matchesAnyRule(rules, req);
+  const segments = splitCommandChain(command);
+  if (segments === null || segments.length === 0) return matchesAnyRule(rules, req);
+  return segments.some((segment) => matchesAnyRule(rules, withCommand(req, segment)));
+}
+
 function matchesAnyRule(rules: readonly string[], req: PermissionRequest): boolean {
   return rules.some((raw) => {
     const rule = parseAllowRule(raw);

@@ -62,10 +62,11 @@ function makeConfig(overrides: Partial<StarConfig> = {}): StarConfig {
     maxAutoContinues: 2,
     notifyBell: true,
     notifyBellThresholdSec: 10,
-    permissions: { allow: [], deny: [] },
+    permissions: { allow: [], deny: [], ask: [], sensitive: [] },
     hooks: [],
     doomLoopThreshold: 3,
     gitSnapshots: true,
+    webFetchAllowPrivateHosts: false,
     ...overrides,
   };
 }

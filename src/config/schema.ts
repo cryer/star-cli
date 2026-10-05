@@ -59,6 +59,16 @@ export const ModelConfigSchema = z.object({
 export const PermissionsConfigSchema = z.object({
   allow: z.array(z.string()).default([]),
   deny: z.array(z.string()).default([]),
+  // Rules that force a confirmation prompt in auto mode (same tool(glob)
+  // syntax as allow/deny) — e.g. ask = ["bash(git push *)"]. Priority:
+  // deny > ask > allow > mode default. Only meaningful in auto mode (ask
+  // mode already prompts; readonly/plan are unaffected; yolo bypasses all).
+  ask: z.array(z.string()).default([]),
+  // Extra likely-secret file globs extending core/sensitive.ts's hardcoded
+  // list (same single-* glob semantics as rules, matched case-insensitively
+  // against the basename and the full normalized path). Global config only —
+  // the project-config sandbox drops the whole [permissions] table.
+  sensitive: z.array(z.string()).default([]),
 });
 
 export const HookConfigSchema = z.object({
@@ -151,6 +161,13 @@ export const ConfigSchema = z.object({
   // changes made by ANY tool (bash included), not just write_file/edit_file.
   // Falls back silently to per-file snapshots when git is unavailable.
   gitSnapshots: z.boolean().default(true),
+  // web_fetch SSRF guard escape hatch: by default target hosts are resolved
+  // before connecting and private/reserved ranges are refused (loopback,
+  // RFC1918, link-local incl. the cloud metadata address 169.254.169.254,
+  // ULA, and localhost/.local/.internal names; redirect hops re-checked).
+  // true disables the guard for intranet use. Global config only — not in
+  // the project-config sandbox whitelist.
+  webFetchAllowPrivateHosts: z.boolean().default(false),
 });
 
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;

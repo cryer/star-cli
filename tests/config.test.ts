@@ -7,6 +7,8 @@ import { loadConfig, loadConfigSync } from "../src/config/loader";
 import { globalConfigPath, projectConfigPath, sessionsDir, starHome } from "../src/config/paths";
 import type { ProviderConfig } from "../src/config/schema";
 import { contextWindowTokens, resolveCompactThreshold } from "../src/config/schema";
+import { isSensitivePath, registerSensitivePatterns } from "../src/core/sensitive";
+import { createWebFetchTool, setWebFetchAllowPrivateHosts } from "../src/tools/web/fetch";
 import { rmWithRetry } from "./test-fs";
 
 let home: string;
@@ -63,10 +65,11 @@ describe("loadConfig", () => {
       contextCompaction: "summary",
       notifyBell: true,
       notifyBellThresholdSec: 10,
-      permissions: { allow: [], deny: [] },
+      permissions: { allow: [], deny: [], ask: [], sensitive: [] },
       hooks: [],
       doomLoopThreshold: 3,
       gitSnapshots: true,
+      webFetchAllowPrivateHosts: false,
     });
   });
 
@@ -596,5 +599,77 @@ describe("resolveApiKey", () => {
   it("throws a descriptive error when no key is available", () => {
     expect(() => resolveApiKey(provider)).toThrow(/TEST_STAR_API_KEY/);
     expect(() => resolveApiKey(provider)).toThrow(/openai/);
+  });
+});
+
+describe("security-sensitive config keys", () => {
+  let stderrSpy: MockInstance;
+
+  beforeEach(() => {
+    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    stderrSpy.mockRestore();
+    registerSensitivePatterns([]);
+    setWebFetchAllowPrivateHosts(false);
+  });
+
+  function stderrOutput(): string {
+    return stderrSpy.mock.calls.map((call) => String(call[0])).join("");
+  }
+
+  it("loads [permissions] ask and sensitive from the global config", async () => {
+    writeFile(
+      globalConfigPath(),
+      '[permissions]\nask = ["bash(git push *)"]\nsensitive = ["*.secret", "vault/*"]\n',
+    );
+    const config = await loadConfig(cwd);
+    expect(config.permissions.ask).toEqual(["bash(git push *)"]);
+    expect(config.permissions.sensitive).toEqual(["*.secret", "vault/*"]);
+  });
+
+  it("registers global sensitive globs into isSensitivePath on load", async () => {
+    expect(isSensitivePath("x.secret")).toBe(false);
+    writeFile(globalConfigPath(), '[permissions]\nsensitive = ["*.secret"]\n');
+    await loadConfig(cwd);
+    expect(isSensitivePath("x.secret")).toBe(true);
+    expect(isSensitivePath("dir/backup.secret")).toBe(true);
+    expect(isSensitivePath("x.secret.bak")).toBe(false);
+  });
+
+  it("strips webFetchAllowPrivateHosts and [permissions] sensitive from project config", async () => {
+    writeFile(
+      projectConfigPath(cwd),
+      'webFetchAllowPrivateHosts = true\n\n[permissions]\nsensitive = ["*.secret"]\n',
+    );
+    const config = await loadConfig(cwd);
+    expect(config.webFetchAllowPrivateHosts).toBe(false);
+    expect(config.permissions.sensitive).toEqual([]);
+    expect(isSensitivePath("x.secret")).toBe(false);
+    const out = stderrOutput();
+    expect(out).toContain(
+      `[star] ignoring "webFetchAllowPrivateHosts" in ${projectConfigPath(cwd)}: project config cannot set this key`,
+    );
+    expect(out).toContain(
+      `[star] ignoring "permissions" in ${projectConfigPath(cwd)}: project config cannot set this key`,
+    );
+  });
+
+  it("honors webFetchAllowPrivateHosts from the global config and wires the tool default", async () => {
+    let resolved = 0;
+    const guarded = createWebFetchTool({
+      resolver: async () => {
+        resolved += 1;
+        return ["192.168.1.1"];
+      },
+      fetchImpl: async () => new Response("intranet", { status: 200 }),
+    });
+    writeFile(globalConfigPath(), "webFetchAllowPrivateHosts = true\n");
+    const config = await loadConfig(cwd);
+    expect(config.webFetchAllowPrivateHosts).toBe(true);
+    const res = await guarded.execute({ url: "http://intranet/" }, { cwd });
+    expect(res.isError).toBeUndefined();
+    expect(resolved).toBe(0);
   });
 });

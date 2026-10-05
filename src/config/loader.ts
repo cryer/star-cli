@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import { parse } from "smol-toml";
+import { registerSensitivePatterns } from "../core/sensitive";
+import { setWebFetchAllowPrivateHosts } from "../tools/web/fetch";
 import { loadEnvFile } from "./env";
 import { globalConfigPath, projectConfigPath } from "./paths";
 import { type CliOverrides, ConfigSchema, type ModelConfig, type StarConfig } from "./schema";
@@ -231,7 +233,7 @@ export async function loadConfig(cwd: string, overrides?: CliOverrides): Promise
   const project = sanitizeProjectConfig(await readTomlFile(projectPath), projectPath);
   const merged = applyOverrides(mergeProjectConfig(global, project, projectPath), overrides);
   warnPlaintextApiKey(merged);
-  return ConfigSchema.parse(merged);
+  return wireRuntimeSettings(ConfigSchema.parse(merged));
 }
 
 export function loadConfigSync(cwd: string, overrides?: CliOverrides): StarConfig {
@@ -241,5 +243,15 @@ export function loadConfigSync(cwd: string, overrides?: CliOverrides): StarConfi
   const project = sanitizeProjectConfig(readTomlFileSync(projectPath), projectPath);
   const merged = applyOverrides(mergeProjectConfig(global, project, projectPath), overrides);
   warnPlaintextApiKey(merged);
-  return ConfigSchema.parse(merged);
+  return wireRuntimeSettings(ConfigSchema.parse(merged));
+}
+
+// Pushes config-driven security settings into their runtime consumers. The
+// merged permissions table is global-only at this point (the project sandbox
+// dropped any project-side [permissions]), so these can never be planted by
+// a checked-out repo.
+function wireRuntimeSettings(config: StarConfig): StarConfig {
+  registerSensitivePatterns(config.permissions.sensitive);
+  setWebFetchAllowPrivateHosts(config.webFetchAllowPrivateHosts);
+  return config;
 }

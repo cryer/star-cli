@@ -109,10 +109,11 @@ describe("read_image in the agent loop", () => {
       maxAutoContinues: 2,
       notifyBell: true,
       notifyBellThresholdSec: 10,
-      permissions: { allow: [], deny: [] },
+      permissions: { allow: [], deny: [], ask: [], sensitive: [] },
       hooks: [],
       doomLoopThreshold: 3,
       gitSnapshots: false,
+      webFetchAllowPrivateHosts: false,
     };
   }
 
