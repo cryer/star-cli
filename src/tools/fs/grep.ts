@@ -3,6 +3,7 @@ import path from "node:path";
 import { z } from "zod";
 import type { Tool } from "../types";
 import {
+  WALK_CONCURRENCY,
   type WalkedFile,
   createIgnorePredicate,
   isSensitivePath,
@@ -40,7 +41,7 @@ const schema = z.object({
 export const grepTool: Tool<typeof schema> = {
   name: "grep",
   description:
-    "Search file contents with a regular expression. Outputs 'file:line:content', up to 250 matches. Skips binary files, files over 5MB, sensitive files, node_modules and .git.",
+    "Search file contents with a regular expression. Outputs 'file:line:content', up to 250 matches. Skips binary files, files over 5MB, sensitive files, node_modules and .git. Follows symlinks that stay inside the working directory.",
   permission: "read",
   parameters: schema,
   async execute(args, ctx) {
@@ -58,6 +59,7 @@ export const grepTool: Tool<typeof schema> = {
     }
     const root = path.resolve(ctx.cwd, args.path ?? ".");
     let files: WalkedFile[];
+    let interrupted = false;
     try {
       const st = await stat(root);
       if (st.isFile()) {
@@ -75,8 +77,17 @@ export const grepTool: Tool<typeof schema> = {
         const walked = await walkFiles(root, undefined, {
           ignore: createIgnorePredicate(ctx.cwd),
           withMtime: false,
+          signal: ctx.abortSignal,
+          symlinkBoundary: ctx.cwd,
+          nestedIgnore: true,
         });
-        files = walked.filter((f) => !isSensitivePath(f.abs));
+        interrupted = walked.aborted;
+        // A link named notes.txt can resolve to a sensitive target inside the
+        // cwd; check the resolved path as well as the link path.
+        files = walked.files.filter(
+          (f) =>
+            !isSensitivePath(f.abs) && (f.resolved === undefined || !isSensitivePath(f.resolved)),
+        );
       }
     } catch {
       return { content: `Path not found: ${args.path ?? "."}`, isError: true };
@@ -85,33 +96,54 @@ export const grepTool: Tool<typeof schema> = {
       const glob = args.glob;
       files = files.filter((f) => matchesGlob(glob, f.rel));
     }
-    const out: string[] = [];
-    let truncated = false;
-    let skippedLarge = 0;
-    outer: for (const file of files) {
+    // Files are scanned in concurrent chunks; matches are appended in file
+    // order so output stays deterministic and the 250-match cut is stable.
+    const scanFile = async (file: WalkedFile): Promise<string[] | null> => {
       const st = await stat(file.abs).catch(() => null);
       if (!st) {
-        continue;
+        return null;
       }
       if (st.size > MAX_FILE_BYTES) {
         skippedLarge += 1;
-        continue;
+        return null;
       }
       let buf: Buffer;
       try {
         buf = await readFile(file.abs);
       } catch {
-        continue;
+        return null;
       }
       if (buf.includes(0)) {
-        continue;
+        return null;
       }
+      const hits: string[] = [];
       const lines = buf.toString("utf8").split("\n");
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i] ?? "";
         if (re.test(line)) {
           const shown = line.length > MAX_LINE_CHARS ? `${line.slice(0, MAX_LINE_CHARS)}…` : line;
-          out.push(`${file.rel}:${i + 1}:${shown}`);
+          hits.push(`${file.rel}:${i + 1}:${shown}`);
+        }
+      }
+      return hits;
+    };
+    const out: string[] = [];
+    let truncated = false;
+    let skippedLarge = 0;
+    outer: for (let i = 0; i < files.length; i += WALK_CONCURRENCY) {
+      if (ctx.abortSignal?.aborted) {
+        interrupted = true;
+        break;
+      }
+      const chunk = await Promise.all(
+        files.slice(i, i + WALK_CONCURRENCY).map((file) => scanFile(file)),
+      );
+      for (const hits of chunk) {
+        if (!hits) {
+          continue;
+        }
+        for (const hit of hits) {
+          out.push(hit);
           if (out.length >= MAX_MATCHES) {
             truncated = true;
             break outer;
@@ -123,11 +155,13 @@ export const grepTool: Tool<typeof schema> = {
       skippedLarge > 0 ? `(skipped ${skippedLarge} file(s) larger than 5MB)` : null;
     if (out.length === 0) {
       return {
-        content: `No matches for pattern: ${args.pattern}${skippedNote ? ` ${skippedNote}` : ""}`,
+        content: `No matches for pattern: ${args.pattern}${skippedNote ? ` ${skippedNote}` : ""}${interrupted ? " (search interrupted)" : ""}`,
       };
     }
     if (truncated) {
       out.push(`... (truncated: more than ${MAX_MATCHES} matches)`);
+    } else if (interrupted) {
+      out.push("... (interrupted: partial results)");
     }
     if (skippedNote) {
       out.push(`... ${skippedNote}`);
