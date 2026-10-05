@@ -46,11 +46,29 @@ async function countMessages(id: string): Promise<number> {
   }
 }
 
+// Caps how many messages.jsonl files countMessages holds open at once:
+// mapping over every session with Promise.all opens one handle per session
+// concurrently, and a few hundred stored sessions reliably trip EMFILE/EPERM
+// on Windows. Order is preserved — workers claim indices, not slots.
+const LIST_COUNT_CONCURRENCY = 8;
+
 export async function listSessionEntries(cwd?: string): Promise<SessionListEntry[]> {
   const metas = await SessionStore.list(cwd);
-  return Promise.all(
-    metas.map(async (meta) => ({ meta, messageCount: await countMessages(meta.id) })),
+  const entries: SessionListEntry[] = [];
+  let next = 0;
+  const worker = async () => {
+    while (next < metas.length) {
+      const index = next;
+      next += 1;
+      const meta = metas[index];
+      if (!meta) continue;
+      entries[index] = { meta, messageCount: await countMessages(meta.id) };
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(LIST_COUNT_CONCURRENCY, metas.length) }, () => worker()),
   );
+  return entries;
 }
 
 export async function findLatestSession(cwd: string): Promise<SessionMeta | null> {

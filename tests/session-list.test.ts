@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -127,6 +128,52 @@ describe("listSessionEntries", () => {
 
     const entries = await listSessionEntries();
     expect(entries[0]?.messageCount).toBe(5000);
+  });
+
+  it("bounds concurrent messages.jsonl handles while counting", async () => {
+    const stores: SessionStore[] = [];
+    for (let i = 0; i < 24; i++) {
+      const store = await SessionStore.create(`/work/${i}`, "m");
+      await store.append({ role: "user", content: `hi ${i}` });
+      await store.append({ role: "assistant", content: `hello ${i}` });
+      bumpUpdatedAt(store.dir, 1000 + i);
+      stores.push(store);
+    }
+
+    let openHandles = 0;
+    let maxOpenHandles = 0;
+    const realOpen = fsp.open;
+    const openSpy = vi.spyOn(fsp, "open").mockImplementation(async (...args) => {
+      const handle = await realOpen(...args);
+      if (!String(args[0]).endsWith("messages.jsonl")) return handle;
+      openHandles += 1;
+      maxOpenHandles = Math.max(maxOpenHandles, openHandles);
+      return new Proxy(handle, {
+        get(target, prop, receiver) {
+          if (prop === "close") {
+            return async () => {
+              openHandles -= 1;
+              await target.close();
+            };
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+    });
+
+    try {
+      const entries = await listSessionEntries();
+      expect(entries).toHaveLength(24);
+      // Order is unchanged: updatedAt descending, all counts intact.
+      expect(entries.map((entry) => entry.meta.id)).toEqual(
+        [...stores].reverse().map((store) => store.id),
+      );
+      for (const entry of entries) expect(entry.messageCount).toBe(2);
+      expect(maxOpenHandles).toBeGreaterThan(0);
+      expect(maxOpenHandles).toBeLessThanOrEqual(8);
+    } finally {
+      openSpy.mockRestore();
+    }
   });
 });
 
