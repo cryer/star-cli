@@ -10,6 +10,10 @@ export type { CoreMessage };
 // - "tool-image": images a tool (read_image/screenshot) attached mid-turn
 export interface MessageMeta {
   synthetic?: "nudge" | "bg-report" | "tool-image";
+  // Set by context/elision.ts when the message's bulky content (a stale tool
+  // result, an old attached image) was replaced with a placeholder to free
+  // the window — idempotency marker and debugging aid; the model never sees it.
+  elided?: boolean;
 }
 
 export interface StarMessage {

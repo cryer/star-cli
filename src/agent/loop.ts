@@ -1,6 +1,7 @@
 import { type LanguageModel, tool as aiTool, generateText } from "ai";
 import { type StarConfig, resolveCompactThreshold } from "../config/schema";
 import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
+import { elideStaleContent } from "../context/elision";
 import { estimateToolSchemaTokens } from "../context/tokens";
 import {
   type StreamErrorInfo,
@@ -910,13 +911,28 @@ export class AgentLoop {
         }
       }
       const maxTokens = this.opts.contextMaxTokens ?? config.contextMaxTokens;
+      const threshold = resolveCompactThreshold(config, maxTokens);
+      // Stale-content elision runs before whole-turn compaction: old bulk
+      // (stale tool outputs, old attached images) loses its value long
+      // before the conversation around it does, and replacing it in place
+      // leaves message indices — and therefore /undo turn markers — intact.
+      // It often shrinks the history enough that compaction never fires.
+      const elided = elideStaleContent(this.messages, threshold, toolSchemaTokens);
+      if (elided) {
+        this.messages = elided.messages;
+        // Persist the rewrite like compaction does (memory and disk must
+        // not diverge) and drop volatile tool state: the read_file dedup
+        // cache must not claim elided content is still in context.
+        await this.opts.sessionStore?.replaceMessages([...this.messages]);
+        this.opts.registry?.resetVolatileState();
+      }
       // Auto-compaction fires at compactThresholdTokens when configured
       // (clamped to the window), otherwise only once the window is full. The
       // tool map's JSON schemas ride every request too, so their estimated
       // tokens count against the threshold — otherwise a 15+ tool setup
       // under-reads the real window usage by several thousand tokens.
       // this.messages is passed directly: compactMessages never mutates it.
-      const compacted = compactMessages(this.messages, resolveCompactThreshold(config, maxTokens), {
+      const compacted = compactMessages(this.messages, threshold, {
         overheadTokens: toolSchemaTokens,
       });
       if (compacted.compacted) {
