@@ -211,4 +211,98 @@ describe("read_image in the agent loop", () => {
     );
     expect(promptWithImage).toBeDefined();
   });
+
+  it("appends image messages after ALL tool results of a multi-call batch", async () => {
+    // Strict providers reject a user message interleaved between the tool
+    // results of one assistant message ("an assistant message with
+    // 'tool_calls' must be followed by tool messages"), so two read_image
+    // calls in a single reply must produce assistant → tool → tool →
+    // user(image) → user(image), never tool → user → tool.
+    writeFileSync(path.join(cwd, "a.png"), pngBuffer(100, 50));
+    writeFileSync(path.join(cwd, "b.png"), pngBuffer(60, 30));
+    let call = 0;
+    const model = new MockLanguageModelV1({
+      doStream: async () => {
+        call++;
+        type Chunk =
+          | { type: "text-delta"; textDelta: string }
+          | {
+              type: "tool-call";
+              toolCallType: "function";
+              toolCallId: string;
+              toolName: string;
+              args: string;
+            }
+          | {
+              type: "finish";
+              finishReason: "stop" | "tool-calls";
+              usage: { promptTokens: number; completionTokens: number };
+            };
+        const chunks: Chunk[] =
+          call === 1
+            ? [
+                {
+                  type: "tool-call",
+                  toolCallType: "function",
+                  toolCallId: "c1",
+                  toolName: "read_image",
+                  args: JSON.stringify({ path: "a.png" }),
+                },
+                {
+                  type: "tool-call",
+                  toolCallType: "function",
+                  toolCallId: "c2",
+                  toolName: "read_image",
+                  args: JSON.stringify({ path: "b.png" }),
+                },
+                {
+                  type: "finish",
+                  finishReason: "tool-calls",
+                  usage: { promptTokens: 5, completionTokens: 3 },
+                },
+              ]
+            : [
+                { type: "text-delta", textDelta: "done" },
+                {
+                  type: "finish",
+                  finishReason: "stop",
+                  usage: { promptTokens: 5, completionTokens: 3 },
+                },
+              ];
+        return {
+          stream: convertArrayToReadableStream(chunks),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const loop = new AgentLoop({
+      model,
+      registry: createDefaultRegistry(),
+      config: makeConfig(),
+      cwd,
+    });
+
+    for await (const event of loop.stream(
+      "compare a.png and b.png",
+      new AbortController().signal,
+    )) {
+      void event;
+    }
+
+    const messages = loop.getMessages();
+    const assistantIdx = messages.findIndex(
+      (m) =>
+        m.role === "assistant" &&
+        Array.isArray(m.content) &&
+        m.content.some((p) => p.type === "tool-call"),
+    );
+    expect(assistantIdx).toBeGreaterThanOrEqual(0);
+    expect(messages.slice(assistantIdx, assistantIdx + 5).map((m) => m.role)).toEqual([
+      "assistant",
+      "tool",
+      "tool",
+      "user",
+      "user",
+    ]);
+  });
 });

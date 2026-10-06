@@ -1297,6 +1297,14 @@ export class AgentLoop {
       }
 
       const answered = new Set<string>();
+      // Tool-attached images (read_image, screenshot) ride as follow-up user
+      // messages with real image parts — tool results are text-only on every
+      // protocol, and this is the same shape pasted images arrive in. They are
+      // buffered here and appended only after EVERY tool message of the batch
+      // (see finally): a user message interleaved between the tool results of
+      // one assistant message breaks strict providers ("an assistant message
+      // with 'tool_calls' must be followed by tool messages").
+      const pendingImages: { message: CoreMessage; meta: MessageMeta }[] = [];
       try {
         for (const call of toolCalls) {
           if (signal.aborted) break;
@@ -1328,9 +1336,6 @@ export class AgentLoop {
           this.messages.push({ message: toolMessage });
           await this.persist(toolMessage);
           answered.add(call.id);
-          // Tool-attached images (read_image, screenshot) ride as a follow-up user message
-          // with real image parts — tool results are text-only on every
-          // protocol, and this is the same shape pasted images arrive in.
           // Synthetic like the nudges: it lands mid-turn, so it must not
           // become a turn boundary for /undo.
           if (result.images && result.images.length > 0) {
@@ -1348,9 +1353,7 @@ export class AgentLoop {
                 })),
               ],
             };
-            const meta: MessageMeta = { synthetic: "tool-image" };
-            this.messages.push({ message: imageMessage, meta });
-            await this.persist(imageMessage, meta);
+            pendingImages.push({ message: imageMessage, meta: { synthetic: "tool-image" } });
           }
           if (call.name === "todo_write" && !result.isError) {
             openTodos = pendingTodoTitles(call.args);
@@ -1387,6 +1390,13 @@ export class AgentLoop {
           this.messages.push({ message: synthetic });
           await this.persist(synthetic).catch(() => {});
           yield { type: "tool-result", id: call.id, name: call.name, content, isError: true };
+        }
+        // Only now — every tool message of the batch closed, including
+        // synthetic ones for aborted/unfinished calls — do the buffered image
+        // messages join the history, so they never split a tool-result block.
+        for (const { message, meta } of pendingImages) {
+          this.messages.push({ message, meta });
+          await this.persist(message, meta).catch(() => {});
         }
       }
 

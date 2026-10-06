@@ -200,6 +200,79 @@ describe("reconcileToolCalls", () => {
     expect(fixed[4]).toEqual(messages[2]);
     expect(danglingToolCallIds(fixed)).toEqual([]);
   });
+
+  it("moves a user message interleaved between sibling tool results after the block", async () => {
+    // Histories persisted by a version that appended tool-attached image
+    // messages right after each tool result interleave a user message inside
+    // the tool block; strict providers reject that ordering. The repair must
+    // keep the real (later) result instead of filling a synthetic duplicate.
+    const messages: CoreMessage[] = [
+      { role: "user", content: "compare these" },
+      assistantWithCalls([
+        ["c1", "read_image"],
+        ["c2", "read_image"],
+      ]),
+      {
+        role: "tool",
+        content: [
+          { type: "tool-result", toolCallId: "c1", toolName: "read_image", result: "ok 1" },
+        ],
+      },
+      { role: "user", content: "[image from read_image: a.png]" },
+      {
+        role: "tool",
+        content: [
+          { type: "tool-result", toolCallId: "c2", toolName: "read_image", result: "ok 2" },
+        ],
+      },
+      { role: "user", content: "[image from read_image: b.png]" },
+    ];
+
+    const fixed = reconcileToolCalls(messages);
+
+    expect(fixed.map((m) => m.role)).toEqual(["user", "assistant", "tool", "tool", "user", "user"]);
+    // The real result for c2 survived — no synthetic filler was inserted.
+    expect(fixed[3]).toEqual(messages[4]);
+    expect(fixed[4]).toEqual(messages[3]);
+    expect(fixed[5]).toEqual(messages[5]);
+    expect(
+      fixed.every(
+        (m) =>
+          m.role !== "tool" ||
+          !Array.isArray(m.content) ||
+          m.content.every((p) => p.result !== MISSING_TOOL_RESULT_TEXT),
+      ),
+    ).toBe(true);
+    expect(danglingToolCallIds(fixed)).toEqual([]);
+  });
+
+  it("still fills dangling calls when the batch never closes, ahead of deferred messages", () => {
+    const messages: CoreMessage[] = [
+      assistantWithCalls([
+        ["c1", "read_image"],
+        ["c2", "read_image"],
+      ]),
+      {
+        role: "tool",
+        content: [
+          { type: "tool-result", toolCallId: "c1", toolName: "read_image", result: "ok 1" },
+        ],
+      },
+      { role: "user", content: "[image from read_image: a.png]" },
+      { role: "user", content: "next question" },
+    ];
+
+    const fixed = reconcileToolCalls(messages);
+
+    expect(fixed.map((m) => m.role)).toEqual(["assistant", "tool", "tool", "user", "user"]);
+    expect(fixed[2]).toMatchObject({
+      role: "tool",
+      content: [{ type: "tool-result", toolCallId: "c2", result: MISSING_TOOL_RESULT_TEXT }],
+    });
+    expect(fixed[3]).toEqual(messages[2]);
+    expect(fixed[4]).toEqual(messages[3]);
+    expect(danglingToolCallIds(fixed)).toEqual([]);
+  });
 });
 
 describe("AgentLoop tool-call completion", () => {

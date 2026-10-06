@@ -88,6 +88,14 @@ export const UNFINISHED_TOOL_RESULT_TEXT =
 export function reconcileToolCalls(messages: CoreMessage[]): CoreMessage[] {
   const result: CoreMessage[] = [];
   let pending: { toolCallId: string; toolName: string }[] = [];
+  // Non-tool messages that arrived while a tool-call batch was still open
+  // (e.g. tool-attached image messages persisted by a version that
+  // interleaved them between sibling tool results) are held back and emitted
+  // once the batch closes: strict providers reject a user message sitting
+  // inside the tool-result block ("an assistant message with 'tool_calls'
+  // must be followed by tool messages"), and flushing synthetic fillers at
+  // that point would also duplicate the real results that follow.
+  let deferred: CoreMessage[] = [];
 
   const flushPending = () => {
     for (const call of pending) {
@@ -104,6 +112,8 @@ export function reconcileToolCalls(messages: CoreMessage[]): CoreMessage[] {
       });
     }
     pending = [];
+    result.push(...deferred);
+    deferred = [];
   };
 
   for (const message of messages) {
@@ -112,13 +122,20 @@ export function reconcileToolCalls(messages: CoreMessage[]): CoreMessage[] {
       pending = message.content
         .filter((part): part is ToolCallPart => part.type === "tool-call")
         .map((part) => ({ toolCallId: part.toolCallId, toolName: part.toolName }));
+      result.push(message);
     } else if (message.role === "tool" && Array.isArray(message.content) && pending.length > 0) {
       const answered = new Set(message.content.map((part) => part.toolCallId));
       pending = pending.filter((call) => !answered.has(call.toolCallId));
+      result.push(message);
+      if (pending.length === 0) {
+        result.push(...deferred);
+        deferred = [];
+      }
+    } else if (pending.length > 0) {
+      deferred.push(message);
     } else {
-      flushPending();
+      result.push(message);
     }
-    result.push(message);
   }
   flushPending();
   return result;
@@ -130,6 +147,7 @@ export function reconcileToolCalls(messages: CoreMessage[]): CoreMessage[] {
 export function reconcileStarMessages(messages: readonly StarMessage[]): StarMessage[] {
   const result: StarMessage[] = [];
   let pending: { toolCallId: string; toolName: string }[] = [];
+  let deferred: StarMessage[] = [];
 
   const flushPending = () => {
     for (const call of pending) {
@@ -148,6 +166,8 @@ export function reconcileStarMessages(messages: readonly StarMessage[]): StarMes
       });
     }
     pending = [];
+    result.push(...deferred);
+    deferred = [];
   };
 
   for (const star of messages) {
@@ -157,13 +177,20 @@ export function reconcileStarMessages(messages: readonly StarMessage[]): StarMes
       pending = message.content
         .filter((part): part is ToolCallPart => part.type === "tool-call")
         .map((part) => ({ toolCallId: part.toolCallId, toolName: part.toolName }));
+      result.push(star);
     } else if (message.role === "tool" && Array.isArray(message.content) && pending.length > 0) {
       const answered = new Set(message.content.map((part) => part.toolCallId));
       pending = pending.filter((call) => !answered.has(call.toolCallId));
+      result.push(star);
+      if (pending.length === 0) {
+        result.push(...deferred);
+        deferred = [];
+      }
+    } else if (pending.length > 0) {
+      deferred.push(star);
     } else {
-      flushPending();
+      result.push(star);
     }
-    result.push(star);
   }
   flushPending();
   return result;
