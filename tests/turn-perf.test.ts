@@ -215,7 +215,7 @@ describe("loop per-turn caches", () => {
   });
 
   it("charges tool schema tokens into the auto-compaction threshold", async () => {
-    // History ≈ 210 estimated tokens: under the 300-token threshold alone,
+    // History ≈ 130 estimated tokens: under the 300-token threshold alone,
     // over it once the ~2k tool-schema overhead is counted.
     const loop = makeLoop(mockModel([textRound("ok")]), {
       compactThresholdTokens: 300,

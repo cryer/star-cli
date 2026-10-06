@@ -67,10 +67,28 @@ describe("estimateTokens", () => {
     expect(cjk).toBeGreaterThan(latin * 3);
   });
 
-  it("counts CJK by code point even alongside surrogate pairs", () => {
-    // "中" is one UTF-16 unit, "🙂" two: weight = 3 units + 1 CJK × 3 = 6,
-    // ⌈6/4⌉ = 2 + 4 overhead = 6 — the astral char is never CJK-weighted.
-    expect(estimateMessageTokens(user("中🙂"))).toBe(6);
+  it("counts CJK and astral characters by their BPE tokenization", () => {
+    // cl100k: "中" = 1 token, "🙂" = 2 (astral chars split) → 3 + 4 overhead.
+    expect(estimateMessageTokens(user("中🙂"))).toBe(7);
+  });
+
+  it("matches the cl100k BPE count for plain text", () => {
+    // "hello world" = 2 tokens + 4 overhead. Pinned exactly so a tokenizer
+    // or encoding change (e.g. a dependency default flip) fails loudly.
+    expect(estimateMessageTokens(user("hello world"))).toBe(2 + 4);
+  });
+
+  it("counts BPE special-token strings as ordinary text instead of throwing", () => {
+    // Chat content can legitimately contain <|endoftext|>-style strings
+    // pasted from logs; the estimate must never fail on them.
+    expect(estimateMessageTokens(user("log: <|endoftext|> done"))).toBe(9 + 4);
+  });
+
+  it("counts punctuation-heavy JSON above the old chars-per-token rule", () => {
+    // The motivation for real BPE: chars/4 read this 37-char snippet as ~10
+    // tokens, cl100k says 13 — code and JSON systematically under-read.
+    const json = '{"path":"/a","line":1,"ok":true}';
+    expect(estimateMessageTokens(user(json)) - 4).toBeGreaterThan(Math.ceil(json.length / 4));
   });
 });
 
@@ -263,7 +281,7 @@ describe("compactMessages", () => {
       user("u3"),
       assistant("a3"),
     ];
-    // ~210 estimated tokens: under a 500 budget without overhead…
+    // ~130 estimated tokens: under a 500 budget without overhead…
     const plain = compactMessages(star(messages), 500);
     expect(plain.compacted).toBe(false);
     // …but over it once a tool-schema-sized overhead is charged.

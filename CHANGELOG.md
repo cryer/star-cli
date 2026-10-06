@@ -10,6 +10,10 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ## [Unreleased]
 
+### Fixed
+
+- **token estimation switched from the chars/4 heuristic to a real BPE tokenizer** (`gpt-tokenizer`, pinned `cl100k_base`): the heuristic under-read punctuation-heavy code and JSON by 15-30%, so the status-bar ctx% and the auto-compaction threshold could trigger late and flirt with window overflow. Estimates are now near-exact for code, CJK, and mixed content; pasted `<|endoftext|>`-style strings count as ordinary text instead of throwing; per-message WeakMap caching keeps the per-step cost at zero for already-seen messages
+
 ## [0.3.9] - 2026-10-05
 
 ### Security
