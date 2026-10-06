@@ -82,6 +82,11 @@ export interface AgentLoopOptions {
   // MAX_SUBAGENT_DEPTH the subagent tool is not registered, so subagents
   // cannot spawn further subagents.
   subagentDepth?: number;
+  // Read-only loop (subagent.ts read_only spawns): the registry is cut down
+  // to read-level tools, so research/review children cannot modify files,
+  // run shell commands, or kill tasks. Only meaningful for subagent loops
+  // (root loops use config.permissionMode for this).
+  readOnly?: boolean;
   // Identity threaded into ToolContext: "root" (default) for the main loop;
   // subagent.ts assigns each child loop a unique id (its background task id
   // for run_in_background spawns) so the task_* tools can scope background
@@ -407,6 +412,14 @@ export class AgentLoop {
             this.addSubagentUsage(usage, childModel, childModelName),
         }),
       );
+    }
+    if (opts.readOnly && depth > 0) {
+      // Read-only subagent: cut the freshly built registry — including the
+      // skill/remember extras registered above — down to read-level tools.
+      // Done here rather than by the caller because the constructor swaps
+      // in its own registry for todo isolation (see above). The permission
+      // gate stays as backstop for anything attempted outside the map.
+      opts.registry?.retain((tool) => tool.permission === "read");
     }
   }
 

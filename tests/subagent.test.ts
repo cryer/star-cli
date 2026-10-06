@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { LanguageModel } from "ai";
@@ -190,6 +190,51 @@ describe("subagent tool", () => {
       expect(toolResult.content).toContain("the file says hello");
       expect(toolResult.content).toContain("1 tool call(s)");
     }
+  });
+
+  it("restricts a read_only subagent to read-level tools", async () => {
+    writeFileSync(path.join(cwd, "note.txt"), "hello from file", "utf8");
+    const { loop } = makeLoop(
+      mockModel([
+        toolCallRound("call-1", "subagent", { prompt: "read the note", read_only: true }),
+        toolCallRound("call-2", "read_file", { path: "note.txt" }),
+        textRound("the note says hello"),
+        textRound("parent done"),
+      ]),
+    );
+
+    const events = await collect(loop.stream("go", new AbortController().signal));
+
+    const toolResult = events.find((e) => e.type === "tool-result" && e.name === "subagent");
+    expect(toolResult).toBeDefined();
+    if (toolResult?.type === "tool-result") {
+      expect(toolResult.isError).toBeFalsy();
+      expect(toolResult.content).toContain("the note says hello");
+      expect(toolResult.content).toContain("read-only");
+      expect(toolResult.content).toContain("1 tool call(s)");
+    }
+  });
+
+  it("fails a read_only subagent's write attempt without touching the disk", async () => {
+    const { loop } = makeLoop(
+      mockModel([
+        toolCallRound("call-1", "subagent", { prompt: "fix it", read_only: true }),
+        // Write tools are hidden from the child's tool map, so the SDK
+        // rejects the call outright instead of executing it.
+        toolCallRound("call-2", "write_file", { path: "blocked.txt", content: "x" }),
+        textRound("parent done"),
+      ]),
+    );
+
+    const events = await collect(loop.stream("go", new AbortController().signal));
+
+    const toolResult = events.find((e) => e.type === "tool-result" && e.name === "subagent");
+    expect(toolResult).toBeDefined();
+    if (toolResult?.type === "tool-result") {
+      expect(toolResult.isError).toBe(true);
+      expect(toolResult.content).toContain("unavailable tool 'write_file'");
+    }
+    expect(existsSync(path.join(cwd, "blocked.txt"))).toBe(false);
   });
 
   it("does not register the subagent tool at max depth", () => {

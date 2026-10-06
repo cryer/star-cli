@@ -46,6 +46,17 @@ export class ToolRegistry {
     this.tools.set(tool.name, tool);
   }
 
+  // Drops every tool the predicate rejects. Used to restrict a read-only
+  // subagent loop's tool set; the agent loop reads list() lazily per
+  // request, so a retain right after loop construction still shapes the
+  // first request. The permission gate stays as backstop for anything
+  // attempted outside the model's tool map.
+  retain(predicate: (tool: Tool) => boolean): void {
+    for (const [name, tool] of this.tools) {
+      if (!predicate(tool)) this.tools.delete(name);
+    }
+  }
+
   // Drops per-session volatile tool state after a wholesale history rewrite
   // (compaction, /undo, resume): anything a tool remembers as "already sent
   // to the model" may no longer be in the context.

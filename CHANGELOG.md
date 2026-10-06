@@ -13,6 +13,7 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 ### Added
 
 - **`code_outline` tool**: prints a source file's or directory's declaration skeleton (functions, classes, methods, types with line numbers) without reading bodies — a lightweight zero-dependency regex extractor covering TS/JS, Python, Go, Rust, Java/Kotlin/C#, C/C++, Ruby, PHP, Shell, Swift, and Scala. Navigate unfamiliar code by outlining first, then reading exact line ranges, instead of billing whole files into the context. Honors `.starignore`, sensitive-path refusals, and symlink boundaries like the other fs tools; directory mode caps at 60 files / 30KB
+- **subagent `read_only` mode**: research, exploration, and review subtasks can be spawned restricted to read-level tools (no file writes, no shell, no task kills) — hidden from the child's tool map so an attempted write is rejected before execution, with the permission gate as backstop. The subagent prompt now carries a report contract (self-contained outcome report with `path:line` citations) and the tool description carries briefing guidance, since subagents start with zero context
 
 ### Fixed
 

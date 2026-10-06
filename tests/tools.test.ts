@@ -47,6 +47,18 @@ describe("registry", () => {
       "write_file",
     ]);
   });
+
+  it("retain drops every tool the predicate rejects", () => {
+    const reg = createDefaultRegistry();
+    reg.retain((tool) => tool.permission === "read");
+    expect(reg.get("write_file")).toBeUndefined();
+    expect(reg.get("edit_file")).toBeUndefined();
+    expect(reg.get("bash")).toBeUndefined();
+    expect(reg.get("task_kill")).toBeUndefined();
+    expect(reg.get("read_file")).toBeDefined();
+    expect(reg.get("grep")).toBeDefined();
+    expect(reg.get("code_outline")).toBeDefined();
+  });
 });
 
 describe("read_file", () => {

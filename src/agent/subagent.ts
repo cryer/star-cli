@@ -15,7 +15,10 @@ export const MAX_SUBAGENT_DEPTH = 1;
 const MAX_REPORT_CHARS = 20_000;
 
 const SUBAGENT_PROMPT =
-  "You are a subagent spawned to handle a focused subtask on behalf of the main agent. Work autonomously with the tools available to you, then finish with a concise report of what you found or did. Your final text is returned to the main agent as the tool result — make it self-contained.";
+  "You are a subagent spawned to handle a focused subtask on behalf of the main agent. Work autonomously with the tools available to you. Your final text is returned to the main agent as the tool result — make it a self-contained report: state what you found or did, cite exact file paths with line numbers for anything the main agent may need to open, and note explicitly anything left undone or unverified. Report outcomes, not process.";
+
+const READ_ONLY_PROMPT =
+  "This subtask is read-only: your tools cannot modify files, run shell commands, or kill tasks. Investigate and report; do not attempt changes.";
 
 export interface SubagentDeps {
   model: LanguageModel;
@@ -52,6 +55,7 @@ export interface SubagentDeps {
 interface SubagentArgs {
   prompt: string;
   description?: string;
+  read_only?: boolean;
 }
 
 // Session cost is computed by the consumers as token totals × the *active*
@@ -157,13 +161,16 @@ async function runSubagent(
     registry: createDefaultRegistry(),
     config: deps.config,
     cwd,
-    system: deps.system ? `${deps.system}\n\n${SUBAGENT_PROMPT}` : SUBAGENT_PROMPT,
+    system: deps.system
+      ? `${deps.system}\n\n${SUBAGENT_PROMPT}${args.read_only ? `\n\n${READ_ONLY_PROMPT}` : ""}`
+      : `${SUBAGENT_PROMPT}${args.read_only ? `\n\n${READ_ONLY_PROMPT}` : ""}`,
     providerMetadata: deps.providerMetadata,
     temperature: deps.temperature,
     streamIdleTimeoutSec: deps.streamIdleTimeoutSec,
     streamFirstChunkTimeoutSec: deps.streamFirstChunkTimeoutSec,
     vision: deps.vision,
     subagentDepth: deps.depth + 1,
+    readOnly: args.read_only,
     modelName: deps.modelName,
     // Read after the dynamic-import await: defaultAgentTasks.start() has
     // returned by then, so a background spawn's ref.id is already assigned.
@@ -229,8 +236,13 @@ async function runSubagent(
     report = `${report.slice(0, MAX_REPORT_CHARS)}\n... (truncated)`;
   }
 
-  const label = args.description ? ` "${args.description}"` : "";
-  const stats = `[subagent${label}: ${toolCalls} tool call(s)]`;
+  const tags = [
+    args.description ? `"${args.description}"` : null,
+    args.read_only ? "read-only" : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const stats = `[subagent${tags ? ` ${tags}` : ""}: ${toolCalls} tool call(s)]`;
   if (error) {
     throw new Error([`Subagent failed: ${error}`, stats, report].filter(Boolean).join("\n"));
   }
@@ -241,14 +253,24 @@ export function createSubagentTool(deps: SubagentDeps): Tool {
   return {
     name: "subagent",
     description:
-      "Spawn a subagent with its own agent loop to handle a focused subtask (research, exploration, or an isolated change). The subagent has the same tools but cannot spawn further subagents. Returns the subagent's final report. Prefer this for self-contained work that would otherwise clutter the main conversation. Set run_in_background to start it without blocking: independent subtasks then run concurrently and their reports are delivered to you automatically when they finish (also inspectable via task_list/task_output/task_kill).",
+      "Spawn a subagent with its own agent loop to handle a focused subtask (research, exploration, or an isolated change). The subagent has the same tools but cannot spawn further subagents, and it starts with zero context beyond what you write — brief it like a colleague who just walked in: state the goal, hand over what you already know (paths, identifiers, prior findings), and say exactly what the report should contain. Returns the subagent's final report. Prefer this for self-contained work that would otherwise clutter the main conversation. Set read_only for research, exploration, or review subtasks that must not modify anything. Set run_in_background to start it without blocking: independent subtasks then run concurrently and their reports are delivered to you automatically when they finish (also inspectable via task_list/task_output/task_kill).",
     permission: "exec",
     parameters: z.object({
-      prompt: z.string().describe("Complete, self-contained instructions for the subagent."),
+      prompt: z
+        .string()
+        .describe(
+          "Complete, self-contained instructions for the subagent: the goal, everything you already know that it needs, and the expected report.",
+        ),
       description: z
         .string()
         .optional()
         .describe("Short label for the subtask, shown in the result header."),
+      read_only: z
+        .boolean()
+        .optional()
+        .describe(
+          "Restrict the subagent to read-level tools — no file writes, no shell commands, no task kills (default false). Use for research, exploration, and review subtasks.",
+        ),
       run_in_background: z
         .boolean()
         .optional()
