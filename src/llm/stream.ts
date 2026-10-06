@@ -33,16 +33,18 @@ export interface StreamChatOptions {
   firstPartTimeoutMs?: number;
 }
 
-const DEFAULT_IDLE_TIMEOUT_MS = 20_000;
+const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
 const DEFAULT_FIRST_PART_TIMEOUT_MS = 120_000;
 
-// Parts that mark real generation. Control/metadata parts (response-metadata,
-// tool-call-streaming-start, reasoning-signature, source, file) only prove
-// the connection is alive — they must not demote the generous first-part
-// allowance to the short idle one, or a model that thinks in silence (kimi
-// thinking, buffered function-call arguments) dies as a spurious
-// idle-timeout and burns the whole retry budget on a deterministic stall.
-const GENERATION_PART_TYPES = new Set(["text-delta", "reasoning", "tool-call", "tool-call-delta"]);
+// Parts that mark visible reply content. Only these demote the generous
+// first-part allowance to the short idle one. Control/metadata parts
+// (response-metadata, tool-call-streaming-start, reasoning-signature, source,
+// file) and reasoning only prove the connection is alive: reasoning models
+// (kimi with high effort) pause mid-thinking with zero bytes for tens of
+// seconds, so demoting on a thinking delta kills the stream as a spurious
+// idle-timeout — and since the reasoning was never persisted, the retry
+// resends the identical request and hits the same deterministic stall.
+const CONTENT_PART_TYPES = new Set(["text-delta", "tool-call", "tool-call-delta"]);
 
 // Absolute cap on how long byte-level keepalives (SSE heartbeat comments the
 // SDK swallows) may extend a stream that produces no parts at all — without
@@ -145,8 +147,8 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
   const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
   const firstPartTimeoutMs = opts.firstPartTimeoutMs ?? DEFAULT_FIRST_PART_TIMEOUT_MS;
   const iterator = result.fullStream[Symbol.asyncIterator]();
-  // True once a GENERATION part arrived — controls which watchdog window
-  // applies. Control parts (response-metadata et al.) never set it.
+  // True once a CONTENT part arrived — controls which watchdog window
+  // applies. Control and reasoning parts never set it (see above).
   let seenContent = false;
   let deltas = 0;
   // Any visible reply content streamed (text or a completed tool call) —
@@ -154,8 +156,7 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
   // truncated. Reasoning deliberately does not count: it is display-only and
   // never persisted, so a reasoning-only cutoff loses nothing the user saw —
   // flagging it "truncated" would show a scary notice for what is really a
-  // silent-stall retry (kimi pauses mid-thinking with zero bytes for tens of
-  // seconds).
+  // silent-stall retry.
   let hasContent = false;
   // Accumulated tool-call argument sizes, for coarse progress events while a
   // large payload (write_file content) streams in.
@@ -242,7 +243,7 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
       }
       const part = next.value;
       lastPartAt = Date.now();
-      if (GENERATION_PART_TYPES.has(part.type)) seenContent = true;
+      if (CONTENT_PART_TYPES.has(part.type)) seenContent = true;
       switch (part.type) {
         case "text-delta":
           deltas++;

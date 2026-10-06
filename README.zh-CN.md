@@ -65,7 +65,7 @@ maxSteps = 100
 contextCompaction = "summary"     # summary | truncate —— 历史超出预算时的压缩方式
 streamMaxRetries = 5              # 单次模型请求在瞬时失败（网络错误、429/5xx、idle 截断、
                                   # 空回复）时的额外重试次数；0 表示禁用
-streamIdleTimeoutSec = 20         # 流没有任何输出的秒数，超过后将停滞的响应优雅结束
+streamIdleTimeoutSec = 60         # 流没有任何输出的秒数，超过后将停滞的响应优雅结束
                                   #（有些中转站从不关闭流）
 streamFirstChunkTimeoutSec = 300  # 等待第一个内容分片的秒数——慢速思考模型端点在接受请求后
                                   # 可能静默数分钟
@@ -172,7 +172,7 @@ model = "kimi-for-coding"
 temperature = 1        # 此处必须设置——该端点拒绝任何其他取值
 contextMaxTokens = 128000
 # 中转站长时间缓冲整段生成时可调大：
-# streamIdleTimeoutSec = 60        # 默认 20
+# streamIdleTimeoutSec = 120       # 默认 60
 # streamFirstChunkTimeoutSec = 600 # 默认 300
 ```
 

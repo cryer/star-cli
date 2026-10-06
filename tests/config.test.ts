@@ -56,7 +56,7 @@ describe("loadConfig", () => {
       models: [],
       maxSteps: 100,
       contextMaxTokens: 100_000,
-      streamIdleTimeoutSec: 20,
+      streamIdleTimeoutSec: 60,
       streamFirstChunkTimeoutSec: 300,
       streamMaxRetries: 5,
       maxAutoContinues: 2,

@@ -19,6 +19,8 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ### Fixed
 
+- **default stream idle timeout raised from 20s to 60s** (`streamIdleTimeoutSec`): the window only applies once visible content is streaming, but relays buffering large tool-call payloads or congested upstreams can still go byte-silent mid-reply for tens of seconds, and the first cutoff alone wastes a whole retry. Truly dead streams are still rescued by the watchdog (and truncated replies resume), just a little later
+- **reasoning models no longer die as spurious idle-timeouts mid-thinking**: the stream watchdog demoted from the generous first-chunk window (default 300s) to the short idle window on the first reasoning delta, so a model like kimi k3 with high reasoning effort — which pauses mid-thinking with zero bytes for tens of seconds — got cut, the reasoning-only cutoff counted as an empty reply, and the retry resent the identical request into the same deterministic stall until the turn died with "empty response after retries". Reasoning (like control/metadata parts) now keeps the first-chunk window; only visible content (text/tool-call deltas) demotes to the idle window
 - **token estimation switched from the chars/4 heuristic to a real BPE tokenizer** (`gpt-tokenizer`, pinned `cl100k_base`): the heuristic under-read punctuation-heavy code and JSON by 15-30%, so the status-bar ctx% and the auto-compaction threshold could trigger late and flirt with window overflow. Estimates are now near-exact for code, CJK, and mixed content; pasted `<|endoftext|>`-style strings count as ordinary text instead of throwing; per-message WeakMap caching keeps the per-step cost at zero for already-seen messages
 
 ## [0.3.9] - 2026-10-05

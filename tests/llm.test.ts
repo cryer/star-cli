@@ -486,7 +486,8 @@ describe("streamChat", () => {
   it("does not mark a reasoning-only cutoff as truncated", async () => {
     // Reasoning is display-only and never persisted, so a watchdog cut while
     // only thinking streamed loses nothing the user saw — the loop retries it
-    // as an empty stall without the "reply may be incomplete" notice.
+    // as an empty stall without the "reply may be incomplete" notice. The cut
+    // comes from the first-part window: reasoning never demotes it.
     const model = new MockLanguageModelV1({
       doStream: async () => ({
         stream: new ReadableStream({
@@ -503,13 +504,58 @@ describe("streamChat", () => {
       streamChat({
         model,
         messages: [{ role: "user", content: "hi" }],
-        idleTimeoutMs: 50,
+        idleTimeoutMs: 20,
+        firstPartTimeoutMs: 60,
       }),
     );
 
     expect(events).toEqual([
       { type: "reasoning", text: "thinking…" },
       { type: "finish", finishReason: "idle-timeout", usage: undefined },
+    ]);
+  });
+
+  it("keeps the first-part window while only reasoning has streamed", async () => {
+    // Reasoning models (kimi with high effort) pause mid-thinking with zero
+    // bytes for tens of seconds. Demoting to the short idle window on a
+    // thinking delta kills the stream as a spurious idle-timeout, and the
+    // retry resends the identical request into the same deterministic stall.
+    const model = new MockLanguageModelV1({
+      doStream: async () => ({
+        stream: new ReadableStream({
+          async start(controller) {
+            controller.enqueue({ type: "reasoning", textDelta: "thinking…" });
+            await new Promise((resolve) => setTimeout(resolve, 80));
+            controller.enqueue({ type: "text-delta", textDelta: "late" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "stop",
+              usage: { promptTokens: 1, completionTokens: 1 },
+            });
+            controller.close();
+          },
+        }),
+        rawCall: { rawPrompt: null, rawSettings: {} },
+      }),
+    });
+
+    const events = await collect(
+      streamChat({
+        model,
+        messages: [{ role: "user", content: "hi" }],
+        idleTimeoutMs: 30,
+        firstPartTimeoutMs: 500,
+      }),
+    );
+
+    expect(events).toEqual([
+      { type: "reasoning", text: "thinking…" },
+      { type: "text-delta", text: "late" },
+      {
+        type: "finish",
+        finishReason: "stop",
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      },
     ]);
   });
 

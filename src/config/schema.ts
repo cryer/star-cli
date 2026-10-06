@@ -116,8 +116,9 @@ export const ConfigSchema = z.object({
   // Seconds without any stream part before a stalled response is ended
   // gracefully (some relays never send the terminal chunks). Applies once
   // content has started streaming; the wait for the first content part gets
-  // a longer allowance (control/metadata parts don't count as content).
-  streamIdleTimeoutSec: z.number().positive().default(20),
+  // a longer allowance (control/metadata and reasoning parts don't count as
+  // content).
+  streamIdleTimeoutSec: z.number().positive().default(60),
   // Seconds to wait for the very first content part before giving up; slow
   // thinking-model endpoints can stay silent for minutes after accepting
   // the request.

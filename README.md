@@ -66,7 +66,7 @@ maxSteps = 100
 contextCompaction = "summary"     # summary | truncate — how over-budget history is compacted
 streamMaxRetries = 5              # extra attempts per model request on transient failures
                                   # (network error, 429/5xx, idle cutoff, empty reply); 0 disables
-streamIdleTimeoutSec = 20         # seconds with no stream output before a stalled response is
+streamIdleTimeoutSec = 60         # seconds with no stream output before a stalled response is
                                   # ended gracefully (some relays never close the stream)
 streamFirstChunkTimeoutSec = 300  # seconds to wait for the very first content part — slow
                                   # thinking-model endpoints can stay silent for minutes
@@ -177,7 +177,7 @@ model = "kimi-for-coding"
 temperature = 1        # mandatory here — the endpoint rejects any other value
 contextMaxTokens = 128000
 # raise these when the relay buffers long generations:
-# streamIdleTimeoutSec = 60        # default 20
+# streamIdleTimeoutSec = 120       # default 60
 # streamFirstChunkTimeoutSec = 600 # default 300
 ```
 
