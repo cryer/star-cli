@@ -10,6 +10,8 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-10-06
+
 ### Added
 
 - **`code_outline` tool**: prints a source file's or directory's declaration skeleton (functions, classes, methods, types with line numbers) without reading bodies — a lightweight zero-dependency regex extractor covering TS/JS, Python, Go, Rust, Java/Kotlin/C#, C/C++, Ruby, PHP, Shell, Swift, and Scala. Navigate unfamiliar code by outlining first, then reading exact line ranges, instead of billing whole files into the context. Honors `.starignore`, sensitive-path refusals, and symlink boundaries like the other fs tools; directory mode caps at 60 files / 30KB
