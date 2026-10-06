@@ -11,7 +11,15 @@ import type {
   PermissionRequest,
 } from "./types";
 
-const FILE_TOOLS = new Set(["write_file", "edit_file", "read_file", "read_image", "grep", "glob"]);
+const FILE_TOOLS = new Set([
+  "write_file",
+  "edit_file",
+  "read_file",
+  "read_image",
+  "grep",
+  "glob",
+  "code_outline",
+]);
 
 // The classic fork bomb is punctuation soup that defeats word-level analysis;
 // keep a literal regex for it.

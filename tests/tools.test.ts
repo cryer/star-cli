@@ -30,6 +30,7 @@ describe("registry", () => {
   it("registers all built-in tools", () => {
     expect(registry.names().sort()).toEqual([
       "bash",
+      "code_outline",
       "edit_file",
       "glob",
       "grep",

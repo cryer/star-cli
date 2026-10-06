@@ -2,6 +2,7 @@ import { bashTool } from "./bash";
 import { editFileTool } from "./fs/edit";
 import { globTool } from "./fs/glob";
 import { grepTool } from "./fs/grep";
+import { codeOutlineTool } from "./fs/outline";
 import { createReadFileTool } from "./fs/read";
 import { readImageTool } from "./fs/read-image";
 import { writeFileTool } from "./fs/write";
@@ -28,6 +29,7 @@ export class ToolRegistry {
       editFileTool,
       globTool,
       grepTool,
+      codeOutlineTool,
       bashTool,
       webFetchTool,
       webSearchTool,

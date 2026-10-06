@@ -10,6 +10,10 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ## [Unreleased]
 
+### Added
+
+- **`code_outline` tool**: prints a source file's or directory's declaration skeleton (functions, classes, methods, types with line numbers) without reading bodies — a lightweight zero-dependency regex extractor covering TS/JS, Python, Go, Rust, Java/Kotlin/C#, C/C++, Ruby, PHP, Shell, Swift, and Scala. Navigate unfamiliar code by outlining first, then reading exact line ranges, instead of billing whole files into the context. Honors `.starignore`, sensitive-path refusals, and symlink boundaries like the other fs tools; directory mode caps at 60 files / 30KB
+
 ### Fixed
 
 - **token estimation switched from the chars/4 heuristic to a real BPE tokenizer** (`gpt-tokenizer`, pinned `cl100k_base`): the heuristic under-read punctuation-heavy code and JSON by 15-30%, so the status-bar ctx% and the auto-compaction threshold could trigger late and flirt with window overflow. Estimates are now near-exact for code, CJK, and mixed content; pasted `<|endoftext|>`-style strings count as ordinary text instead of throwing; per-message WeakMap caching keeps the per-step cost at zero for already-seen messages
