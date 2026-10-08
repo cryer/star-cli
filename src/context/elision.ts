@@ -15,6 +15,13 @@ export const ELIDED_TOOL_RESULT_TEXT =
   "[stale tool output elided to free context — it was shown in full earlier; re-run the tool if you need it again]";
 export const ELIDED_IMAGE_TEXT =
   "[image elided to free context — re-attach it if it is still needed]";
+// Old tool calls keep their id and name (the tool-call ↔ tool-result
+// pairing is protocol-critical) but their arguments are dead weight once
+// the call has run — a write_file from 40 messages ago carries the whole
+// file body in its args, and unlike a tool result that bulk was never
+// elidable, so write-heavy sessions grew until the window overflowed.
+export const ELIDED_TOOL_CALL_ARGS_TEXT =
+  "arguments elided to free context — the call already ran; re-run the tool or re-read the file if you need them";
 
 export interface ElisionResult {
   messages: StarMessage[];
@@ -23,11 +30,13 @@ export interface ElisionResult {
 
 // Stale-content elision: whole-turn compaction throws away the conversation
 // narrative when the real dead weight is old bulk — a file read 40 messages
-// ago whose contents have been edited since, a screenshot attached long ago.
+// ago whose contents have been edited since, the file body a long-ago
+// write_file carried in its arguments, a screenshot attached long ago.
 // Those get replaced in place with a placeholder: message count and order
 // are unchanged, so /undo turn markers stay valid (unlike compaction), the
-// assistant's tool-call ↔ tool-result pairing survives protocol-valid, and
-// the history often shrinks enough that compaction never fires.
+// assistant's tool-call ↔ tool-result pairing survives protocol-valid (a
+// gutted tool call keeps its id and name), and the history often shrinks
+// enough that compaction never fires.
 //
 // Runs before the per-step compaction check; the caller persists the
 // rewrite exactly like compaction and resets volatile tool state (the
@@ -58,6 +67,21 @@ export function elideStaleContent(
             ...part,
             result: ELIDED_TOOL_RESULT_TEXT,
           })),
+        },
+        meta: { ...star.meta, elided: true },
+      };
+      elidedCount++;
+    } else if (message.role === "assistant" && Array.isArray(message.content)) {
+      if (!message.content.some((part) => part.type === "tool-call")) continue;
+      if (estimateMessageTokens(message) < MIN_ELISION_TOKENS) continue;
+      out[i] = {
+        message: {
+          ...message,
+          content: message.content.map((part) =>
+            part.type === "tool-call"
+              ? { ...part, args: { elided: ELIDED_TOOL_CALL_ARGS_TEXT } }
+              : part,
+          ),
         },
         meta: { ...star.meta, elided: true },
       };

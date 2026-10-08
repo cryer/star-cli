@@ -13,6 +13,7 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 ### Fixed
 
 - **status-bar ctx % no longer freezes for the whole turn**: the estimate only recomputed on turn boundaries, history rewrites and model switches, so a long multi-step turn (none of those fire mid-turn) displayed the turn-start value — e.g. a stuck `ctx: 2.6%` while the real context grew straight into the window limit. While a turn streams, the status bar now re-estimates on a light 2s interval (the per-message token cache keeps each pass a cheap sum)
+- **elision now covers old tool-call arguments, closing the last un-shrinkable bulk class**: stale-content elision replaced old tool results and old attached images, but a long-ago `write_file`/`edit_file` call keeps the entire file body in its arguments — in write-heavy sessions that was the dominant share of the history, so nothing fired before the provider's real window overflowed and the turn died without compacting. Tool-call args older than the newest 24 messages and ≥250 tokens are now replaced with a re-fetch placeholder; the call keeps its id and name so the tool-call ↔ tool-result pairing stays protocol-valid
 
 ## [0.3.10] - 2026-10-06
 

@@ -7,6 +7,7 @@ import { AgentLoop } from "../src/agent/loop";
 import type { StarConfig } from "../src/config/schema";
 import {
   ELIDED_IMAGE_TEXT,
+  ELIDED_TOOL_CALL_ARGS_TEXT,
   ELIDED_TOOL_RESULT_TEXT,
   elideStaleContent,
 } from "../src/context/elision";
@@ -114,6 +115,74 @@ describe("elideStaleContent", () => {
     const first = elideStaleContent(messages, 800);
     expect(first).not.toBeNull();
     expect(elideStaleContent(first?.messages ?? [], 800)).toBeNull();
+  });
+
+  const bigArgsCall = (id: string): CoreMessage => ({
+    role: "assistant",
+    content: [
+      {
+        type: "tool-call",
+        toolCallId: id,
+        toolName: "write_file",
+        args: { path: "a.ts", content: bigText },
+      },
+    ],
+  });
+
+  it("guts old tool-call arguments but keeps the call id and name", () => {
+    const messages = star([
+      system("sys"),
+      bigArgsCall("c1"),
+      toolResult("c1", "ok"),
+      ...Array.from({ length: 30 }, (_, i) => user(`u${i}`)),
+    ]);
+    const result = elideStaleContent(messages, 800);
+    expect(result).not.toBeNull();
+    expect(result?.elidedCount).toBe(1);
+    const elidedMsg = result?.messages[1]?.message;
+    expect(elidedMsg?.role).toBe("assistant");
+    if (elidedMsg?.role === "assistant" && Array.isArray(elidedMsg.content)) {
+      const part = elidedMsg.content[0];
+      expect(part?.type).toBe("tool-call");
+      if (part?.type === "tool-call") {
+        // Pairing survives: same id and name, only the args are replaced.
+        expect(part.toolCallId).toBe("c1");
+        expect(part.toolName).toBe("write_file");
+        expect(part.args).toEqual({ elided: ELIDED_TOOL_CALL_ARGS_TEXT });
+      }
+    }
+    expect(result?.messages[1]?.meta?.elided).toBe(true);
+    expect(result?.messages.length).toBe(messages.length);
+  });
+
+  it("keeps big tool-call arguments inside the recent-message frontier", () => {
+    const messages = star([
+      system("sys"),
+      ...Array.from({ length: 20 }, (_, i) => user(`u${i}`)),
+      bigArgsCall("c1"),
+      toolResult("c1", "ok"),
+      user("latest"),
+    ]);
+    expect(elideStaleContent(messages, 800)).toBeNull();
+  });
+
+  it("keeps small old tool-call arguments — gutting them saves nothing", () => {
+    const messages = star([
+      system("sys"),
+      toolCallAssistant("c1"),
+      toolResult("c1", bigText),
+      ...Array.from({ length: 30 }, (_, i) => user(`u${i}`)),
+    ]);
+    const result = elideStaleContent(messages, 800);
+    // Only the big tool result is elided; the tiny read_file call stays whole.
+    expect(result?.elidedCount).toBe(1);
+    const kept = result?.messages[1]?.message;
+    if (kept?.role === "assistant" && Array.isArray(kept.content)) {
+      const part = kept.content[0];
+      if (part?.type === "tool-call") {
+        expect(part.args).toEqual({ path: "a.ts" });
+      }
+    }
   });
 });
 
