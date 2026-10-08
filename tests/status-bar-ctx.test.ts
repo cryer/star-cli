@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
@@ -195,4 +195,95 @@ describe("StatusBar context percent", () => {
     );
     app.unmount();
   });
+
+  it(
+    "refreshes ctx % mid-turn while a long turn is still streaming",
+    { timeout: 30_000 },
+    async () => {
+      const config = makeConfig();
+      // 40k chars ≈ 10k estimated tokens ≈ 10%+ of the 100k window once the
+      // read_file result lands in the history mid-turn.
+      const bigPath = path.join(cwd, "big.txt");
+      writeFileSync(bigPath, "y".repeat(40_000));
+      let call = 0;
+      const model = new MockLanguageModelV1({
+        doStream: async () => {
+          call += 1;
+          if (call === 1) {
+            return {
+              stream: convertArrayToReadableStream([
+                {
+                  type: "tool-call",
+                  toolCallType: "function",
+                  toolCallId: "c1",
+                  toolName: "read_file",
+                  args: JSON.stringify({ path: bigPath }),
+                },
+                {
+                  type: "finish",
+                  finishReason: "tool-calls",
+                  usage: { promptTokens: 5, completionTokens: 3 },
+                },
+              ]),
+              rawCall: { rawPrompt: null, rawSettings: {} },
+            };
+          }
+          // The follow-up reply stays silent for seconds: without the
+          // mid-turn refresh the ctx % would sit at the turn-start value
+          // until this finishes and the turn boundary re-triggers the effect.
+          const stream = new ReadableStream({
+            start(controller) {
+              setTimeout(() => {
+                controller.enqueue({ type: "text-delta", textDelta: "done" });
+                controller.enqueue({
+                  type: "finish",
+                  finishReason: "stop",
+                  usage: { promptTokens: 5, completionTokens: 3 },
+                });
+                controller.close();
+              }, 8000);
+            },
+          });
+          return { stream, rawCall: { rawPrompt: null, rawSettings: {} } };
+        },
+      });
+      const backend = new AgentLoop({
+        model: model as never,
+        registry: createDefaultRegistry(),
+        config,
+        cwd,
+      });
+      const app = renderApp(
+        createElement(Repl, {
+          backend,
+          model: "test",
+          permissionMode: "auto",
+          config,
+          cwd,
+          sessionStore: null,
+        }),
+      );
+      await tick();
+      await typeText(app.stdin, "hi", "\r");
+      // The 2s streaming interval must pick up the read_file bulk long before
+      // the turn ends (the delayed reply lands ~8s in).
+      await vi.waitFor(
+        () => {
+          const frame = stripAnsi(app.lastFrame() ?? "");
+          expect(frame).not.toContain("done");
+          const match = frame.match(/ctx: ([\d.]+)%/);
+          expect(match, `frame should show ctx %, got: ${frame.slice(-300)}`).not.toBeNull();
+          expect(Number(match?.[1])).toBeGreaterThanOrEqual(8);
+        },
+        { timeout: 6000 },
+      );
+      await vi.waitFor(
+        () => {
+          expect(stripAnsi(app.lastFrame() ?? "")).toContain("done");
+        },
+        { timeout: 15_000 },
+      );
+      app.unmount();
+    },
+  );
 });

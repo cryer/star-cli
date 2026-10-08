@@ -10,6 +10,10 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ## [Unreleased]
 
+### Fixed
+
+- **status-bar ctx % no longer freezes for the whole turn**: the estimate only recomputed on turn boundaries, history rewrites and model switches, so a long multi-step turn (none of those fire mid-turn) displayed the turn-start value — e.g. a stuck `ctx: 2.6%` while the real context grew straight into the window limit. While a turn streams, the status bar now re-estimates on a light 2s interval (the per-message token cache keeps each pass a cheap sum)
+
 ## [0.3.10] - 2026-10-06
 
 ### Added

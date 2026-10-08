@@ -1856,20 +1856,29 @@ export function Repl({
   // history) refresh on turn boundaries, history rewrites and model switches,
   // not per tick. The git probe goes through the 15s TTL cache: the uncached
   // summary runs several synchronous git processes that would block the
-  // event loop on every refresh.
+  // event loop on every refresh. A long multi-step turn changes none of the
+  // effect's deps while the history keeps growing, so while streaming a slow
+  // interval re-estimates — the per-message token cache makes each pass a
+  // cheap sum over WeakMap hits.
   // biome-ignore lint/correctness/useExhaustiveDependencies: isStreaming, epoch and modelName are deliberate refresh triggers, not values read inside
   useEffect(() => {
-    setGitBranch(getGitSummaryCached(cwd)?.branch ?? null);
-    const current = backendRef.current;
-    if (current instanceof AgentLoop) {
-      const window_ = contextWindowTokens(config, modelNameRef.current);
-      const pct =
-        ((estimateTokens(current.getMessages()) + current.getToolSchemaTokens()) / window_) * 100;
-      // One decimal below 10% so small-but-real usage doesn't display as 0%.
-      setContextPercent(pct < 10 ? Math.round(pct * 10) / 10 : Math.round(pct));
-    } else {
-      setContextPercent(null);
-    }
+    const refresh = () => {
+      setGitBranch(getGitSummaryCached(cwd)?.branch ?? null);
+      const current = backendRef.current;
+      if (current instanceof AgentLoop) {
+        const window_ = contextWindowTokens(config, modelNameRef.current);
+        const pct =
+          ((estimateTokens(current.getMessages()) + current.getToolSchemaTokens()) / window_) * 100;
+        // One decimal below 10% so small-but-real usage doesn't display as 0%.
+        setContextPercent(pct < 10 ? Math.round(pct * 10) / 10 : Math.round(pct));
+      } else {
+        setContextPercent(null);
+      }
+    };
+    refresh();
+    if (!isStreaming) return;
+    const timer = setInterval(refresh, 2000);
+    return () => clearInterval(timer);
   }, [cwd, config, isStreaming, epoch, modelName]);
 
   const sessionCost = sessionCostUsd();
