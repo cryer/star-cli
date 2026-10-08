@@ -1,4 +1,4 @@
-import { type LanguageModel, type ToolSet, streamText } from "ai";
+import { InvalidToolArgumentsError, type LanguageModel, type ToolSet, streamText } from "ai";
 import { type StreamEvent, type TokenUsage, toStreamErrorInfo } from "../core/events";
 import type { CoreMessage } from "../core/messages";
 import { streamActivity } from "./activity";
@@ -161,6 +161,9 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
   // Accumulated tool-call argument sizes, for coarse progress events while a
   // large payload (write_file content) streams in.
   const argsProgress = new Map<string, { name: string; chars: number; nextMark: number }>();
+  // Fallback id source for recovered invalid-args calls whose
+  // tool-call-streaming-start never arrived (non-streaming providers).
+  let invalidArgsCounter = 0;
   // Last time ANY part arrived; the keepalive extension is bounded against
   // this, not against the last byte (bytes without parts can flow forever).
   let lastPartAt = Date.now();
@@ -312,6 +315,44 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
         case "error": {
           // A user-initiated abort surfacing as a stream error is not a failure.
           if (opts.abortSignal?.aborted) return;
+          // A tool call whose arguments fail schema validation is a model
+          // mistake, not a transport failure: weak models sometimes emit
+          // malformed calls (e.g. imitating elided-argument placeholders in
+          // the history). Recover it as a regular tool-call event flagged
+          // invalidArgs — the loop persists the call and answers it with
+          // the validation error so the model corrects itself next step —
+          // instead of letting one bad call kill the whole turn. The rest
+          // of the reply is abandoned (the SDK already flagged it failed),
+          // which is safe: the model re-issues anything still needed.
+          if (InvalidToolArgumentsError.isInstance(part.error)) {
+            const invalid = part.error;
+            let args: unknown = invalid.toolArgs;
+            try {
+              args = JSON.parse(invalid.toolArgs);
+            } catch {
+              // Unparseable JSON still persists — history args are opaque.
+            }
+            const started = [...argsProgress.entries()]
+              .reverse()
+              .find(([, progress]) => progress.name === invalid.toolName);
+            debugStreamLog("invalid-tool-args", {
+              toolName: invalid.toolName,
+              recoveredId: started?.[0] ?? null,
+            });
+            yield {
+              type: "tool-call",
+              id: started?.[0] ?? `invalid-args-${++invalidArgsCounter}`,
+              name: invalid.toolName,
+              args,
+              // The zod detail tells the model exactly which field to fix;
+              // capped because the message embeds the full rejected value.
+              invalidArgs:
+                invalid.message.length > 2000
+                  ? `${invalid.message.slice(0, 2000)}…`
+                  : invalid.message,
+            };
+            return;
+          }
           // Flatten to serializable info here — the single Error→info
           // conversion point — so the event can cross JSONL logs and process
           // boundaries without losing the properties retry classifies on.

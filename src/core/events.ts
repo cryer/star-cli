@@ -78,7 +78,13 @@ export function toStreamErrorInfo(error: unknown): StreamErrorInfo {
 export type StreamEvent =
   | { type: "text-delta"; text: string }
   | { type: "reasoning"; text: string }
-  | { type: "tool-call"; id: string; name: string; args: unknown }
+  // `invalidArgs` marks a call whose streamed arguments failed the tool's
+  // schema validation (weak models sometimes imitate elided-argument
+  // placeholders in the history): the stream recovered it instead of dying
+  // on a terminal error. The loop must NOT execute such a call — it
+  // persists it and answers with the validation error so the model can
+  // correct itself on the next step.
+  | { type: "tool-call"; id: string; name: string; args: unknown; invalidArgs?: string }
   | { type: "tool-result"; id: string; name: string; content: string; isError?: boolean }
   // Coarse progress while a tool call's JSON arguments stream in (emitted at
   // 4KB boundaries): large write_file payloads can stream for a while, and a

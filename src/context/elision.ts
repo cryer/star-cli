@@ -19,9 +19,12 @@ export const ELIDED_IMAGE_TEXT =
 // pairing is protocol-critical) but their arguments are dead weight once
 // the call has run — a write_file from 40 messages ago carries the whole
 // file body in its args, and unlike a tool result that bulk was never
-// elidable, so write-heavy sessions grew until the window overflowed.
+// elidable, so write-heavy sessions grew until the window overflowed. The
+// placeholder deliberately is NOT valid tool input (a schema-invalid whole
+// -args object): a model imitating it produces a call that fails validation
+// and gets the error fed back, never an execution.
 export const ELIDED_TOOL_CALL_ARGS_TEXT =
-  "arguments elided to free context — the call already ran; re-run the tool or re-read the file if you need them";
+  "arguments elided to free context — the call already ran; this placeholder is not valid tool input, re-read the file if you need the old content";
 
 export interface ElisionResult {
   messages: StarMessage[];

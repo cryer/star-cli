@@ -303,6 +303,84 @@ describe("AgentLoop", () => {
     expect(toolMessage).toBeDefined();
   });
 
+  it("recovers a schema-invalid tool call as a self-correcting tool error", async () => {
+    let round = 0;
+    const model = new MockLanguageModelV1({
+      doStream: async () => {
+        round += 1;
+        if (round === 1) {
+          return {
+            // Production shape (openai-compatible provider): argument deltas
+            // stream first, then the assembled full tool-call part — here
+            // with args that fail the tool schema (a model imitating an
+            // elided-arguments placeholder from the history). The SDK
+            // validates the assembled call and flags an
+            // InvalidToolArgumentsError as a stream error part.
+            stream: convertArrayToReadableStream([
+              {
+                type: "tool-call-delta",
+                toolCallType: "function",
+                toolCallId: "bad-1",
+                toolName: "bash",
+                argsTextDelta: '{"elided":"placeholder"}',
+              },
+              {
+                type: "tool-call",
+                toolCallType: "function",
+                toolCallId: "bad-1",
+                toolName: "bash",
+                args: '{"elided":"placeholder"}',
+              },
+              {
+                type: "finish",
+                finishReason: "tool-calls",
+                usage: { promptTokens: 5, completionTokens: 3 },
+              },
+            ] as never),
+            rawCall: { rawPrompt: null, rawSettings: {} },
+          };
+        }
+        return {
+          stream: convertArrayToReadableStream(textRound("recovered")),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const loop = makeLoop(model);
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    // The turn survived: no terminal error, and the model got a second
+    // request in which it corrected itself.
+    expect(events.some((e) => e.type === "error")).toBe(false);
+    expect(round).toBe(2);
+
+    const messages = loop.getMessages();
+    // The malformed call is persisted with its raw args and its real id
+    // (recovered from the argument deltas), keeping the tool-call ↔
+    // tool-result pairing protocol-valid…
+    const assistantMsg = messages.find(
+      (m) =>
+        m.role === "assistant" &&
+        Array.isArray(m.content) &&
+        m.content.some((p) => p.type === "tool-call" && p.toolCallId === "bad-1"),
+    );
+    expect(assistantMsg).toBeDefined();
+    // …and answered by an error result carrying the validation detail —
+    // bash never executed (executing {elided:…} would have thrown).
+    const toolMsg = messages.find((m) => m.role === "tool" && m.content[0]?.toolCallId === "bad-1");
+    expect(toolMsg).toBeDefined();
+    if (toolMsg?.role === "tool") {
+      expect(String(toolMsg.content[0]?.result)).toContain("not executed");
+      expect(String(toolMsg.content[0]?.result)).toContain("command");
+    }
+    const text = events
+      .filter((e) => e.type === "text-delta")
+      .map((e) => (e.type === "text-delta" ? e.text : ""))
+      .join("");
+    expect(text).toBe("recovered");
+  });
+
   it("denies write tools in readonly mode", async () => {
     const loop = makeLoop(
       mockModel([

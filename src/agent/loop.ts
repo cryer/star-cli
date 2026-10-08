@@ -114,6 +114,11 @@ interface PendingToolCall {
   id: string;
   name: string;
   args: unknown;
+  // Set when the streamed arguments failed the tool's schema validation
+  // (recovered by streamChat instead of killing the turn): the call is
+  // persisted but never executed — its result is the validation error, so
+  // the model sees exactly what to fix on the next step.
+  invalidArgs?: string;
 }
 
 // Matches announcements of pending work ("我会保留…", "接下来我将…",
@@ -1020,7 +1025,12 @@ export class AgentLoop {
               sawReasoning = true;
               yield event;
             } else if (event.type === "tool-call") {
-              toolCalls.push({ id: event.id, name: event.name, args: event.args });
+              toolCalls.push({
+                id: event.id,
+                name: event.name,
+                args: event.args,
+                ...(event.invalidArgs !== undefined ? { invalidArgs: event.invalidArgs } : {}),
+              });
               yield event;
             } else if (event.type === "finish") {
               lastFinishReason = event.finishReason;
@@ -1308,11 +1318,17 @@ export class AgentLoop {
       try {
         for (const call of toolCalls) {
           if (signal.aborted) break;
-          // Doom-loop guard: the same tool called with identical arguments
-          // over and over is a model stuck retrying, so past the threshold
-          // the repeat is refused without executing. The refusal is persisted
-          // as the call's result like any other, keeping history replayable.
-          const refusal = this.doomLoopRefusal(call);
+          // A call whose arguments failed schema validation is never
+          // executed (the tool would throw or worse) — it gets the
+          // validation error as its result, like a doom-loop refusal, so
+          // the history stays replayable and the model can self-correct.
+          // Doom-loop tracking is skipped: the refusal reason here is
+          // already specific, and the identical repeat would trip the guard
+          // only after burning steps on validation errors.
+          const refusal =
+            call.invalidArgs !== undefined
+              ? `Tool call not executed — the arguments failed validation: ${call.invalidArgs}\nReissue ${call.name} with valid arguments.`
+              : this.doomLoopRefusal(call);
           if (refusal !== null) {
             yield { type: "notice", message: refusal };
           } else {
