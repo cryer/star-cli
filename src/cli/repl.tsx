@@ -197,7 +197,9 @@ interface PendingConnect {
   resolve: (message: string) => void;
 }
 
-const SESSION_PICKER_CAP = 20;
+// The resume picker windows its display, so a generous cap stays cheap: one
+// 4KB head-read per listed session for the preview line.
+const SESSION_PICKER_CAP = 100;
 
 // First-user-message previews are trimmed to a single ~60-char line in the
 // resume picker description.

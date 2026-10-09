@@ -1,6 +1,11 @@
 import { Box, Text, useStdout } from "ink";
 import { memo, useEffect, useRef, useState } from "react";
-import { type SlashCommandHint, filterArgHints, filterCommands } from "../commands/suggest";
+import {
+  MAX_SUGGESTIONS,
+  type SlashCommandHint,
+  filterArgHints,
+  filterCommands,
+} from "../commands/suggest";
 import { type PathSuggestion, extractAtToken, suggestPaths } from "../path-suggest";
 import { useInput } from "../use-input";
 
@@ -383,7 +388,9 @@ export const InputBox = memo(function InputBox({
     if (suggestions.length > 0) {
       const cmd = suggestions[activeIndex];
       if (!cmd) return;
-      const text = `/${cmd.name} `;
+      // No trailing space: a space would immediately pop the command's
+      // argument hints, and running the bare command would need a delete.
+      const text = `/${cmd.name}`;
       edit(text, text.length);
       return;
     }
@@ -530,7 +537,13 @@ export const InputBox = memo(function InputBox({
         );
         return;
       }
-      const text = expandPastes(currentValue).trim();
+      let text = expandPastes(currentValue).trim();
+      // A "/" prefix that only narrows the menu (never Tab-completed) runs
+      // the highlighted match instead of dying as an unknown command.
+      if (suggestions.length > 0 && text.startsWith("/") && text.length > 1) {
+        const cmd = suggestions[activeIndex];
+        if (cmd) text = `/${cmd.name}`;
+      }
       if (text.length > 0) {
         // Slash commands are ephemeral; keep them out of the history.
         if (!text.startsWith("/")) setHistory((prev) => [...prev, text]);
@@ -682,6 +695,14 @@ export const InputBox = memo(function InputBox({
       }`
     : `\u001B[36m❯ \u001B[39m${stylePasteTokens(before)}\u001B[7m${cursorChar}\u001B[27m${tail}`;
 
+  // The menu shows a window around the highlight: filtering returns every
+  // match and the arrows scroll the full list through this window.
+  const menuStart = Math.min(
+    Math.max(0, activeIndex - Math.floor(MAX_SUGGESTIONS / 2)),
+    Math.max(0, suggestionCount - MAX_SUGGESTIONS),
+  );
+  const menuEnd = Math.min(suggestionCount, menuStart + MAX_SUGGESTIONS);
+
   return (
     <Box flexDirection="column">
       <Box borderStyle="round" borderColor="gray" paddingX={1}>
@@ -689,9 +710,10 @@ export const InputBox = memo(function InputBox({
       </Box>
       {suggestions.length > 0 && (
         <Box flexDirection="column" paddingLeft={2}>
-          {suggestions.map((cmd, index) => {
+          {menuStart > 0 && <Text dimColor>… {menuStart} more above</Text>}
+          {suggestions.slice(menuStart, menuEnd).map((cmd, index) => {
             const label = cmd.usage ?? `/${cmd.name}`;
-            return index === activeIndex ? (
+            return menuStart + index === activeIndex ? (
               <Text key={cmd.name} bold inverse>{`${label} - ${cmd.description}`}</Text>
             ) : (
               <Text key={cmd.name}>
@@ -700,12 +722,16 @@ export const InputBox = memo(function InputBox({
               </Text>
             );
           })}
+          {menuEnd < suggestions.length && (
+            <Text dimColor>… {suggestions.length - menuEnd} more below</Text>
+          )}
         </Box>
       )}
       {argHints.length > 0 && (
         <Box flexDirection="column" paddingLeft={2}>
-          {argHints.map((hint, index) =>
-            index === activeIndex ? (
+          {menuStart > 0 && <Text dimColor>… {menuStart} more above</Text>}
+          {argHints.slice(menuStart, menuEnd).map((hint, index) =>
+            menuStart + index === activeIndex ? (
               <Text key={hint.value} bold inverse>
                 {hint.value}
               </Text>
@@ -714,6 +740,9 @@ export const InputBox = memo(function InputBox({
                 {hint.value}
               </Text>
             ),
+          )}
+          {menuEnd < argHints.length && (
+            <Text dimColor>… {argHints.length - menuEnd} more below</Text>
           )}
         </Box>
       )}

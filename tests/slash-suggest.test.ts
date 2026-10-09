@@ -59,7 +59,7 @@ function setup() {
 describe("filterCommands", () => {
   it('returns all commands sorted for "/"', () => {
     const result = filterCommands("/", COMMANDS);
-    expect(result.map((c) => c.name)).toEqual(["clear", "cost", "exit", "export", "help"]);
+    expect(result.map((c) => c.name)).toEqual(["clear", "cost", "exit", "export", "help", "model"]);
   });
 
   it("filters by case-insensitive prefix", () => {
@@ -80,12 +80,12 @@ describe("filterCommands", () => {
     expect(filterCommands("/zzz", COMMANDS)).toEqual([]);
   });
 
-  it("truncates to MAX_SUGGESTIONS", () => {
+  it("returns every match — the menu windows the display instead of truncating", () => {
     const many = Array.from({ length: MAX_SUGGESTIONS + 3 }, (_, i) => ({
       name: `cmd${i}`,
       description: `desc ${i}`,
     }));
-    expect(filterCommands("/", many)).toHaveLength(MAX_SUGGESTIONS);
+    expect(filterCommands("/", many)).toHaveLength(MAX_SUGGESTIONS + 3);
   });
 
   it("appends fuzzy subsequence matches after prefix matches", () => {
@@ -113,11 +113,11 @@ describe("filterCommands", () => {
     expect(filterCommands("/he", commands).map((c) => c.name)).toEqual(["help", "hare"]);
   });
 
-  it("keeps the cap across prefix and fuzzy matches combined", () => {
+  it("keeps every prefix and fuzzy match, prefix matches first", () => {
     const many = Array.from({ length: 4 }, (_, i) => ({ name: `test${i}`, description: "" }));
     many.push({ name: "tangent", description: "" }, { name: "texture", description: "" });
     const result = filterCommands("/te", many);
-    expect(result).toHaveLength(MAX_SUGGESTIONS);
+    expect(result).toHaveLength(6);
     expect(result.slice(0, 4).map((c) => c.name)).toEqual(["test0", "test1", "test2", "test3"]);
   });
 
@@ -154,11 +154,11 @@ describe("filterArgHints", () => {
     ]);
   });
 
-  it("builds the replacement by swapping the trailing token and adding a space", () => {
-    expect(filterArgHints("/permission a", ARG_COMMANDS)[0]?.replacement).toBe("/permission ask ");
-    expect(filterArgHints("/permission ", ARG_COMMANDS)[0]?.replacement).toBe("/permission ask ");
+  it("builds the replacement by swapping the trailing token, without a trailing space", () => {
+    expect(filterArgHints("/permission a", ARG_COMMANDS)[0]?.replacement).toBe("/permission ask");
+    expect(filterArgHints("/permission ", ARG_COMMANDS)[0]?.replacement).toBe("/permission ask");
     expect(filterArgHints("/model gpt-4o k", ARG_COMMANDS)[0]?.replacement).toBe(
-      "/model gpt-4o kimi-k2 ",
+      "/model gpt-4o kimi-k2",
     );
   });
 
@@ -173,7 +173,7 @@ describe("filterArgHints", () => {
     expect(filterArgHints("", ARG_COMMANDS)).toEqual([]);
   });
 
-  it("caps the candidates at MAX_SUGGESTIONS", () => {
+  it("returns every candidate — the menu windows the display instead of truncating", () => {
     const commands = [
       {
         name: "model",
@@ -181,7 +181,7 @@ describe("filterArgHints", () => {
         argHints: Array.from({ length: MAX_SUGGESTIONS + 3 }, (_, i) => `m${i}`),
       },
     ];
-    expect(filterArgHints("/model ", commands)).toHaveLength(MAX_SUGGESTIONS);
+    expect(filterArgHints("/model ", commands)).toHaveLength(MAX_SUGGESTIONS + 3);
   });
 });
 
@@ -197,13 +197,19 @@ describe("didYouMeanSuffix", () => {
 });
 
 describe("InputBox slash suggestions", () => {
-  it('shows all candidates after typing "/"', async () => {
+  it('windows the candidates after typing "/" and scrolls to reveal the rest', async () => {
     const { app } = setup();
     await typeText(app.stdin, "/");
-    const frame = stripAnsi(app.lastFrame() ?? "");
+    let frame = stripAnsi(app.lastFrame() ?? "");
     expect(frame).toContain("/exit - Exit the application");
     expect(frame).toContain("/help - List available commands");
     expect(frame).not.toContain("/model");
+    expect(frame).toContain("more below");
+    // Scrolling past the window's end shifts it: /model becomes visible.
+    await typeText(app.stdin, DOWN, DOWN, DOWN, DOWN, DOWN);
+    frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("/model - List available models or switch the current model");
+    expect(frame).toContain("more above");
     app.unmount();
   });
 
@@ -249,8 +255,10 @@ describe("InputBox slash suggestions", () => {
 
   it("does not complete on right arrow when the cursor is not at the end", async () => {
     const { app, onSubmit } = setup();
-    await typeText(app.stdin, "/ex", LEFT, RIGHT, ENTER);
-    expect(onSubmit).toHaveBeenCalledWith("/ex");
+    // Mid-text right arrow just moves the cursor: typing after it lands in
+    // place ("/exit"), where a completion would have produced "/exitt".
+    await typeText(app.stdin, "/exi", LEFT, RIGHT, "t", ENTER);
+    expect(onSubmit).toHaveBeenCalledWith("/exit");
     app.unmount();
   });
 
@@ -280,7 +288,7 @@ describe("InputBox slash suggestions", () => {
     const { app, onSubmit } = setup();
     await typeText(app.stdin, "first", ENTER);
     await typeText(app.stdin, "/ex", UP, DOWN, ENTER);
-    expect(onSubmit).toHaveBeenNthCalledWith(2, "/ex");
+    expect(onSubmit).toHaveBeenNthCalledWith(2, "/exit");
     app.unmount();
   });
 
@@ -311,10 +319,26 @@ describe("InputBox slash suggestions", () => {
     app.unmount();
   });
 
-  it("submits the typed text on enter without picking a candidate", async () => {
+  it("runs the highlighted match on enter without tab completion", async () => {
     const { app, onSubmit } = setup();
     await typeText(app.stdin, "/ex", ENTER);
-    expect(onSubmit).toHaveBeenCalledWith("/ex");
+    expect(onSubmit).toHaveBeenCalledWith("/exit");
+    app.unmount();
+  });
+
+  it("submits the raw text on enter when the menu was dismissed or nothing matches", async () => {
+    const { app, onSubmit } = setup();
+    await typeText(app.stdin, "/ex", ESCAPE, ENTER);
+    expect(onSubmit).toHaveBeenNthCalledWith(1, "/ex");
+    await typeText(app.stdin, "/zzz", ENTER);
+    expect(onSubmit).toHaveBeenNthCalledWith(2, "/zzz");
+    app.unmount();
+  });
+
+  it("does not pick a candidate for a bare slash", async () => {
+    const { app, onSubmit } = setup();
+    await typeText(app.stdin, "/", ENTER);
+    expect(onSubmit).toHaveBeenCalledWith("/");
     app.unmount();
   });
 });
@@ -377,10 +401,18 @@ describe("InputBox slash argument suggestions", () => {
     app.unmount();
   });
 
-  it("keeps completing after a command-name tab completion", async () => {
+  it("command-name tab completion adds no space; typing one resumes argument hints", async () => {
     const { app, onSubmit } = setupArgs();
     await typeText(app.stdin, "/perm", TAB);
-    expect(stripAnsi(app.lastFrame() ?? "")).toContain("/permission ");
+    // No trailing space: the bare command is submittable as-is and the
+    // argument hints (which include "plan", absent from the usage string)
+    // do not fire yet.
+    let frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("/permission [ask|auto|readonly|yolo]");
+    expect(frame).not.toContain("plan");
+    await typeText(app.stdin, " ");
+    frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("plan");
     await typeText(app.stdin, TAB, ENTER);
     expect(onSubmit).toHaveBeenCalledWith("/permission ask");
     app.unmount();

@@ -10,6 +10,9 @@ export interface SlashCommandHint {
   argHints?: ArgHintSource;
 }
 
+// Visible window size for the suggestion menu in InputBox and the path-
+// suggestion cap — NOT a cap on reachable candidates: filtering returns every
+// match and the menu windows around the highlight so arrows scroll them all.
 export const MAX_SUGGESTIONS = 5;
 
 function isSubsequence(query: string, target: string): boolean {
@@ -33,7 +36,7 @@ export function filterCommands(input: string, commands: SlashCommandHint[]): Sla
         !cmd.name.toLowerCase().startsWith(prefix) && isSubsequence(prefix, cmd.name.toLowerCase()),
     )
     .sort(byName);
-  return [...prefixed, ...fuzzy].slice(0, MAX_SUGGESTIONS);
+  return [...prefixed, ...fuzzy];
 }
 
 // Up to 3 prefix-matched command names as a "Did you mean" hint, or "".
@@ -46,8 +49,9 @@ export function didYouMeanSuffix(names: string[]): string {
 export interface ArgHint {
   // The argument value being offered.
   value: string;
-  // The full input text once this hint is accepted (current token replaced,
-  // trailing space appended so the next token can be typed or submitted).
+  // The full input text once this hint is accepted (current token replaced;
+  // no trailing space, so accepting a hint never pops the next token's hints
+  // over a user who just wants to submit).
   replacement: string;
 }
 
@@ -71,6 +75,5 @@ export function filterArgHints(input: string, commands: SlashCommandHint[]): Arg
   const stem = input.slice(0, input.length - argPrefix.length);
   return candidates
     .filter((candidate) => candidate.toLowerCase().startsWith(prefix))
-    .slice(0, MAX_SUGGESTIONS)
-    .map((value) => ({ value, replacement: `${stem}${value} ` }));
+    .map((value) => ({ value, replacement: `${stem}${value}` }));
 }
