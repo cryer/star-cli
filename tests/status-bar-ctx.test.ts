@@ -230,7 +230,10 @@ describe("StatusBar context percent", () => {
           }
           // The follow-up reply stays silent for seconds: without the
           // mid-turn refresh the ctx % would sit at the turn-start value
-          // until this finishes and the turn boundary re-triggers the effect.
+          // until this finishes and the turn boundary re-triggers the
+          // effect. The delay must clear the mid-turn waitFor window below
+          // with margin — loaded CI runners (windows + Node 20) burn several
+          // seconds before the first 2s interval tick lands.
           const stream = new ReadableStream({
             start(controller) {
               setTimeout(() => {
@@ -241,7 +244,7 @@ describe("StatusBar context percent", () => {
                   usage: { promptTokens: 5, completionTokens: 3 },
                 });
                 controller.close();
-              }, 8000);
+              }, 14000);
             },
           });
           return { stream, rawCall: { rawPrompt: null, rawSettings: {} } };
@@ -266,7 +269,7 @@ describe("StatusBar context percent", () => {
       await tick();
       await typeText(app.stdin, "hi", "\r");
       // The 2s streaming interval must pick up the read_file bulk long before
-      // the turn ends (the delayed reply lands ~8s in).
+      // the turn ends (the delayed reply lands ~14s in).
       await vi.waitFor(
         () => {
           const frame = stripAnsi(app.lastFrame() ?? "");
@@ -275,13 +278,13 @@ describe("StatusBar context percent", () => {
           expect(match, `frame should show ctx %, got: ${frame.slice(-300)}`).not.toBeNull();
           expect(Number(match?.[1])).toBeGreaterThanOrEqual(8);
         },
-        { timeout: 6000 },
+        { timeout: 11000 },
       );
       await vi.waitFor(
         () => {
           expect(stripAnsi(app.lastFrame() ?? "")).toContain("done");
         },
-        { timeout: 15_000 },
+        { timeout: 20_000 },
       );
       app.unmount();
     },
