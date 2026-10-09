@@ -381,6 +381,75 @@ describe("AgentLoop", () => {
     expect(text).toBe("recovered");
   });
 
+  it("recovers a tool call truncated mid-arguments instead of ending the turn", async () => {
+    let round = 0;
+    const model = new MockLanguageModelV1({
+      doStream: async () => {
+        round += 1;
+        if (round === 1) {
+          return {
+            // Production shape when a reply hits the output/context limit
+            // mid-arguments: argument deltas stream, then a "length" finish —
+            // the JSON never completed, so the SDK emits NO tool-call part
+            // and the call would vanish silently, leaving an apparently
+            // empty reply that ends the turn after a futile identical resend.
+            stream: convertArrayToReadableStream([
+              {
+                type: "tool-call-delta",
+                toolCallType: "function",
+                toolCallId: "trunc-1",
+                toolName: "write_file",
+                argsTextDelta: '{"path":"big.txt","content":"aaaa',
+              },
+              {
+                type: "finish",
+                finishReason: "length",
+                usage: { promptTokens: 100, completionTokens: 50 },
+              },
+            ] as never),
+            rawCall: { rawPrompt: null, rawSettings: {} },
+          };
+        }
+        return {
+          stream: convertArrayToReadableStream(textRound("retried smaller")),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const loop = makeLoop(model);
+
+    const events = await collect(loop.stream("hi", new AbortController().signal));
+
+    // The turn survived: the dropped call surfaced as a recoverable tool
+    // error and the model got a second request.
+    expect(events.some((e) => e.type === "error")).toBe(false);
+    expect(round).toBe(2);
+
+    const messages = loop.getMessages();
+    const assistantMsg = messages.find(
+      (m) =>
+        m.role === "assistant" &&
+        Array.isArray(m.content) &&
+        m.content.some((p) => p.type === "tool-call" && p.toolCallId === "trunc-1"),
+    );
+    expect(assistantMsg).toBeDefined();
+    // write_file never executed — the result explains the truncation and
+    // tells the model to reissue with complete arguments.
+    const toolMsg = messages.find(
+      (m) => m.role === "tool" && m.content[0]?.toolCallId === "trunc-1",
+    );
+    expect(toolMsg).toBeDefined();
+    if (toolMsg?.role === "tool") {
+      expect(String(toolMsg.content[0]?.result)).toContain("not executed");
+      expect(String(toolMsg.content[0]?.result)).toContain("cut off");
+    }
+    const text = events
+      .filter((e) => e.type === "text-delta")
+      .map((e) => (e.type === "text-delta" ? e.text : ""))
+      .join("");
+    expect(text).toBe("retried smaller");
+  });
+
   it("denies write tools in readonly mode", async () => {
     const loop = makeLoop(
       mockModel([

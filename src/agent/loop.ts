@@ -1318,16 +1318,16 @@ export class AgentLoop {
       try {
         for (const call of toolCalls) {
           if (signal.aborted) break;
-          // A call whose arguments failed schema validation is never
-          // executed (the tool would throw or worse) — it gets the
-          // validation error as its result, like a doom-loop refusal, so
-          // the history stays replayable and the model can self-correct.
-          // Doom-loop tracking is skipped: the refusal reason here is
-          // already specific, and the identical repeat would trip the guard
-          // only after burning steps on validation errors.
+          // A call whose arguments failed schema validation (or were cut off
+          // mid-stream by the output limit) is never executed (the tool would
+          // throw or worse) — it gets the reason as its result, like a
+          // doom-loop refusal, so the history stays replayable and the model
+          // can self-correct. Doom-loop tracking is skipped: the refusal
+          // reason here is already specific, and the identical repeat would
+          // trip the guard only after burning steps on validation errors.
           const refusal =
             call.invalidArgs !== undefined
-              ? `Tool call not executed — the arguments failed validation: ${call.invalidArgs}\nReissue ${call.name} with valid arguments.`
+              ? `Tool call not executed — ${call.invalidArgs}\nReissue ${call.name} with valid arguments.`
               : this.doomLoopRefusal(call);
           if (refusal !== null) {
             yield { type: "notice", message: refusal };

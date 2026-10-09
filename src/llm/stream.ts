@@ -259,6 +259,9 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
           break;
         case "tool-call":
           hasContent = true;
+          // Completed calls leave the progress map so the finish handler can
+          // tell dropped calls (started, never completed) from delivered ones.
+          argsProgress.delete(part.toolCallId);
           yield {
             type: "tool-call",
             id: part.toolCallId,
@@ -298,6 +301,31 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<Strea
             usage: part.usage,
             deltas,
           });
+          // A call whose arguments streamed but never completed was silently
+          // dropped by the SDK: the provider cut the reply mid-arguments
+          // (finish reason "length" — output/context limit), so the JSON
+          // never parsed and no tool-call part exists. Recover each dropped
+          // call as invalidArgs — without it a reply truncated mid-call
+          // looks EMPTY (the args deltas leave no visible content) and the
+          // loop would end the turn after a futile identical resend. The
+          // loop persists the call and answers it with the explanation, and
+          // the model reissues it (with a smaller payload) next step.
+          for (const [id, progress] of argsProgress) {
+            debugStreamLog("truncated-tool-call", {
+              toolCallId: id,
+              toolName: progress.name,
+              chars: progress.chars,
+              finishReason: part.finishReason,
+            });
+            yield {
+              type: "tool-call",
+              id,
+              name: progress.name,
+              args: {},
+              invalidArgs: `the arguments were cut off mid-stream after ${progress.chars} characters (finish reason: ${part.finishReason}) — the reply hit the output or context limit before the JSON completed. Reissue ${progress.name} with complete arguments; for large content, split it into several smaller calls.`,
+            };
+          }
+          argsProgress.clear();
           yield {
             type: "finish",
             finishReason: part.finishReason,
