@@ -87,6 +87,30 @@ describe("toStreamErrorInfo", () => {
     expect(toStreamErrorInfo("boom")).toEqual({ name: "Error", message: "boom" });
     expect(toStreamErrorInfo(42)).toEqual({ name: "Error", message: "42" });
     expect(toStreamErrorInfo(undefined)).toEqual({ name: "Error", message: "undefined" });
+    expect(toStreamErrorInfo(null)).toEqual({ name: "Error", message: "null" });
+  });
+
+  it("unwraps a relay's parsed error payload object instead of printing [object Object]", () => {
+    // A 200 stream carrying an error chunk surfaces the parsed payload as a
+    // plain object, not an Error instance.
+    const info = toStreamErrorInfo({
+      message: "The engine is currently overloaded, please try again later",
+      type: "engine_overloaded_error",
+    });
+    expect(info).toEqual({
+      name: "engine_overloaded_error",
+      message: "The engine is currently overloaded, please try again later",
+    });
+    // Statusless, but the message names an unambiguous transient condition.
+    expect(isRetryableStreamError(info)).toBe(true);
+  });
+
+  it("reads status/code fields off object payloads and JSON-serializes messageless ones", () => {
+    const info = toStreamErrorInfo({ status: 503, code: "upstream_down" });
+    expect(info.statusCode).toBe(503);
+    expect(info.code).toBe("upstream_down");
+    expect(info.message).toBe('{"status":503,"code":"upstream_down"}');
+    expect(info.name).toBe("Error");
   });
 });
 

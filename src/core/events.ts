@@ -48,9 +48,27 @@ export interface StreamErrorInfo {
 // Flattens any thrown value into a serializable StreamErrorInfo. The single
 // Error→info conversion point: called where an error event is produced
 // (llm/stream.ts, agent/loop.ts) so everything downstream — retry
-// classification, the UI, JSON print — works on plain data. Non-Error values
-// keep the old wrapping behavior: new Error(String(value)).
+// classification, the UI, JSON print — works on plain data.
+//
+// Relays sometimes answer a 200 stream with an error chunk whose payload the
+// SDK forwards as the PARSED object ({"message": "…", "type": "…"}) rather
+// than an Error instance — the old new Error(String(value)) wrapping reduced
+// those to "[object Object]" and lost every retry signal. Plain objects with
+// a string message are unwrapped field by field; anything else falls back to
+// a JSON serialization so the payload survives.
 export function toStreamErrorInfo(error: unknown): StreamErrorInfo {
+  if (error !== null && typeof error === "object" && !(error instanceof Error)) {
+    const raw = error as Record<string, unknown>;
+    const message =
+      typeof raw.message === "string" && raw.message.length > 0 ? raw.message : JSON.stringify(raw);
+    const name =
+      typeof raw.name === "string" ? raw.name : typeof raw.type === "string" ? raw.type : "Error";
+    const info: StreamErrorInfo = { name, message };
+    if (typeof raw.statusCode === "number") info.statusCode = raw.statusCode;
+    if (typeof raw.status === "number") info.statusCode = raw.status;
+    if (typeof raw.code === "string") info.code = raw.code;
+    return info;
+  }
   const err = error instanceof Error ? error : new Error(String(error));
   const info: StreamErrorInfo = { name: err.name, message: err.message };
   const statusCode = (err as { statusCode?: unknown }).statusCode;

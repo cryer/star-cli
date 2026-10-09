@@ -119,6 +119,21 @@ describe("isRetryableStreamError", () => {
     expect(isRetryableStreamError(new Error("fetch failed"))).toBe(false);
   });
 
+  it("retries statusless errors whose message names a server-side transient condition", () => {
+    // Relays report overload as a 200 stream with an error chunk — the
+    // failure arrives statusless, and only the message carries the signal.
+    expect(
+      isRetryableStreamError(
+        toStreamErrorInfo({
+          message: "The engine is currently overloaded, please try again later",
+          type: "engine_overloaded_error",
+        }),
+      ),
+    ).toBe(true);
+    expect(isRetryableStreamError(new Error("rate limit exceeded"))).toBe(true);
+    expect(isRetryableStreamError(new Error("503"))).toBe(true);
+  });
+
   it("trusts the SDK's own retryable classification", () => {
     const error = apiError("teapot", { statusCode: 418 });
     (error as unknown as { isRetryable: boolean }).isRetryable = true;

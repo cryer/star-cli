@@ -48,13 +48,11 @@ const NETWORK_ERROR_CODES = new Set([
   "ECONNABORTED",
 ]);
 
-// Without an HTTP status the only honest retry signal is a network-family
-// failure: Node's fetch reports those as TypeError("fetch failed") (usually
-// with the errno on error.cause.code, flattened to causeCode by
+// Node's fetch reports transport failures as TypeError("fetch failed")
+// (usually with the errno on error.cause.code, flattened to causeCode by
 // toStreamErrorInfo), and the classic stack attaches the errno to the error
-// itself. Anything else statusless — above all a TypeError from a code bug —
-// fails deterministically and must fail fast instead of resending the whole
-// history five times.
+// itself. Anything else statusless falls to the message-pattern check at the
+// call site.
 function isNetworkFailure(error: StreamErrorInfo): boolean {
   for (const code of [error.code, error.causeCode]) {
     if (code && (NETWORK_ERROR_CODES.has(code) || code.startsWith("UND_ERR_"))) return true;
@@ -65,6 +63,17 @@ function isNetworkFailure(error: StreamErrorInfo): boolean {
 function matchesRetryablePattern(text: string | undefined): boolean {
   return typeof text === "string" && RETRYABLE_MESSAGE_PATTERNS.some((p) => p.test(text));
 }
+
+// Statusless transient signals, deliberately narrower than
+// RETRYABLE_MESSAGE_PATTERNS: relays fronting overloaded upstreams report
+// them as 200 streams with an error chunk, which arrives statusless (see
+// toStreamErrorInfo's plain-object path). A bare network-SOUNDING message
+// ("socket hang up") without an errno still fails fast — only conditions
+// that are unambiguously server-side and transient qualify.
+const STATUSLESS_RETRYABLE_PATTERNS = [
+  /overloaded|rate.?limit|too many requests|resource.?exhausted|at capacity|service.?unavailable|try (?:your request )?again/i,
+  /\b(429|500|502|503|504|529)\b/,
+];
 
 export function isRetryableStreamError(error: StreamErrorInfo): boolean {
   if (NON_RETRYABLE_ERROR_NAMES.has(error.name)) return false;
@@ -82,8 +91,17 @@ export function isRetryableStreamError(error: StreamErrorInfo): boolean {
     // failure), recognizable only by what the error says.
     return matchesRetryablePattern(error.message) || matchesRetryablePattern(responseBodyOf(error));
   }
-  // No status at all: only a genuine network failure merits a resend.
-  return isNetworkFailure(error);
+  // No status at all: a genuine network failure merits a resend, and so does
+  // a message that names an unambiguously server-side transient condition
+  // ("engine overloaded", "rate limit") — relays fronting overloaded
+  // upstreams report those as 200 streams with an error chunk, which arrives
+  // statusless (see toStreamErrorInfo's plain-object path). Anything else
+  // statusless — above all a TypeError from a code bug — fails
+  // deterministically and must fail fast instead of resending the whole
+  // history five times.
+  return (
+    isNetworkFailure(error) || STATUSLESS_RETRYABLE_PATTERNS.some((p) => p.test(error.message))
+  );
 }
 
 export const RETRY_JITTER_FACTOR = 0.25;
