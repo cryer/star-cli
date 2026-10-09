@@ -244,7 +244,7 @@ describe("compactMessages", () => {
     expect(result.messages.some((m) => m.meta?.synthetic)).toBe(false);
   });
 
-  it("force compacts even when under budget, keeping the last 4 messages", () => {
+  it("force compacts even when under budget, dropping down to the final turn", () => {
     const messages = [
       system("sys"),
       user(pad(400)),
@@ -256,16 +256,30 @@ describe("compactMessages", () => {
     ];
     const result = compactMessages(star(messages), 10_000, { force: true });
     expect(result.compacted).toBe(true);
-    expect(result.droppedCount).toBe(2);
+    expect(result.droppedCount).toBe(4);
     expect(result.messages[0]?.message.role).toBe("system");
     expect(result.messages[1]?.message.content).toBe(
-      "[context compacted: 2 earlier messages dropped]",
+      "[context compacted: 4 earlier messages dropped]",
     );
-    expect(core(result.messages.slice(2))).toEqual(messages.slice(3));
+    expect(core(result.messages.slice(2))).toEqual(messages.slice(5));
   });
 
-  it("force still refuses when no whole turn can be dropped", () => {
-    const messages = [user("u1"), assistant("a1"), user("u2"), assistant("a2"), user("u3")];
+  it("force compacts a giant first turn followed by a short final turn", () => {
+    const messages = [
+      system("sys"),
+      user("u1"),
+      ...Array.from({ length: 20 }, (_, i) => assistant(`a1-${i}`)),
+      user("u2"),
+      assistant("a2"),
+    ];
+    const result = compactMessages(star(messages), 10_000, { force: true });
+    expect(result.compacted).toBe(true);
+    expect(result.droppedCount).toBe(21);
+    expect(core(result.messages.slice(2))).toEqual(messages.slice(22));
+  });
+
+  it("force still refuses when the whole history is a single turn", () => {
+    const messages = [user("u1"), assistant("a1"), assistant("a2"), assistant("a3")];
     const result = compactMessages(star(messages), 10_000, { force: true });
     expect(result.compacted).toBe(false);
     expect(core(result.messages)).toEqual(messages);

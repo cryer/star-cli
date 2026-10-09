@@ -136,7 +136,7 @@ export async function summarizeMessages(
 
 export interface CompactOptions {
   // Manual /compact: compact even when under the token budget, dropping whole
-  // turns down to MIN_KEPT_MESSAGES instead of refusing. Auto-compaction in
+  // turns down to the final one instead of refusing. Auto-compaction in
   // the agent loop never forces.
   force?: boolean;
   // Fixed per-request overhead charged against the budget: the API window
@@ -152,8 +152,12 @@ export function compactMessages(
   opts: CompactOptions = {},
 ): CompactionResult {
   // Forced compaction uses a zero budget: the under-budget exits below never
-  // fire, so turns are dropped until only MIN_KEPT_MESSAGES would remain.
+  // fire, so turns are dropped until only the final turn would remain.
   const limit = opts.force ? 0 : maxTokens;
+  // Forced compaction drops whole turns down to the final one: a long
+  // single-turn session (one prompt, hundreds of tool steps) must still be
+  // compactable, so the MIN_KEPT_MESSAGES floor only guards the auto path.
+  const minKept = opts.force ? 1 : MIN_KEPT_MESSAGES;
   const overhead = opts.overheadTokens ?? 0;
   // Estimate every message once, up front: estimates are cached per message
   // object (tokens.ts), so across the loop's per-step calls this only pays
@@ -198,7 +202,7 @@ export function compactMessages(
   let droppedCount = 0;
   let droppedTokens = 0;
   for (const turn of turns) {
-    if (restCount - droppedCount - turn.length < MIN_KEPT_MESSAGES) {
+    if (restCount - droppedCount - turn.length < minKept) {
       break;
     }
     droppedCount += turn.length;

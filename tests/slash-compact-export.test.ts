@@ -128,19 +128,19 @@ describe("slash /compact and /export", () => {
       });
 
       expect(result.compacted).toBe(true);
-      expect(result.message).toContain("Compacted context: 6 -> 5 messages");
+      expect(result.message).toContain("Compacted context: 6 -> 3 messages");
       // The loop's own model (getAuxModel fallback) produces the summary.
       expect(loop.getMessages()[0]?.content).toBe("[earlier conversation summarized]\ns");
     });
 
-    it("refuses when no whole turn can be dropped", async () => {
+    it("refuses when the whole history is a single turn", async () => {
       const loop = makeLoop(new MockLanguageModelV1({ doGenerate: generateRound("s") }));
       await loop.loadMessages([
         user("u1"),
         assistant("a1"),
-        user("u2"),
         assistant("a2"),
-        user("u3"),
+        assistant("a3"),
+        assistant("a4"),
       ]);
 
       const result = await compactSession({
@@ -170,7 +170,7 @@ describe("slash /compact and /export", () => {
       });
 
       expect(result.compacted).toBe(true);
-      expect(result.message).toContain("Compacted context: 6 -> 5 messages");
+      expect(result.message).toContain("Compacted context: 6 -> 3 messages");
       const next = loop.getMessages();
       expect(next.length).toBeLessThan(history.length);
       expect(next[0]?.content).toBe("[earlier conversation summarized]\nSUMMARY TEXT");
@@ -194,7 +194,7 @@ describe("slash /compact and /export", () => {
 
       expect(result.compacted).toBe(true);
       expect(loop.getMessages()[0]?.content).toBe(
-        "[context compacted: 2 earlier messages dropped]",
+        "[context compacted: 4 earlier messages dropped]",
       );
     });
 
