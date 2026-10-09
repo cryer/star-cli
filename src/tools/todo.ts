@@ -51,12 +51,21 @@ export function setTodoSession(id: string | null): void {
 
 export class TodoStore {
   private items = new Map<number, TodoItem>();
+  // Bumped on every replace() — the agent loop watches it to detect
+  // todo_write landings, so a list left untouched for many steps (with open
+  // items) can be flagged as stale and the model reminded to reconcile it.
+  private revisionValue = 0;
+
+  get revision(): number {
+    return this.revisionValue;
+  }
 
   list(): TodoItem[] {
     return [...this.items.values()];
   }
 
   replace(items: TodoItem[]): void {
+    this.revisionValue++;
     this.items.clear();
     for (const item of items) {
       this.items.set(item.id, item);
@@ -137,6 +146,13 @@ export function formatTodos(items: TodoItem[]): string {
 }
 
 const defaultStore = new TodoStore();
+
+// The process-wide store the root registry's todo tools bind to. Exposed so
+// ToolRegistry can publish the store it wired (the agent loop reads open
+// items from it for the stale-todo nudge).
+export function sharedTodoStore(): TodoStore {
+  return defaultStore;
+}
 
 // Full parsed list from a todo_write args payload, or null when malformed.
 // The REPL uses this to mirror the todo list next to the input box.

@@ -105,6 +105,9 @@ export interface AgentLoopOptions {
   modelName?: string;
   // Base delay between stream retries (doubled per attempt); tests shrink it.
   retryDelayMs?: number;
+  // Steps a todo list with open items may sit untouched before a mid-turn
+  // reminder to reconcile it (default TODO_STALE_NUDGE_STEPS); tests shrink it.
+  todoStaleNudgeSteps?: number;
 }
 
 export const PLAN_MODE_PROMPT =
@@ -171,6 +174,13 @@ function finalNudgeWarning(autoContinues: number, maxAutoContinues: number): str
 }
 
 const COMPLETION_CHECK_TIMEOUT_MS = 30_000;
+
+// Steps a todo list with open items may sit unchanged before the loop reminds
+// the model mid-turn to reconcile it. Small models in particular write the
+// list once and never touch it again — the work keeps moving but the todo
+// panel (and the model's own bookkeeping) shows the same "in progress" item
+// for hours.
+const TODO_STALE_NUDGE_STEPS = 20;
 
 // Attaches per-turn volatile context (git state) to the latest user message —
 // request-only, never persisted. Keeping it out of the system message and out
@@ -895,6 +905,13 @@ export class AgentLoop {
     // Open items from the latest todo_write this turn — a deterministic
     // "work still pending" signal that needs no text interpretation.
     let openTodos: string[] = [];
+    // Stale-todo tracking: the store's revision changes on every todo_write,
+    // so a counter of steps without a revision bump measures how long the
+    // list has been forgotten. Store-backed (not the per-turn openTodos
+    // above) so a list written in an earlier turn still gets nudged.
+    let todoRevision = this.opts.registry.todos.revision;
+    let stepsSinceTodoChange = 0;
+    const todoStaleNudgeSteps = this.opts.todoStaleNudgeSteps ?? TODO_STALE_NUDGE_STEPS;
 
     // One step = one model round-trip: the streamed reply plus every tool
     // call it asked for. Stream retries have their own budget
@@ -941,6 +958,36 @@ export class AgentLoop {
           const meta: MessageMeta = { synthetic: "bg-report" };
           this.messages.push({ message: note, meta });
           await this.persist(note, meta);
+        }
+      }
+      // A todo list with open items that hasn't been rewritten for
+      // todoStaleNudgeSteps steps is usually forgotten, not finished: remind
+      // the model to reconcile it, then let it keep working. Synthetic like
+      // the other mid-turn injections, so it never becomes a turn boundary.
+      const currentTodoRevision = registry.todos.revision;
+      if (currentTodoRevision !== todoRevision) {
+        todoRevision = currentTodoRevision;
+        stepsSinceTodoChange = 0;
+      } else if (stepsSinceTodoChange >= todoStaleNudgeSteps) {
+        const open = registry.todos.list().filter((t) => t.status !== "done");
+        if (open.length > 0) {
+          stepsSinceTodoChange = 0;
+          yield {
+            type: "notice",
+            message: `todo list unchanged for ${todoStaleNudgeSteps} steps with ${open.length} open item(s); reminding the model to update it.`,
+          };
+          const reminder: CoreMessage = {
+            role: "user",
+            content: `[todo reminder] Your todo list still has ${open.length} open item(s), unchanged for ${todoStaleNudgeSteps} steps: ${open
+              .slice(0, 5)
+              .map((t) => `"${t.title}"`)
+              .join(
+                ", ",
+              )}${open.length > 5 ? ", …" : ""}. Update the list with todo_write so it reflects what is done and what you are working on now, then continue working.`,
+          };
+          const meta: MessageMeta = { synthetic: "nudge" };
+          this.messages.push({ message: reminder, meta });
+          await this.persist(reminder, meta);
         }
       }
       const maxTokens = this.opts.contextMaxTokens ?? config.contextMaxTokens;
@@ -1469,6 +1516,7 @@ export class AgentLoop {
         return;
       }
       step++;
+      stepsSinceTodoChange++;
     }
   }
 

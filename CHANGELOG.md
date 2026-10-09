@@ -10,6 +10,10 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ## [Unreleased]
 
+### Added
+
+- **stale-todo reminder**: when the todo list has open items but hasn't been rewritten for 20 steps, the loop now injects a mid-turn reminder (a synthetic message, invisible to `/undo` turn boundaries) asking the model to reconcile the list with `todo_write`, plus a notice so the user can see it happen. Small/local models often write the list once and never update it, leaving the todo panel showing the same "in progress" item for hours while work actually continues
+
 ### Fixed
 
 - **status-bar ctx % no longer freezes for the whole turn**: the estimate only recomputed on turn boundaries, history rewrites and model switches, so a long multi-step turn (none of those fire mid-turn) displayed the turn-start value — e.g. a stuck `ctx: 2.6%` while the real context grew straight into the window limit. While a turn streams, the status bar now re-estimates on a light 2s interval (the per-message token cache keeps each pass a cheap sum)

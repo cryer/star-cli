@@ -11,6 +11,7 @@ import type { StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
 import { SessionStore } from "../src/session/store";
 import { ToolRegistry, createDefaultRegistry } from "../src/tools";
+import { resetTodos } from "../src/tools/todo";
 import type { Tool, ToolContext } from "../src/tools/types";
 import { rmWithRetry } from "./test-fs";
 
@@ -1447,6 +1448,87 @@ describe("AgentLoop", () => {
 
     expect(events.some((e) => e.type === "notice")).toBe(false);
     expect(loop.getMessages().filter((m) => m.role === "user")).toHaveLength(1);
+  });
+
+  it("reminds the model when the todo list sits unchanged with open items", async () => {
+    // Steps: todo_write (2 open) → three todo_reads → done. With a nudge
+    // threshold of 2, the reminder lands before the third todo_read's step.
+    resetTodos();
+    const loop = new AgentLoop({
+      model: judgeModel(
+        ["DONE"],
+        [
+          toolCallRound("call-1", "todo_write", {
+            todos: [
+              { id: 1, title: "write tests", status: "in_progress" },
+              { id: 2, title: "run them", status: "pending" },
+            ],
+          }),
+          toolCallRound("call-2", "todo_read", {}),
+          toolCallRound("call-3", "todo_read", {}),
+          toolCallRound("call-4", "todo_read", {}),
+          textRound("done"),
+        ],
+      ),
+      registry: createDefaultRegistry(),
+      config: makeConfig(),
+      cwd,
+      retryDelayMs: 1,
+      todoStaleNudgeSteps: 2,
+    });
+
+    const events = await collect(loop.stream("finish the tasks", new AbortController().signal));
+
+    expect(
+      events.some(
+        (e) => e.type === "notice" && e.message.includes("todo list unchanged for 2 steps"),
+      ),
+    ).toBe(true);
+    const reminders = loop
+      .getStarMessages()
+      .filter(
+        (m) =>
+          m.message.role === "user" &&
+          typeof m.message.content === "string" &&
+          m.message.content.includes("[todo reminder]"),
+      );
+    expect(reminders).toHaveLength(1);
+    expect(reminders[0]?.meta?.synthetic).toBe("nudge");
+    expect(
+      typeof reminders[0]?.message.content === "string" &&
+        reminders[0].message.content.includes('"write tests"'),
+    ).toBe(true);
+    resetTodos();
+  });
+
+  it("does not remind when the open todos were all completed", async () => {
+    resetTodos();
+    const loop = new AgentLoop({
+      model: judgeModel(
+        ["DONE"],
+        [
+          toolCallRound("call-1", "todo_write", {
+            todos: [{ id: 1, title: "write tests", status: "done" }],
+          }),
+          toolCallRound("call-2", "todo_read", {}),
+          toolCallRound("call-3", "todo_read", {}),
+          toolCallRound("call-4", "todo_read", {}),
+          textRound("done"),
+        ],
+      ),
+      registry: createDefaultRegistry(),
+      config: makeConfig(),
+      cwd,
+      retryDelayMs: 1,
+      todoStaleNudgeSteps: 2,
+    });
+
+    const events = await collect(loop.stream("finish the tasks", new AbortController().signal));
+
+    expect(
+      events.some((e) => e.type === "notice" && e.message.includes("todo list unchanged")),
+    ).toBe(false);
+    resetTodos();
   });
 
   it("nudges on announcement phrasings beyond 我会/我将", async () => {

@@ -8,7 +8,7 @@ import { readImageTool } from "./fs/read-image";
 import { writeFileTool } from "./fs/write";
 import { screenshotTool } from "./screenshot";
 import { taskKillTool, taskListTool, taskOutputTool } from "./tasks";
-import { type TodoStore, createTodoTools } from "./todo";
+import { type TodoStore, createTodoTools, sharedTodoStore } from "./todo";
 import type { Tool } from "./types";
 import { webFetchTool } from "./web/fetch";
 import { webSearchTool } from "./web/search";
@@ -18,7 +18,11 @@ export class ToolRegistry {
 
   // todoStore defaults to the module-level shared store; subagent loops pass
   // their own instance so a child's todo_write cannot clobber the parent list.
+  // Exposed so the agent loop can watch open items for staleness.
+  readonly todos: TodoStore;
+
   constructor(todoStore?: TodoStore) {
+    this.todos = todoStore ?? sharedTodoStore();
     for (const tool of [
       // Fresh per registry (i.e. per agent loop): the unchanged-since-last-
       // read cache must not leak across loops, whose contexts differ.
@@ -36,7 +40,7 @@ export class ToolRegistry {
       taskListTool,
       taskOutputTool,
       taskKillTool,
-      ...createTodoTools(todoStore),
+      ...createTodoTools(this.todos),
     ]) {
       this.register(tool);
     }
