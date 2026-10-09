@@ -17,7 +17,7 @@ import { listModels, resolveModelConfig } from "../llm/registry";
 import { buildAllowRule, isAllowedByRules } from "../permissions/allow";
 import type { PermissionRequest } from "../permissions/types";
 import { loadSessionSnapshots } from "../session/checkpoints";
-import { clearSessions } from "../session/clear";
+import { clearSessions, deleteSession } from "../session/clear";
 import {
   formatSessionEntries,
   listSessionEntries,
@@ -112,6 +112,7 @@ import { PromptQueue, type QueuedPrompt } from "./queue";
 import { executeShellBang } from "./shell-bang";
 import { SYSTEM_PROMPT } from "./system-prompt";
 import { toTerminalSafe } from "./terminal-text";
+import { TerminalTitle } from "./terminal-title";
 import { type FlushState, nextFlush, startTicker } from "./ticker";
 import { checkForUpdate } from "./update-check";
 import { useInput } from "./use-input";
@@ -191,6 +192,9 @@ interface PendingPicker {
   title: string;
   options: SelectOption[];
   resolve: (value: string | null) => void;
+  // Enables [Ctrl+X] deletion inside the picker (/resume sessions). Returns
+  // the options remaining after the deletion.
+  onDelete?: (value: string) => Promise<SelectOption[]>;
 }
 
 interface PendingConnect {
@@ -296,6 +300,9 @@ export function Repl({
   const planApprovalRef = useRef(false);
   const pendingRewindRef = useRef<PendingRewind | null>(null);
   const pickerRef = useRef<PendingPicker | null>(null);
+  // Terminal window/tab title: braille spinner while a turn runs, a bell
+  // glyph when it finishes (terminal-title.ts).
+  const titleRef = useRef<TerminalTitle | null>(null);
   const pendingConnectRef = useRef<PendingConnect | null>(null);
   const modelNameRef = useRef(model);
   // Live session store: /new swaps it mid-session, so callbacks must go
@@ -418,10 +425,14 @@ export function Repl({
   // One picker at a time; a second request while one is open resolves null
   // immediately so callers never hang.
   const showPicker = useCallback(
-    (title: string, options: SelectOption[]): Promise<string | null> => {
+    (
+      title: string,
+      options: SelectOption[],
+      onDelete?: (value: string) => Promise<SelectOption[]>,
+    ): Promise<string | null> => {
       if (pickerRef.current) return Promise.resolve(null);
       return new Promise<string | null>((resolve) => {
-        setPicker({ title, options, resolve });
+        setPicker({ title, options, resolve, onDelete });
       });
     },
     [setPicker],
@@ -574,6 +585,7 @@ export function Repl({
       tickerStopRef.current?.();
       abortRef.current?.abort();
       pendingRef.current?.resolve(false);
+      titleRef.current?.stop("idle");
     };
   }, [attachConfirmHandler]);
 
@@ -924,6 +936,11 @@ export function Repl({
     [applyMessages, cwd, stopBackgroundWork],
   );
 
+  const terminalTitle = useCallback(() => {
+    titleRef.current ??= TerminalTitle.forCwd(cwd);
+    return titleRef.current;
+  }, [cwd]);
+
   const runStream = useCallback(
     async (input: string, extraImages: ImageInput[] = []) => {
       const resolved = await resolveMentions(input, cwd);
@@ -952,6 +969,7 @@ export function Repl({
       setThoughtSummary(null);
       setStreamingText("");
       setIsStreaming(true);
+      terminalTitle().start();
       flushedRef.current = { streamed: "", reasoning: "" };
       // Move the current streaming buffer into static history. Used at tool-call
       // boundaries (to keep chronological order) and by the ticker for long
@@ -1139,6 +1157,7 @@ export function Repl({
         lastCommittedLenRef.current = 0;
         setStreamingText(null);
         const interrupted = controller.signal.aborted;
+        terminalTitle().stop(interrupted ? "idle" : "done");
         notifyBell({
           enabled: config.notifyBell,
           thresholdSec: config.notifyBellThresholdSec,
@@ -1216,6 +1235,7 @@ export function Repl({
       cwd,
       config,
       sessionCostUsd,
+      terminalTitle,
     ],
   );
 
@@ -1375,11 +1395,46 @@ export function Repl({
             };
           }),
         );
+        // Ctrl+X deletes the highlighted session (the picker asks y/n first).
+        // Deleted labels are collected so a cancel after deletions still
+        // reports what was removed.
+        const deleted: string[] = [];
+        const onDelete = async (id: string): Promise<SelectOption[]> => {
+          const picker = pickerRef.current;
+          const option = (picker?.options ?? options).find((o) => o.value === id);
+          try {
+            await deleteSession(id);
+          } catch (error) {
+            pushMessage(
+              "system",
+              `Failed to delete session ${shortSessionId(id)}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return picker?.options ?? options;
+          }
+          deleted.push(option?.label ?? shortSessionId(id));
+          const remaining = (picker?.options ?? options).filter((o) => o.value !== id);
+          if (picker) {
+            // Nothing left to pick: close as cancelled, the summary below
+            // still names the deleted sessions.
+            if (remaining.length === 0) {
+              handlePickerCancel();
+            } else {
+              setPicker({ ...picker, options: remaining });
+            }
+          }
+          return remaining;
+        };
         const picked = await showPicker(
           all ? "Resume a session (all directories)" : "Resume a session",
           options,
+          onDelete,
         );
-        if (!picked) return "Session unchanged — picker cancelled.";
+        if (!picked) {
+          if (deleted.length > 0) {
+            return `Deleted ${deleted.length} session(s): ${deleted.join(", ")}.`;
+          }
+          return "Session unchanged — picker cancelled.";
+        }
         return resume(picked);
       },
       forkSession: async () => {
@@ -1738,6 +1793,8 @@ export function Repl({
     setPendingRewind,
     setPendingConnect,
     showPicker,
+    handlePickerCancel,
+    setPicker,
     stopBackgroundWork,
   ]);
 
@@ -1922,6 +1979,7 @@ export function Repl({
           options={picker.options}
           onSelect={handlePickerSelect}
           onCancel={handlePickerCancel}
+          onDelete={picker.onDelete}
         />
       )}
       {pendingConnect && (

@@ -15,6 +15,17 @@ import { SessionStore } from "./store";
 // on purpose (/undo across restarts). Once a project's last session is gone
 // its tree repo is unreachable, so it is removed here too — repos whose
 // project still has a surviving session (e.g. the excluded live one) stay.
+// Deletes a single stored session (the /resume picker's Ctrl+X). Snapshot
+// cleanup matches clearSessions: once the session's project has no sessions
+// left, its git-tree repo is unreachable and removed too.
+export async function deleteSession(id: string): Promise<void> {
+  const meta = (await SessionStore.list()).find((m) => m.id === id);
+  await fs.rm(path.join(sessionsDir(), id), { recursive: true, force: true });
+  if (meta && (await SessionStore.list(meta.cwd)).length === 0) {
+    await removeTreeRepo(meta.cwd);
+  }
+}
+
 export async function clearSessions(cwd?: string, excludeId?: string): Promise<number> {
   if (cwd !== undefined) {
     const metas = await SessionStore.list(cwd);

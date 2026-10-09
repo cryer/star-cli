@@ -18,6 +18,7 @@ export interface InkApp {
   // Every frame ever written, concatenated — for output that a later frame
   // (e.g. the unmount repaint after exit()) overwrites in lastFrame().
   allOutput(): string;
+  rerender(node: ReactElement): void;
   unmount(): void;
 }
 
@@ -54,6 +55,7 @@ export function renderApp(node: ReactElement): InkApp {
     stdin: { write: (s: string) => stdin.push(s) },
     lastFrame: () => lastFrame,
     allOutput: () => output,
+    rerender: (node: ReactElement) => instance.rerender(node),
     unmount: () => instance.unmount(),
   };
 }

@@ -11,6 +11,7 @@ const { SelectPrompt, SELECT_PROMPT_MAX_VISIBLE } = await import(
 const UP = "[A";
 const DOWN = "[B";
 const ENTER = "\r";
+const CTRL_X = "\x18";
 const ESC = "";
 
 function setup(options: { value: string; label: string; description?: string; hint?: string }[]) {
@@ -109,6 +110,90 @@ describe("SelectPrompt", () => {
     expect(out).toContain("more above");
     expect(out).toContain(`❯ option-${options.length - 1}`);
     expect(out).not.toContain("more below");
+    app.unmount();
+  });
+});
+
+describe("SelectPrompt deletion (Ctrl+X)", () => {
+  function setupDelete(
+    options: { value: string; label: string }[],
+    onDelete = vi.fn(async (value: string) => options.filter((o) => o.value !== value)),
+  ) {
+    const onSelect = vi.fn();
+    const onCancel = vi.fn();
+    const element = (opts: { value: string; label: string }[]) =>
+      createElement(SelectPrompt, {
+        title: "Pick one",
+        options: opts,
+        onSelect,
+        onCancel,
+        onDelete,
+      });
+    const app = renderApp(element(options));
+    return { app, onSelect, onCancel, onDelete, element };
+  }
+
+  it("shows the [Ctrl+X] delete hint only when onDelete is set", async () => {
+    const { app } = setupDelete(simpleOptions);
+    await tick();
+    expect(frame(app)).toContain("[Ctrl+X] delete");
+    app.unmount();
+
+    const { app: plain } = setup(simpleOptions);
+    await tick();
+    expect(frame(plain)).not.toContain("[Ctrl+X] delete");
+    plain.unmount();
+  });
+
+  it("Ctrl+X asks for confirmation and n cancels without deleting", async () => {
+    const { app, onDelete } = setupDelete(simpleOptions);
+    await tick();
+    await typeText(app.stdin, CTRL_X);
+    expect(frame(app)).toContain("Delete alpha? [y] yes [n] no");
+    await typeText(app.stdin, "n");
+    expect(frame(app)).toContain("[Ctrl+X] delete");
+    expect(onDelete).not.toHaveBeenCalled();
+    app.unmount();
+  });
+
+  it("Esc cancels the confirmation instead of the picker", async () => {
+    const { app, onDelete, onCancel } = setupDelete(simpleOptions);
+    await tick();
+    await typeText(app.stdin, CTRL_X, ESC);
+    expect(onCancel).not.toHaveBeenCalled();
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(frame(app)).toContain("[Ctrl+X] delete");
+    app.unmount();
+  });
+
+  it("y confirms and deletes the highlighted option", async () => {
+    const { app, onDelete } = setupDelete(simpleOptions);
+    await tick();
+    await typeText(app.stdin, DOWN, CTRL_X);
+    expect(frame(app)).toContain("Delete beta? [y] yes [n] no");
+    await typeText(app.stdin, "y");
+    await vi.waitFor(() => expect(onDelete).toHaveBeenCalledWith("b"));
+    app.unmount();
+  });
+
+  it("clamps the highlight after the last option is deleted", async () => {
+    const { app, element } = setupDelete(simpleOptions);
+    await tick();
+    await typeText(app.stdin, DOWN, DOWN, CTRL_X, "y");
+    await tick();
+    // The parent re-renders with the remaining options (repl.tsx setPicker).
+    app.rerender(element(simpleOptions.slice(0, 2)));
+    await tick();
+    expect(frame(app)).toContain("❯ beta");
+    app.unmount();
+  });
+
+  it("ignores navigation keys while the confirmation is open", async () => {
+    const { app, onDelete } = setupDelete(simpleOptions);
+    await tick();
+    await typeText(app.stdin, CTRL_X, DOWN, "j");
+    expect(frame(app)).toContain("Delete alpha? [y] yes [n] no");
+    expect(onDelete).not.toHaveBeenCalled();
     app.unmount();
   });
 });

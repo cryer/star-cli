@@ -14,19 +14,50 @@ interface SelectPromptProps {
   options: SelectOption[];
   onSelect(value: string): void;
   onCancel(): void;
+  // Enables [Ctrl+X] deletion of the highlighted option (used by the /resume
+  // session picker). Must return the options remaining after the deletion;
+  // the highlight clamps to the new list. An empty list means the caller
+  // closed the picker.
+  onDelete?(value: string): Promise<SelectOption[]>;
 }
 
 export const SELECT_PROMPT_MAX_VISIBLE = 9;
 
-export function SelectPrompt({ title, options, onSelect, onCancel }: SelectPromptProps) {
+export function SelectPrompt({ title, options, onSelect, onCancel, onDelete }: SelectPromptProps) {
   const [index, setIndex] = useState(0);
   const indexRef = useRef(0);
+  const [confirming, setConfirming] = useState<SelectOption | null>(null);
+  const confirmingRef = useRef<SelectOption | null>(null);
+  const deletingRef = useRef(false);
+  const setConfirm = (option: SelectOption | null) => {
+    confirmingRef.current = option;
+    setConfirming(option);
+  };
   const move = (delta: number) => {
     indexRef.current = Math.max(0, Math.min(indexRef.current + delta, options.length - 1));
     setIndex(indexRef.current);
   };
 
   useInput((input, key) => {
+    const pending = confirmingRef.current;
+    if (pending) {
+      if (input === "y" || input === "Y") {
+        setConfirm(null);
+        if (onDelete && !deletingRef.current) {
+          deletingRef.current = true;
+          void onDelete(pending.value)
+            .catch(() => options)
+            .then((next) => {
+              deletingRef.current = false;
+              indexRef.current = Math.min(indexRef.current, Math.max(0, next.length - 1));
+              setIndex(indexRef.current);
+            });
+        }
+      } else if (input === "n" || input === "N" || key.escape) {
+        setConfirm(null);
+      }
+      return;
+    }
     if (key.escape) {
       onCancel();
       return;
@@ -34,6 +65,11 @@ export function SelectPrompt({ title, options, onSelect, onCancel }: SelectPromp
     if (key.return) {
       const option = options[indexRef.current];
       if (option) onSelect(option.value);
+      return;
+    }
+    if (onDelete && key.ctrl && input === "x") {
+      const option = options[indexRef.current];
+      if (option) setConfirm(option);
       return;
     }
     if (key.downArrow || input === "j") {
@@ -69,7 +105,13 @@ export function SelectPrompt({ title, options, onSelect, onCancel }: SelectPromp
         );
       })}
       {below > 0 && <Text dimColor>… {below} more below</Text>}
-      <Text dimColor>[↑/↓ or j/k] move [Enter] select [Esc] cancel</Text>
+      {confirming ? (
+        <Text color="red">Delete {confirming.label}? [y] yes [n] no</Text>
+      ) : (
+        <Text dimColor>
+          [↑/↓ or j/k] move [Enter] select{onDelete ? " [Ctrl+X] delete" : ""} [Esc] cancel
+        </Text>
+      )}
     </Box>
   );
 }

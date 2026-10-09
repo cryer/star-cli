@@ -12,6 +12,8 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ### Added
 
+- **delete sessions straight from the `/resume` picker**: highlighting a session and pressing Ctrl+X now asks for an in-picker `y/n` confirmation and then deletes that session (with its snapshots; the project's git-tree repo goes too once its last session is gone). Deleting the last listed session closes the picker with a summary of what was removed
+- **terminal title shows the agent's state**: while a turn runs, the tab/window title carries a braille spinner (`⠙ star-cli — dir`); when the turn finishes it switches to a bell glyph (`🔔`, or `!` on terminals without emoji support) until the next turn starts — visible from another tab or the taskbar. The audible bell stays behind the existing `notifyBell` config; interrupted turns and exit restore the plain title
 - **stale-todo reminder**: when the todo list has open items but hasn't been rewritten for 20 steps, the loop now injects a mid-turn reminder (a synthetic message, invisible to `/undo` turn boundaries) asking the model to reconcile the list with `todo_write`, plus a notice so the user can see it happen. Small/local models often write the list once and never update it, leaving the todo panel showing the same "in progress" item for hours while work actually continues
 - **live thought-token counter in the thinking indicator**: reasoning models on slow endpoints (e.g. local deployments) can think for thousands of tokens per step while the screen only shows a spinner — "thinking hard" was indistinguishable from "stuck". The thinking line now shows a live `~N thought` estimate next to the elapsed clock (rough CJK-aware chars→tokens; the provider's usage still owns billing)
 

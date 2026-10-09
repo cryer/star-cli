@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { gitTreesDir, sessionsDir } from "../src/config/paths";
-import { clearSessions } from "../src/session/clear";
+import { clearSessions, deleteSession } from "../src/session/clear";
 import { SessionStore } from "../src/session/store";
 import { treeRepoDir } from "../src/snapshot/git-tree";
 import { rmWithRetry } from "./test-fs";
@@ -110,5 +110,45 @@ describe("clearSessions", () => {
     expect(fs.existsSync(treeRepoDir("/work/a"))).toBe(false);
     expect(fs.existsSync(path.join(gitTreesDir(), "stale-no-session"))).toBe(false);
     expect(fs.existsSync(treeRepoDir("/work/live"))).toBe(true);
+  });
+});
+
+describe("deleteSession", () => {
+  it("deletes only the named session", async () => {
+    const keep = await makeSession("/work/here");
+    const gone = await makeSession("/work/here");
+
+    await deleteSession(gone.id);
+
+    expect(fs.existsSync(gone.dir)).toBe(false);
+    expect(fs.existsSync(keep.dir)).toBe(true);
+    expect((await SessionStore.list("/work/here")).map((m) => m.id)).toEqual([keep.id]);
+  });
+
+  it("removes the project's git-tree repo once its last session is deleted", async () => {
+    const here = await makeSession("/work/here");
+    const there = await makeSession("/work/there");
+    fs.mkdirSync(treeRepoDir("/work/here"), { recursive: true });
+    fs.mkdirSync(treeRepoDir("/work/there"), { recursive: true });
+
+    await deleteSession(here.id);
+
+    expect(fs.existsSync(treeRepoDir("/work/here"))).toBe(false);
+    expect(fs.existsSync(treeRepoDir("/work/there"))).toBe(true);
+    expect(fs.existsSync(there.dir)).toBe(true);
+  });
+
+  it("keeps the git-tree repo while the project still has sessions", async () => {
+    const gone = await makeSession("/work/here");
+    await makeSession("/work/here");
+    fs.mkdirSync(treeRepoDir("/work/here"), { recursive: true });
+
+    await deleteSession(gone.id);
+
+    expect(fs.existsSync(treeRepoDir("/work/here"))).toBe(true);
+  });
+
+  it("is a no-op for an unknown id", async () => {
+    await expect(deleteSession("no-such-session")).resolves.toBeUndefined();
   });
 });
