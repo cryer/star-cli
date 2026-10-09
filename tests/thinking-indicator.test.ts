@@ -69,4 +69,35 @@ describe("ThinkingIndicator", () => {
     expect(frame).not.toContain("z".repeat(300));
     app.unmount();
   });
+
+  it("shows a live thought-token estimate while reasoning", async () => {
+    // 400 Latin chars ≈ 100 tokens by the rough chars/4 rule.
+    const app = renderApp(createElement(ThinkingIndicator, { reasoning: "x".repeat(400) }));
+    await tick();
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("(~100 thought)");
+    app.unmount();
+  });
+
+  it("weighs CJK reasoning as roughly one token per character", async () => {
+    const app = renderApp(createElement(ThinkingIndicator, { reasoning: "想".repeat(50) }));
+    await tick();
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("(~50 thought)");
+    app.unmount();
+  });
+
+  it("combines the thought counter with the elapsed clock", async () => {
+    const app = renderApp(
+      createElement(ThinkingIndicator, {
+        reasoning: "x".repeat(400),
+        startedAt: Date.now() - 5000,
+      }),
+    );
+    await tick();
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("5s");
+    expect(frame).toContain("~100 thought");
+    app.unmount();
+  });
 });

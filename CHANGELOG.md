@@ -13,6 +13,7 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 ### Added
 
 - **stale-todo reminder**: when the todo list has open items but hasn't been rewritten for 20 steps, the loop now injects a mid-turn reminder (a synthetic message, invisible to `/undo` turn boundaries) asking the model to reconcile the list with `todo_write`, plus a notice so the user can see it happen. Small/local models often write the list once and never update it, leaving the todo panel showing the same "in progress" item for hours while work actually continues
+- **live thought-token counter in the thinking indicator**: reasoning models on slow endpoints (e.g. local deployments) can think for thousands of tokens per step while the screen only shows a spinner — "thinking hard" was indistinguishable from "stuck". The thinking line now shows a live `~N thought` estimate next to the elapsed clock (rough CJK-aware chars→tokens; the provider's usage still owns billing)
 
 ### Fixed
 
