@@ -2,7 +2,7 @@ import { type LanguageModel, tool as aiTool, generateText } from "ai";
 import { type StarConfig, resolveCompactThreshold } from "../config/schema";
 import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
 import { elideStaleContent } from "../context/elision";
-import { estimateToolSchemaTokens } from "../context/tokens";
+import { estimateTokens, estimateToolSchemaTokens } from "../context/tokens";
 import {
   type StreamErrorInfo,
   type StreamEvent,
@@ -353,6 +353,15 @@ export class AgentLoop {
     tools: Record<string, unknown>;
     schemaTokens: number;
   } | null = null;
+  // Server-calibration baseline for the context estimate: the latest finish
+  // event's provider-reported promptTokens paired with the local estimate of
+  // the exact request that produced it. Non-OpenAI tokenizers can count the
+  // same history far higher than the local cl100k estimate (a qwen endpoint
+  // counted ~30% more on a Chinese-heavy code session), which let the ctx%
+  // display and the auto-compaction trigger lag the real window fill until
+  // the provider itself started truncating replies. The delta refreshes on
+  // every step's finish, so drift is bounded to one step's new content.
+  private serverTokenBaseline: { localTokens: number; serverTokens: number } | null = null;
   // Lazily resolved auxiliary model (config.smallModel) for cheap side calls
   // — compaction summaries, session titles, completion checks. Undefined =
   // use the main model; a resolution failure is surfaced once as a notice.
@@ -447,6 +456,25 @@ export class AgentLoop {
   // status bar ctx% can show the same total the compaction decision uses.
   getToolSchemaTokens(): number {
     return this.buildAiTools().schemaTokens;
+  }
+
+  // Additive correction from serverTokenBaseline, clamped ≥ 0: an
+  // under-reading provider estimate must pull compaction earlier (the bug
+  // this fixes), but an over-reading one must never push it later than the
+  // local estimate alone would — compacting early is safe, late is fatal.
+  private calibrationDelta(): number {
+    const baseline = this.serverTokenBaseline;
+    if (!baseline) return 0;
+    return Math.max(0, baseline.serverTokens - baseline.localTokens);
+  }
+
+  // Effective context-window usage in tokens: local BPE estimate + tool
+  // schemas + the server-calibration delta. The single number both the
+  // auto-compaction budget and the status-bar ctx% consume.
+  estimateContextTokens(): number {
+    return (
+      estimateTokens(this.getMessages()) + this.getToolSchemaTokens() + this.calibrationDelta()
+    );
   }
 
   // Auxiliary model for cheap side calls: config.smallModel, resolved once.
@@ -917,12 +945,16 @@ export class AgentLoop {
       }
       const maxTokens = this.opts.contextMaxTokens ?? config.contextMaxTokens;
       const threshold = resolveCompactThreshold(config, maxTokens);
+      // The server-calibration delta rides into both budgets as extra
+      // overhead: elision and compaction must trigger on what the provider
+      // will actually count, not on the local tokenizer's guess.
+      const calibration = this.calibrationDelta();
       // Stale-content elision runs before whole-turn compaction: old bulk
       // (stale tool outputs, old attached images) loses its value long
       // before the conversation around it does, and replacing it in place
       // leaves message indices — and therefore /undo turn markers — intact.
       // It often shrinks the history enough that compaction never fires.
-      const elided = elideStaleContent(this.messages, threshold, toolSchemaTokens);
+      const elided = elideStaleContent(this.messages, threshold, toolSchemaTokens + calibration);
       if (elided) {
         this.messages = elided.messages;
         // Persist the rewrite like compaction does (memory and disk must
@@ -938,7 +970,7 @@ export class AgentLoop {
       // under-reads the real window usage by several thousand tokens.
       // this.messages is passed directly: compactMessages never mutates it.
       const compacted = compactMessages(this.messages, threshold, {
-        overheadTokens: toolSchemaTokens,
+        overheadTokens: toolSchemaTokens + calibration,
       });
       if (compacted.compacted) {
         this.messages = await this.applyCompactionSummary(compacted, signal);
@@ -955,6 +987,11 @@ export class AgentLoop {
         this.turnMarkers = [];
         this.opts.registry?.resetVolatileState();
       }
+
+      // Local estimate of the exact request about to be sent (history +
+      // tool schemas, post elision/compaction). Paired with the provider's
+      // reported promptTokens at finish to refresh the calibration baseline.
+      const requestLocalTokens = estimateTokens(this.getMessages()) + toolSchemaTokens;
 
       // One model step, with retries: a transient stream failure (network
       // error, 429/5xx, idle watchdog cutoff) or an empty response must not
@@ -1038,6 +1075,17 @@ export class AgentLoop {
               // The raw usage drives the empty-reply heuristic; the folded
               // copy (own + settled subagent usage) is what consumers meter.
               lastUsage = event.usage;
+              // Calibrate the context estimate against the provider's own
+              // count: promptTokens is the server-side size of the request
+              // just sent, so pairing it with requestLocalTokens yields the
+              // additive delta applied to every elision/compaction/status
+              // estimate until the next finish refreshes it.
+              if (event.usage && event.usage.promptTokens > 0) {
+                this.serverTokenBaseline = {
+                  localTokens: requestLocalTokens,
+                  serverTokens: event.usage.promptTokens,
+                };
+              }
               yield this.foldSubagentUsage(event);
             } else if (event.type === "error") {
               // Held back until retries are exhausted, so the UI shows retry

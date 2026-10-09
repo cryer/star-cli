@@ -10,7 +10,7 @@ import { PROJECT_MEMORY_MAX_CHARS } from "../src/agent/project-memory";
 import type { StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
 import { SessionStore } from "../src/session/store";
-import { createDefaultRegistry } from "../src/tools";
+import { ToolRegistry, createDefaultRegistry } from "../src/tools";
 import type { Tool, ToolContext } from "../src/tools/types";
 import { rmWithRetry } from "./test-fs";
 
@@ -448,6 +448,82 @@ describe("AgentLoop", () => {
       .map((e) => (e.type === "text-delta" ? e.text : ""))
       .join("");
     expect(text).toBe("retried smaller");
+  });
+
+  it("auto-compacts on the server-calibrated estimate when the local estimate under-reads", async () => {
+    writeFileSync(path.join(cwd, "note.txt"), "hello");
+    // The raw local estimate stays ~2.6k tokens (the constructor-registered
+    // subagent/skill/remember schemas dominate it) against a 5000-token
+    // window the whole turn: compaction can only fire via the
+    // server-calibration delta.
+    const registry = new ToolRegistry();
+    registry.register({
+      name: "read_file",
+      description: "read a file",
+      parameters: z.object({ path: z.string() }),
+      permission: "read",
+      execute: async () => ({ content: "hello" }),
+    });
+    const serverCounts = [4500, 5200];
+    let round = 0;
+    const model = new MockLanguageModelV1({
+      doStream: async () => {
+        const serverPrompt = serverCounts[Math.min(round, serverCounts.length - 1)];
+        round += 1;
+        if (round <= 2) {
+          return {
+            // The provider's own count of the very same request runs ~2x the
+            // local cl100k estimate (a tokenizer that counts this content
+            // much higher): 4500 → 5200 against a 5000-token window.
+            stream: convertArrayToReadableStream([
+              {
+                type: "tool-call",
+                toolCallType: "function",
+                toolCallId: `c${round}`,
+                toolName: "read_file",
+                args: JSON.stringify({ path: "note.txt" }),
+              },
+              {
+                type: "finish",
+                finishReason: "tool-calls",
+                usage: { promptTokens: serverPrompt, completionTokens: 3 },
+              },
+            ] as never),
+            rawCall: { rawPrompt: null, rawSettings: {} },
+          };
+        }
+        return {
+          stream: convertArrayToReadableStream(textRound("done")),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const loop = new AgentLoop({
+      model,
+      registry,
+      config: makeConfig({ contextMaxTokens: 5000, contextCompaction: "truncate" }),
+      cwd,
+      retryDelayMs: 1,
+    });
+    await loop.loadMessages([
+      { role: "user", content: "u1" },
+      { role: "assistant", content: "a1" },
+    ]);
+
+    await collect(loop.stream("hi", new AbortController().signal));
+
+    // Round 2's finish (server: 5200 against a local estimate of ~2.6k)
+    // raised the calibrated estimate past the 5000-token window, so the next
+    // step compacted — with the raw local estimate alone it never would have.
+    const messages = loop.getMessages();
+    expect(
+      messages.some(
+        (m) =>
+          m.role === "user" &&
+          typeof m.content === "string" &&
+          m.content.startsWith("[context compacted:"),
+      ),
+    ).toBe(true);
   });
 
   it("denies write tools in readonly mode", async () => {

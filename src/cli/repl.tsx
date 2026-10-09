@@ -9,7 +9,6 @@ import { AgentLoop } from "../agent/loop";
 import { globalConfigPath } from "../config/paths";
 import { addAllowRule, savePermissionMode, saveReasoningEffort } from "../config/save";
 import { type StarConfig, contextWindowTokens } from "../config/schema";
-import { estimateTokens } from "../context/tokens";
 import { getGitSummaryCached } from "../core/git";
 import { MAX_IMAGE_DIMENSION } from "../core/image";
 import { type CoreMessage, type ImageInput, toCoreMessages } from "../core/messages";
@@ -1867,8 +1866,7 @@ export function Repl({
       const current = backendRef.current;
       if (current instanceof AgentLoop) {
         const window_ = contextWindowTokens(config, modelNameRef.current);
-        const pct =
-          ((estimateTokens(current.getMessages()) + current.getToolSchemaTokens()) / window_) * 100;
+        const pct = (current.estimateContextTokens() / window_) * 100;
         // One decimal below 10% so small-but-real usage doesn't display as 0%.
         setContextPercent(pct < 10 ? Math.round(pct * 10) / 10 : Math.round(pct));
       } else {
