@@ -259,6 +259,37 @@ describe("AgentLoop", () => {
     expect(last?.content).toEqual([{ type: "text", text: "answer" }]);
   });
 
+  it("counts the in-flight reply in the ctx estimate while streaming, drops it at step end", async () => {
+    const reasoning = "thinking hard ".repeat(100); // 1400 chars ≈ 350 tokens
+    const loop = makeLoop(
+      mockModel([
+        [
+          { type: "reasoning", textDelta: reasoning },
+          { type: "text-delta", textDelta: "answer" },
+          {
+            type: "finish",
+            finishReason: "stop",
+            usage: { promptTokens: 5, completionTokens: 3 },
+          },
+        ],
+      ]),
+    );
+
+    const before = loop.estimateContextTokens();
+    const gen = loop.stream("hi", new AbortController().signal);
+    // Consume just the first event (the reasoning delta), then read the
+    // gauge mid-stream: it must include the in-flight generation.
+    await gen.next();
+    const during = loop.estimateContextTokens();
+    expect(during - before).toBeGreaterThanOrEqual(300);
+    // Drain the turn.
+    for await (const _ of gen) void _;
+    // After the step the reasoning is no longer part of the estimate — only
+    // the persisted history (user "hi" + assistant "answer") grew it.
+    const after = loop.estimateContextTokens();
+    expect(after - before).toBeLessThan(100);
+  });
+
   it("executes a tool call and continues with the result", async () => {
     writeFileSync(path.join(cwd, "note.txt"), "hello from file", "utf8");
     const loop = makeLoop(

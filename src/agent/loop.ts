@@ -2,7 +2,7 @@ import { type LanguageModel, tool as aiTool, generateText } from "ai";
 import { type StarConfig, resolveCompactThreshold } from "../config/schema";
 import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
 import { elideStaleContent } from "../context/elision";
-import { estimateTokens, estimateToolSchemaTokens } from "../context/tokens";
+import { estimateTokens, estimateToolSchemaTokens, roughTextTokens } from "../context/tokens";
 import {
   type StreamErrorInfo,
   type StreamEvent,
@@ -372,6 +372,15 @@ export class AgentLoop {
   // the provider itself started truncating replies. The delta refreshes on
   // every step's finish, so drift is bounded to one step's new content.
   private serverTokenBaseline: { localTokens: number; serverTokens: number } | null = null;
+  // Text streamed by the in-flight reply (visible text + reasoning +
+  // completed tool-call args). estimateContextTokens folds a rough token
+  // estimate of it into the status-bar ctx% so the display tracks the
+  // server's real-time occupancy — prompt PLUS generated-so-far, which is
+  // what llama.cpp-style monitors show — instead of lagging it by the whole
+  // in-flight generation (10k reasoning tokens ≈ 8% of a 128k window).
+  // Reset when each stream attempt ends: the persisted reply is then counted
+  // through the history estimate, and reasoning — never resent — drops out.
+  private inflightStreamText = "";
   // Lazily resolved auxiliary model (config.smallModel) for cheap side calls
   // — compaction summaries, session titles, completion checks. Undefined =
   // use the main model; a resolution failure is surfaced once as a notice.
@@ -479,11 +488,17 @@ export class AgentLoop {
   }
 
   // Effective context-window usage in tokens: local BPE estimate + tool
-  // schemas + the server-calibration delta. The single number both the
-  // auto-compaction budget and the status-bar ctx% consume.
+  // schemas + the server-calibration delta + the in-flight reply's streamed
+  // output. This is the status bar's live ctx% view; the elision/compaction
+  // budgets deliberately use only the first three (history + schemas +
+  // calibration), since in-flight reasoning is never resent and must not
+  // trigger a compaction the next request won't need.
   estimateContextTokens(): number {
     return (
-      estimateTokens(this.getMessages()) + this.getToolSchemaTokens() + this.calibrationDelta()
+      estimateTokens(this.getMessages()) +
+      this.getToolSchemaTokens() +
+      this.calibrationDelta() +
+      (this.inflightStreamText.length > 0 ? roughTextTokens(this.inflightStreamText) : 0)
     );
   }
 
@@ -1095,6 +1110,7 @@ export class AgentLoop {
         lastUsage = undefined;
         sawReasoning = false;
         wasTruncated = false;
+        this.inflightStreamText = "";
         // Retried attempts get more patient stream timeouts (1x, 2x, 3x): a
         // relay that just timed out is overloaded, so re-asking with the same
         // deadline would hit the same wall.
@@ -1104,11 +1120,14 @@ export class AgentLoop {
           for await (const event of this.streamOnce(aiTools, signal, timeoutScale)) {
             if (event.type === "text-delta") {
               text += event.text;
+              this.inflightStreamText += event.text;
               yield event;
             } else if (event.type === "reasoning") {
               sawReasoning = true;
+              this.inflightStreamText += event.text;
               yield event;
             } else if (event.type === "tool-call") {
+              this.inflightStreamText += JSON.stringify(event.args ?? null);
               toolCalls.push({
                 id: event.id,
                 name: event.name,
@@ -1148,6 +1167,12 @@ export class AgentLoop {
             failure = toStreamErrorInfo(error);
           }
         }
+        // The attempt is over (finished, failed, or aborted): its streamed
+        // text stops counting toward the ctx% gauge here. The visible reply
+        // is re-counted through the history estimate once persisted;
+        // reasoning is never resent, so dropping it matches the next
+        // request's real prompt size.
+        this.inflightStreamText = "";
 
         if (signal.aborted) {
           yield* this.persistInterrupted(text, toolCalls);

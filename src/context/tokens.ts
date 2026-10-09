@@ -58,6 +58,14 @@ function textWeight(text: string): number {
   return text.length + cjk * (CHARS_PER_TOKEN - 1);
 }
 
+// Cheap length-based estimate for live UI gauges (the thinking indicator's
+// thought counter, the in-flight ctx% contribution): the same CJK-weighted
+// rule as the encoder fallback, without running BPE on a string that grows
+// every tick. Display-only — the provider's reported usage owns billing.
+export function roughTextTokens(text: string): number {
+  return Math.ceil(textWeight(text) / CHARS_PER_TOKEN);
+}
+
 function contentTokenLength(message: CoreMessage): number {
   if (message.role === "tool") {
     let tokens = 0;
