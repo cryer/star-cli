@@ -251,13 +251,20 @@ describe("git helpers", () => {
 
 describe("git context in the outgoing request", () => {
   let dir: string;
+  let home: string;
 
   beforeEach(() => {
     dir = mkdtempSync(path.join(tmpdir(), "star-git-loop-test-"));
+    // Isolate from the real ~/.star-cli — a developer's MEMORY.md would
+    // otherwise leak into the system prompt these tests assert on.
+    home = mkdtempSync(path.join(tmpdir(), "star-git-loop-home-"));
+    vi.stubEnv("STAR_HOME", home);
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   });
 
   function capturingModel(captured: LanguageModelV1Prompt[]): MockLanguageModelV1 {

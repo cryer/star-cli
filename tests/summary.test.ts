@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { LanguageModelV1 } from "ai";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentLoop } from "../src/agent/loop";
 import type { StarConfig } from "../src/config/schema";
 import { summarizeMessages } from "../src/context/compaction";
@@ -153,13 +153,20 @@ describe("summarizeMessages", () => {
 
 describe("AgentLoop compaction summary", () => {
   let cwd: string;
+  let home: string;
 
   beforeEach(() => {
     cwd = mkdtempSync(path.join(tmpdir(), "star-summary-test-"));
+    // Isolate from the real ~/.star-cli — a developer's MEMORY.md would
+    // otherwise leak into the system prompt these tests assert on.
+    home = mkdtempSync(path.join(tmpdir(), "star-summary-home-"));
+    vi.stubEnv("STAR_HOME", home);
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   });
 
   function makeLoop(model: MockLanguageModelV1, configOverrides: Partial<StarConfig> = {}) {

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentLoop } from "../src/agent/loop";
 import type { StarConfig } from "../src/config/schema";
 import {
@@ -188,11 +188,18 @@ describe("elideStaleContent", () => {
 
 describe("elision in the agent loop", () => {
   let cwd: string;
+  let home: string;
   beforeEach(() => {
     cwd = mkdtempSync(path.join(tmpdir(), "star-elision-"));
+    // Isolate from the real ~/.star-cli — a developer's MEMORY.md would
+    // otherwise leak into the system prompt these tests assert on.
+    home = mkdtempSync(path.join(tmpdir(), "star-elision-home-"));
+    vi.stubEnv("STAR_HOME", home);
   });
   afterEach(() => {
+    vi.unstubAllEnvs();
     rmSync(cwd, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   });
 
   it("shrinks stale bulk before compaction, keeping every turn in place", async () => {

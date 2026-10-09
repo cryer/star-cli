@@ -238,15 +238,22 @@ describe("AgentLoop.retractLastTurn", () => {
 
 describe("AgentLoop.previewLastTurnRetraction", () => {
   let cwd: string;
+  let home: string;
 
   beforeEach(() => {
     cwd = fs.mkdtempSync(path.join(os.tmpdir(), "star-undo-preview-"));
+    // Isolate from the real ~/.star-cli — a developer's MEMORY.md would
+    // otherwise leak into the loop's system prompt.
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "star-undo-preview-home-"));
+    vi.stubEnv("STAR_HOME", home);
     clearSnapshots();
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     clearSnapshots();
     await rmWithRetry(cwd);
+    await rmWithRetry(home);
   });
 
   it("matches retractLastTurn without mutating messages or turn markers", async () => {
@@ -302,15 +309,22 @@ describe("AgentLoop.previewLastTurnRetraction", () => {
 
 describe("turn-scoped undo (end to end)", () => {
   let cwd: string;
+  let home: string;
 
   beforeEach(() => {
     cwd = fs.mkdtempSync(path.join(os.tmpdir(), "star-turn-undo-"));
+    // Isolate from the real ~/.star-cli — a developer's MEMORY.md would
+    // otherwise leak into the loop's system prompt.
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "star-turn-undo-home-"));
+    vi.stubEnv("STAR_HOME", home);
     clearSnapshots();
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     clearSnapshots();
     await rmWithRetry(cwd);
+    await rmWithRetry(home);
   });
 
   it("reverts only the retracted turn's file changes", async () => {
