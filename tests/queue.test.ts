@@ -30,6 +30,16 @@ describe("PromptQueue", () => {
     expect(queue.dequeue()).toBeUndefined();
   });
 
+  it("enqueueFront jumps ahead of already-queued prompts", () => {
+    const queue = new PromptQueue();
+    queue.enqueue({ text: "queued", images: [] });
+    queue.enqueueFront({ text: "steer-1", images: [] });
+    queue.enqueueFront({ text: "steer-2", images: [] });
+    expect(queue.dequeue()?.text).toBe("steer-2");
+    expect(queue.dequeue()?.text).toBe("steer-1");
+    expect(queue.dequeue()?.text).toBe("queued");
+  });
+
   it("list returns a copy that does not mutate the queue", () => {
     const queue = new PromptQueue();
     queue.enqueue({ text: "a", images: [] });

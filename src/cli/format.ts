@@ -1,5 +1,5 @@
 import type { StreamErrorInfo } from "../core/events";
-import { type CoreMessage, coreMessageText } from "../core/messages";
+import { type CoreMessage, type StarMessage, coreMessageText } from "../core/messages";
 import type { DisplayMessage } from "./components/MessageList";
 import { toolIcon } from "./icons";
 import { committableLineCount } from "./markdown";
@@ -69,10 +69,18 @@ export function formatStreamError(error: StreamErrorInfo): string {
   return error.message;
 }
 
-export function buildDisplayMessages(messages: CoreMessage[]): DisplayMessage[] {
+// Accepts plain CoreMessages or StarMessages (the side-band meta survives
+// resume/rewind/compact redraws): a user message injected as a steering
+// prompt renders with the steer color instead of plain user styling.
+export function buildDisplayMessages(
+  messages: readonly (CoreMessage | StarMessage)[],
+): DisplayMessage[] {
   const display: DisplayMessage[] = [];
   let collapsed = 0;
-  for (const message of messages) {
+  for (const item of messages) {
+    const star: StarMessage = "role" in item ? { message: item } : item;
+    const message = star.message;
+    const steer = star.meta?.synthetic === "steer" ? true : undefined;
     if (message.role === "user" || message.role === "assistant") {
       const content = message.content;
       if (!Array.isArray(content)) {
@@ -80,7 +88,12 @@ export function buildDisplayMessages(messages: CoreMessage[]): DisplayMessage[] 
         if (text) {
           // Restored history skips the streaming ingestion path, so escape it
           // here instead (idempotent — live-turn text is already normalized).
-          display.push({ id: display.length, role: message.role, text: toTerminalSafe(text) });
+          display.push({
+            id: display.length,
+            role: message.role,
+            text: toTerminalSafe(text),
+            steer,
+          });
         } else {
           collapsed++;
         }
@@ -97,7 +110,12 @@ export function buildDisplayMessages(messages: CoreMessage[]): DisplayMessage[] 
         textParts = [];
         if (!text) return;
         represented = true;
-        display.push({ id: display.length, role: message.role, text: toTerminalSafe(text) });
+        display.push({
+          id: display.length,
+          role: message.role,
+          text: toTerminalSafe(text),
+          steer,
+        });
       };
       for (const part of content) {
         if (part.type === "text" && "text" in part) {

@@ -3,6 +3,20 @@ import { buildDisplayMessages, formatElapsedSeconds, formatStreamError } from ".
 import type { CoreMessage } from "../src/core/messages";
 
 describe("buildDisplayMessages", () => {
+  it("marks steered user messages from StarMessage meta", () => {
+    const display = buildDisplayMessages([
+      { message: { role: "user", content: "original prompt" } },
+      {
+        message: { role: "user", content: "also do this" },
+        meta: { synthetic: "steer" },
+      },
+      { message: { role: "user", content: "[auto-continue] …" }, meta: { synthetic: "nudge" } },
+    ]);
+    expect(display[0]?.steer).toBeUndefined();
+    expect(display[1]?.steer).toBe(true);
+    expect(display[2]?.steer).toBeUndefined();
+  });
+
   it("keeps user and assistant text messages", () => {
     const messages: CoreMessage[] = [
       { role: "user", content: "你好" },

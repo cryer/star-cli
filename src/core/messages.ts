@@ -8,8 +8,10 @@ export type { CoreMessage };
 // - "nudge": auto-continue / resume-after-cutoff steering injected mid-turn
 // - "bg-report": a finished background subagent's report, delivered mid-turn
 // - "tool-image": images a tool (read_image/screenshot) attached mid-turn
+// - "steer": a user prompt injected into the running turn (chosen at submit
+//   time over queueing), delivered at the next step boundary
 export interface MessageMeta {
-  synthetic?: "nudge" | "bg-report" | "tool-image";
+  synthetic?: "nudge" | "bg-report" | "tool-image" | "steer";
   // Set by context/elision.ts when the message's bulky content (a stale tool
   // result, an old attached image) was replaced with a placeholder to free
   // the window — idempotency marker and debugging aid; the model never sees it.

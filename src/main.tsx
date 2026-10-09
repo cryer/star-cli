@@ -15,12 +15,7 @@ import {
 import { SYSTEM_PROMPT } from "./cli/system-prompt";
 import { loadConfigSync } from "./config/loader";
 import { type StarConfig, contextWindowTokens } from "./config/schema";
-import {
-  type ImageInput,
-  type StarMessage,
-  reconcileStarMessages,
-  toCoreMessages,
-} from "./core/messages";
+import { type ImageInput, type StarMessage, reconcileStarMessages } from "./core/messages";
 import { resolveModelConfig, resolveStartupModel } from "./llm/registry";
 import { loadSessionSnapshots } from "./session/checkpoints";
 import { clearSessions } from "./session/clear";
@@ -348,7 +343,7 @@ program
       config,
       cwd,
       sessionStore,
-      initialMessages: resumed ? toCoreMessages(resumed.messages) : undefined,
+      initialMessages: resumed ? resumed.messages : undefined,
       initialUsage: resumed?.meta.usage,
     });
   });

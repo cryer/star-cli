@@ -380,6 +380,11 @@ export class AgentLoop {
   // in-flight generation (10k reasoning tokens ≈ 8% of a 128k window).
   // Reset when each stream attempt ends: the persisted reply is then counted
   // through the history estimate, and reasoning — never resent — drops out.
+  // User steering prompts submitted while a turn is running (the REPL's
+  // "insert now" choice). Drained into the history as synthetic user
+  // messages at the next step boundary — the in-flight model reply and its
+  // tool calls always finish first, so a steer never interrupts mid-step.
+  private pendingSteers: string[] = [];
   private inflightStreamText = "";
   // Lazily resolved auxiliary model (config.smallModel) for cheap side calls
   // — compaction summaries, session titles, completion checks. Undefined =
@@ -468,6 +473,35 @@ export class AgentLoop {
   // lose synthetic-message markers (model switch, manual /compact).
   getStarMessages(): readonly StarMessage[] {
     return this.messages;
+  }
+
+  // Queue a user steering prompt for the running turn. Delivery happens at
+  // the next step boundary (see drainSteers); if the turn ends first the
+  // text stays queued and takeUndeliveredSteers hands it back to the caller.
+  injectUserMessage(text: string): void {
+    const trimmed = text.trim();
+    if (trimmed.length > 0) this.pendingSteers.push(trimmed);
+  }
+
+  // Steers that never reached a step boundary (turn ended, aborted or
+  // errored first). The caller decides their fate — the REPL re-queues them
+  // as ordinary prompts so user input is never dropped.
+  takeUndeliveredSteers(): string[] {
+    return this.pendingSteers.splice(0);
+  }
+
+  // Append queued steers to the history as synthetic user messages: they
+  // belong to the turn in progress, so /undo, /rewind and compaction must
+  // not treat them as turn boundaries. Returns the number delivered.
+  private async drainSteers(): Promise<number> {
+    const steers = this.pendingSteers.splice(0);
+    for (const text of steers) {
+      const message: CoreMessage = { role: "user", content: text };
+      const meta: MessageMeta = { synthetic: "steer" };
+      this.messages.push({ message, meta });
+      await this.persist(message, meta);
+    }
+    return steers.length;
   }
 
   // Wire-schema token overhead of the active tool set (memoized by
@@ -975,6 +1009,16 @@ export class AgentLoop {
           await this.persist(note, meta);
         }
       }
+      // User steering prompts (the REPL's "insert now" choice) land at step
+      // boundaries like background reports: the current model reply and its
+      // tool calls always run to completion first.
+      const steered = await this.drainSteers();
+      if (steered > 0) {
+        yield {
+          type: "notice",
+          message: `${steered} steering message(s) delivered to the model; taking effect from this step.`,
+        };
+      }
       // A todo list with open items that hasn't been rewritten for
       // todoStaleNudgeSteps steps is usually forgotten, not finished: remind
       // the model to reconcile it, then let it keep working. Synthetic like
@@ -1254,6 +1298,16 @@ export class AgentLoop {
         return;
       }
       if (!hasOutput()) {
+        // A queued steering message beats the empty-reply steering below: it
+        // changes the model's input with real user intent.
+        const steered = await this.drainSteers();
+        if (steered > 0) {
+          yield {
+            type: "notice",
+            message: `${steered} steering message(s) delivered to the model after an empty reply.`,
+          };
+          continue;
+        }
         // Steering beats repeating: a nudge changes the model's input, which
         // breaks a deterministic empty reply where an identical resend would
         // not. Shares the auto-continue budget, so a model that keeps
@@ -1305,6 +1359,21 @@ export class AgentLoop {
       await this.persist(assistantMessage);
 
       if (toolCalls.length === 0) {
+        // A queued steering message is explicit user input: deliver it and
+        // keep the turn alive instead of judging the reply with the
+        // truncation/auto-continue logic below (or ending the turn). The
+        // unproductivity budget resets — a fresh instruction is not a nudge
+        // the model ignored.
+        const steered = await this.drainSteers();
+        if (steered > 0) {
+          autoContinues = 0;
+          lastWasNudge = false;
+          yield {
+            type: "notice",
+            message: `${steered} steering message(s) delivered to the model; the turn continues.`,
+          };
+          continue;
+        }
         // A watchdog cut mid-generation is a stream failure, not a model
         // choice: resume where the reply stopped rather than judging the
         // partial text with the unproductivity signals below (which would

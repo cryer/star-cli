@@ -26,7 +26,8 @@ export interface CompactSessionOptions {
 export interface CompactSessionResult {
   message: string;
   compacted: boolean;
-  messages?: CoreMessage[];
+  // Star view so the redraw keeps synthetic-message markers (steer coloring).
+  messages?: StarMessage[];
 }
 
 export async function compactSession(opts: CompactSessionOptions): Promise<CompactSessionResult> {
@@ -69,7 +70,7 @@ export async function compactSession(opts: CompactSessionOptions): Promise<Compa
   return {
     message: `Compacted context: ${messages.length} -> ${next.length} messages (~${formatTokens(beforeTokens)} -> ~${formatTokens(afterTokens)} estimated tokens).`,
     compacted: true,
-    messages: coreNext,
+    messages: next,
   };
 }
 

@@ -11,7 +11,7 @@ import { addAllowRule, savePermissionMode, saveReasoningEffort } from "../config
 import { type StarConfig, contextWindowTokens } from "../config/schema";
 import { getGitSummaryCached } from "../core/git";
 import { MAX_IMAGE_DIMENSION } from "../core/image";
-import { type CoreMessage, type ImageInput, toCoreMessages } from "../core/messages";
+import type { CoreMessage, ImageInput, StarMessage } from "../core/messages";
 import { createModel, reasoningEffortMetadata } from "../llm/provider";
 import { listModels, resolveModelConfig } from "../llm/registry";
 import { buildAllowRule, isAllowedByRules } from "../permissions/allow";
@@ -226,7 +226,7 @@ interface ReplProps {
   config: StarConfig;
   cwd: string;
   sessionStore: SessionStore | null;
-  initialMessages?: CoreMessage[];
+  initialMessages?: readonly (CoreMessage | StarMessage)[];
   initialUsage?: UsageStats;
 }
 
@@ -354,11 +354,12 @@ export function Repl({
       tight?: boolean,
       interrupted?: boolean,
       diff?: DiffLine[],
+      steer?: boolean,
     ) => {
       setMessages((prev) => {
         const next = [
           ...prev,
-          { id: nextIdRef.current++, role, text, note, tight, interrupted, diff },
+          { id: nextIdRef.current++, role, text, note, tight, interrupted, diff, steer },
         ];
         messagesRef.current = next;
         return next;
@@ -924,7 +925,7 @@ export function Repl({
       setTodoSession(store.id);
       setTodos(await loadTodos(cwd, store.id));
       hydrateSnapshots(await loadSessionSnapshots(store.dir));
-      const display = buildDisplayMessages(toCoreMessages(resumed.messages));
+      const display = buildDisplayMessages(resumed.messages);
       nextIdRef.current = display.length;
       applyMessages(display);
       usageRef.current = resumed.meta.usage ? { ...resumed.meta.usage } : emptyUsage();
@@ -1207,6 +1208,18 @@ export function Repl({
             "system",
             `Session budget exceeded: $${formatDollars(cost ?? 0)} of $${formatDollars(budget ?? 0)} (sessionBudgetUsd). New prompts are blocked — raise sessionBudgetUsd in the config or start a /new session.`,
           );
+        }
+        // Steers submitted mid-turn that never reached a step boundary (the
+        // turn ended, errored or was Esc-aborted first) must not silently
+        // vanish: recover them at the front of the typeahead queue so they
+        // still run, ahead of prompts queued after them.
+        const backend = backendRef.current;
+        if (backend instanceof AgentLoop) {
+          const undelivered = backend.takeUndeliveredSteers();
+          for (const text of [...undelivered].reverse()) {
+            queueRef.current.enqueueFront({ text, images: [] });
+          }
+          if (undelivered.length > 0) setQueueItems(queueRef.current.list());
         }
         // Typeahead queue: send the next queued prompt FIFO once this turn is
         // fully done (permission prompts included). A crossed budget drops the
@@ -1686,7 +1699,7 @@ export function Repl({
         if (result.messageIndex !== null && current instanceof AgentLoop) {
           retracted = await current.retractFromIndex(result.messageIndex);
           if (retracted > 0) {
-            const display = buildDisplayMessages([...current.getMessages()]);
+            const display = buildDisplayMessages([...current.getStarMessages()]);
             nextIdRef.current = display.length;
             redrawMessages(display);
           }
@@ -1890,13 +1903,61 @@ export function Repl({
       const images = pendingImagesRef.current.map((staged) => staged.image);
       if (images.length > 0) clearPendingImages();
       if (abortRef.current || busyCommandRef.current) {
+        // Mid-turn submit: offer steering (injected into the running turn at
+        // the next step boundary) over plain typeahead queueing. Only a real
+        // turn (not a busy slash command) on an AgentLoop can be steered, and
+        // image payloads stay queue-only — the tool-image injection path is
+        // for tool attachments.
+        const backend = backendRef.current;
+        if (abortRef.current && images.length === 0 && backend instanceof AgentLoop) {
+          void (async () => {
+            const picked = await showPicker("Turn is running — how should this be sent?", [
+              {
+                value: "steer",
+                label: "insert into the running turn",
+                description: "delivered to the model at the next step boundary",
+              },
+              {
+                value: "queue",
+                label: "queue for after the turn",
+                description: "sent as a new prompt once the current turn finishes",
+              },
+            ]);
+            if (picked === "steer") {
+              backend.injectUserMessage(text);
+              pushMessage(
+                "user",
+                text,
+                "steering the running turn — the model sees it at the next step",
+                undefined,
+                undefined,
+                undefined,
+                true,
+              );
+              return;
+            }
+            // "queue" or an Esc-cancelled picker: never drop user input.
+            queueRef.current.enqueue({ text, images });
+            setQueueItems(queueRef.current.list());
+          })();
+          return;
+        }
         queueRef.current.enqueue({ text, images });
         setQueueItems(queueRef.current.list());
         return;
       }
       void runStream(text, images);
     },
-    [registry, pushMessage, runStream, runShellBang, config, clearPendingImages, sessionCostUsd],
+    [
+      registry,
+      pushMessage,
+      runStream,
+      runShellBang,
+      config,
+      clearPendingImages,
+      sessionCostUsd,
+      showPicker,
+    ],
   );
 
   const commandHints = useMemo(
@@ -2046,7 +2107,7 @@ export interface ReplOptions {
   config: StarConfig;
   cwd: string;
   sessionStore: SessionStore | null;
-  initialMessages?: CoreMessage[];
+  initialMessages?: readonly (CoreMessage | StarMessage)[];
   initialUsage?: UsageStats;
 }
 

@@ -18,6 +18,9 @@ export interface DisplayMessage {
   // dim = render without the role color (folded one-line tool-call summaries
   // in restored history, which should recede behind the conversation text).
   dim?: boolean;
+  // A user prompt steered into a running turn (the "insert now" submit
+  // choice) instead of starting one: renders in a distinct color.
+  steer?: boolean;
   // Set on the last chunk of a turn cut short with Esc: renders a dim
   // "[interrupted]" marker after the text. Display-only — the session store
   // carries its own marker (see AgentLoop.persistInterrupted).
@@ -103,13 +106,14 @@ export const MessageList = memo(function MessageList({ messages }: { messages: D
           );
         }
         if (message.role === "user") {
+          const color = message.steer ? "magenta" : "cyan";
           return (
             <Box key={message.id} flexDirection="column" marginBottom={marginBottom}>
               <Box>
-                <Text bold color="cyan">
-                  {"❯ "}
+                <Text bold color={color}>
+                  {message.steer ? "» " : "❯ "}
                 </Text>
-                <Text color="cyan">
+                <Text color={color}>
                   {message.text}
                   {message.interrupted && interruptedMarker(message.text)}
                 </Text>

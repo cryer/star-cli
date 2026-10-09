@@ -18,6 +18,13 @@ export class PromptQueue {
     return this.items.length;
   }
 
+  // Jump the queue: steering prompts the running turn never delivered are
+  // recovered here when the turn ends, and they were submitted before the
+  // already-queued entries.
+  enqueueFront(prompt: { text: string; images: ImageInput[] }): void {
+    this.items.unshift({ id: this.nextId++, ...prompt });
+  }
+
   dequeue(): QueuedPrompt | undefined {
     return this.items.shift();
   }
