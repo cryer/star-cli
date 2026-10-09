@@ -10,6 +10,8 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-10-09
+
 ### Added
 
 - **steer the running turn with a mid-turn prompt**: submitting a prompt while a turn is streaming now asks "insert into the running turn" or "queue for after the turn" (Esc falls back to queueing, so input is never lost). An inserted (steered) prompt is delivered to the model at the next step boundary — the in-flight reply and its tool calls always finish first — and if the reply was about to end the turn, the turn continues with the steered instruction instead. Steered messages persist with a synthetic marker (never a `/undo`/compaction turn boundary), render in magenta with a `»` prefix in the transcript, and keep that styling across resume, `/compact` and `/rewind` redraws. A steer that never reaches a step boundary (turn ended, errored or was Esc-aborted first) is recovered to the front of the typeahead queue so it still runs
