@@ -107,7 +107,7 @@ describe("ConnectWizard", () => {
     // move past the 5 presets onto Custom
     await typeText(app.stdin, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER);
     expect(frame(app)).toContain("API format (protocol)?");
-    await typeText(app.stdin, ENTER); // openai-compatible (first option)
+    await typeText(app.stdin, ENTER); // openai-responses (default, first option)
 
     expect(frame(app)).toContain("baseURL:");
     await typeText(app.stdin, "https://relay.example.com/v1", ENTER);
@@ -117,7 +117,7 @@ describe("ConnectWizard", () => {
     await typeText(app.stdin, "my-model", ENTER);
 
     const summary = frame(app);
-    expect(summary).toContain("provider:  relay (openai-compatible)");
+    expect(summary).toContain("provider:  relay (openai-responses)");
     expect(summary).toContain("STAR_API_KEY_RELAY");
     // answering n on the confirmation cancels without saving
     await typeText(app.stdin, "n");
@@ -132,7 +132,7 @@ describe("ConnectWizard", () => {
 
     await tick();
     await typeText(app.stdin, DOWN, DOWN, DOWN, DOWN, DOWN, ENTER); // Custom
-    await typeText(app.stdin, ENTER); // openai-compatible
+    await typeText(app.stdin, ENTER); // openai-responses (default)
     expect(frame(app)).toContain("baseURL:");
 
     await typeText(app.stdin, "\u001B[200~https://api.example.com/v11\u001B[201~");

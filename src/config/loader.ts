@@ -281,7 +281,7 @@ function mergeProjectConfig(
     merged.sessionBudgetUsd = Math.min(global.sessionBudgetUsd, project.sessionBudgetUsd);
   }
   if (project.maxSteps !== undefined) {
-    merged.maxSteps = protectiveMin(global.maxSteps ?? 100, project.maxSteps);
+    merged.maxSteps = protectiveMin(global.maxSteps ?? 0, project.maxSteps);
   }
   if (project.doomLoopThreshold !== undefined) {
     merged.doomLoopThreshold = protectiveMin(

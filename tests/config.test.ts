@@ -54,8 +54,8 @@ describe("loadConfig", () => {
       permissionMode: "ask",
       providers: [],
       models: [],
-      maxSteps: 100,
-      contextMaxTokens: 100_000,
+      maxSteps: 0,
+      contextMaxTokens: 200_000,
       streamIdleTimeoutSec: 60,
       streamFirstChunkTimeoutSec: 300,
       streamMaxRetries: 5,
@@ -83,7 +83,7 @@ permissionMode = "auto"
     expect(config.defaultModel).toBe("fast");
     expect(config.maxSteps).toBe(10);
     expect(config.permissionMode).toBe("auto");
-    expect(config.contextMaxTokens).toBe(100_000);
+    expect(config.contextMaxTokens).toBe(200_000);
   });
 
   it("loads notify bell settings", async () => {
@@ -369,15 +369,17 @@ model = "m"
   it("lets projects tighten but never relax maxSteps and doomLoopThreshold", async () => {
     writeFile(projectConfigPath(cwd), "maxSteps = 0\ndoomLoopThreshold = 0\n");
     let config = await loadConfig(cwd);
-    expect(config.maxSteps).toBe(100);
+    expect(config.maxSteps).toBe(0);
     expect(config.doomLoopThreshold).toBe(3);
     const out = stderrOutput();
     expect(out).toContain('ignoring "maxSteps = 0"');
     expect(out).toContain('ignoring "doomLoopThreshold = 0"');
 
+    // An unset global defaults to unlimited (0), so a project-side 500
+    // TIGHTENS it; doomLoopThreshold still defaults to a finite 3.
     writeFile(projectConfigPath(cwd), "maxSteps = 500\ndoomLoopThreshold = 9\n");
     config = await loadConfig(cwd);
-    expect(config.maxSteps).toBe(100);
+    expect(config.maxSteps).toBe(500);
     expect(config.doomLoopThreshold).toBe(3);
 
     writeFile(globalConfigPath(), "maxSteps = 40\ndoomLoopThreshold = 5\n");

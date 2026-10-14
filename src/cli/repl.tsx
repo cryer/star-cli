@@ -60,6 +60,7 @@ import { copyText, readClipboardImage } from "./clipboard";
 import { compactSession, exportSession } from "./commands/actions";
 import { registerBuiltinCommands } from "./commands/builtin";
 import {
+  CONFIG_DOCS_URL,
   type ConnectAnswers,
   openConfigFile,
   saveConnection,
@@ -335,7 +336,11 @@ export function Repl({
   // the last user message for editing.
   const lastEscRef = useRef<number | null>(null);
   const [gitBranch, setGitBranch] = useState<string | null>(null);
-  const [contextPercent, setContextPercent] = useState<number | null>(null);
+  const [contextUsage, setContextUsage] = useState<{
+    percent: number;
+    used: number;
+    window: number;
+  } | null>(null);
   // Persistent input history, loaded once per process (STAR_HOME is fixed).
   const [initialHistory] = useState(() => loadHistory());
   const budgetWarnedRef = useRef(false);
@@ -511,7 +516,7 @@ export function Repl({
       const result = saveConnection(answers);
       config.providers.push(result.provider);
       config.models.push(result.model);
-      return `Saved provider "${result.provider.name}" and model "${result.model.name}" to ${result.configPath}; the key is stored as ${result.provider.apiKeyEnv} in ${result.envPath}.`;
+      return `Saved provider "${result.provider.name}" and model "${result.model.name}" to ${result.configPath}; the key is stored as ${result.provider.apiKeyEnv} in ${result.envPath}.\nFull configuration details: ${CONFIG_DOCS_URL}`;
     },
     [config],
   );
@@ -1986,11 +1991,16 @@ export function Repl({
       const current = backendRef.current;
       if (current instanceof AgentLoop) {
         const window_ = contextWindowTokens(config, modelNameRef.current);
-        const pct = (current.estimateContextTokens() / window_) * 100;
+        const used = current.estimateContextTokens();
+        const pct = (used / window_) * 100;
         // One decimal below 10% so small-but-real usage doesn't display as 0%.
-        setContextPercent(pct < 10 ? Math.round(pct * 10) / 10 : Math.round(pct));
+        setContextUsage({
+          percent: pct < 10 ? Math.round(pct * 10) / 10 : Math.round(pct),
+          used,
+          window: window_,
+        });
       } else {
-        setContextPercent(null);
+        setContextUsage(null);
       }
     };
     refresh();
@@ -2092,7 +2102,10 @@ export function Repl({
         permissionMode={permissionModeState}
         tokens={usageRef.current.totalTokens}
         gitBranch={gitBranch}
-        contextPercent={contextPercent}
+        contextPercent={contextUsage?.percent ?? null}
+        contextTokens={
+          contextUsage ? { used: contextUsage.used, window: contextUsage.window } : null
+        }
         cachePercent={usageRef.current.cache ? cacheHitPercent(usageRef.current.cache) : null}
         sessionCostUsd={sessionCost}
         backgroundTasks={bgLabels}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeCostUsd, estimateCost, formatTokens } from "../src/cli/cost";
+import { computeCostUsd, estimateCost, formatTokens, formatTokensCompact } from "../src/cli/cost";
 import { ModelConfigSchema } from "../src/config/schema";
 
 describe("ModelConfigSchema pricing", () => {
@@ -200,5 +200,15 @@ describe("formatTokens", () => {
     expect(formatTokens(1_000_000)).toBe("1.00M");
     expect(formatTokens(6_740_000)).toBe("6.74M");
     expect(formatTokens(128_000_000)).toBe("128.00M");
+  });
+});
+
+describe("formatTokensCompact", () => {
+  it("shows one decimal and drops a trailing .0", () => {
+    expect(formatTokensCompact(842)).toBe("842");
+    expect(formatTokensCompact(60_700)).toBe("60.7K");
+    expect(formatTokensCompact(200_000)).toBe("200K");
+    expect(formatTokensCompact(1_000_000)).toBe("1M");
+    expect(formatTokensCompact(1_250_000)).toBe("1.3M");
   });
 });

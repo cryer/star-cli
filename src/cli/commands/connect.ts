@@ -59,7 +59,12 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   },
 ];
 
-export const PROTOCOLS: Protocol[] = ["openai-compatible", "anthropic", "openai-responses"];
+export const PROTOCOLS: Protocol[] = ["openai-responses", "openai-compatible", "anthropic"];
+
+// Default pick of the /connect custom-provider protocol step (highlighted
+// first): relays (中转站) increasingly front reasoning models that only speak
+// the Responses API.
+export const DEFAULT_CUSTOM_PROTOCOL: Protocol = "openai-responses";
 
 export const PROTOCOL_DESCRIPTIONS: Record<Protocol, string> = {
   "openai-compatible": "POST /chat/completions — most providers",
@@ -70,6 +75,28 @@ export const PROTOCOL_DESCRIPTIONS: Record<Protocol, string> = {
 // Context window written into new [[models]] blocks; edit after saving when
 // the real limit differs.
 export const CONNECT_DEFAULT_CONTEXT_TOKENS = 128_000;
+
+// Pointed at from the generated config.toml header and the /connect result.
+export const CONFIG_DOCS_URL = "https://github.com/cryer/star-cli";
+
+// Top of a freshly created config.toml: the docs pointer plus the tuned
+// global defaults, spelled out so the file is self-documenting. Existing
+// files are never touched — /connect only appends blocks to them.
+export function buildNewConfigHeader(): string {
+  return [
+    `# star-cli configuration — more config details on ${CONFIG_DOCS_URL}`,
+    "",
+    "# progress checkpoint: max model round-trips per turn; 0 = unlimited",
+    "maxSteps = 0",
+    "# context window in tokens; a [[models]] contextMaxTokens overrides it per model",
+    "contextMaxTokens = 200000",
+    "# auto-compact the history once the estimated usage crosses this threshold",
+    "compactThresholdTokens = 100000",
+    '# how compaction shrinks the history: "summary" (LLM summary) or "truncate"',
+    'contextCompaction = "summary"',
+    "",
+  ].join("\n");
+}
 
 export interface ConnectAnswers {
   providerName: string;
@@ -182,7 +209,8 @@ export interface ConnectResult {
 // place when the variable already exists, chmod 600 where the platform
 // honors it) and is exported into this process so the model works without a
 // restart; the [[providers]]/[[models]] blocks are appended to config.toml as
-// text so existing content and comments survive.
+// text so existing content and comments survive (a fresh file first gets the
+// buildNewConfigHeader header with the docs link and tuned defaults).
 export function saveConnection(
   answers: ConnectAnswers,
   configPath: string = globalConfigPath(),
@@ -235,6 +263,7 @@ export function saveConnection(
   } catch {
     existing = "";
   }
+  if (existing === "") existing = buildNewConfigHeader();
   const separator = existing === "" ? "" : existing.endsWith("\n") ? "\n" : "\n\n";
   fs.writeFileSync(
     configPath,

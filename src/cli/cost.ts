@@ -30,6 +30,16 @@ export function formatTokens(n: number): string {
   return `${(n / 1_000_000).toFixed(2)}M`;
 }
 
+// Compact token count for the status bar's ctx gauge: one decimal, a trailing
+// ".0" dropped (60_700 → "60.7K", 200_000 → "200K", 1_000_000 → "1M").
+export function formatTokensCompact(n: number): string {
+  if (!Number.isFinite(n)) return String(n);
+  if (n < 1000) return String(n);
+  const thousands = n < 1_000_000;
+  const scaled = thousands ? n / 1000 : n / 1_000_000;
+  return `${scaled.toFixed(1).replace(/\.0$/, "")}${thousands ? "K" : "M"}`;
+}
+
 // Numeric session cost in USD; null when the model has no pricing configured.
 // Cache pricing: OpenAI-style cached tokens are a subset of promptTokens, so
 // the uncached rest bills at promptPrice and the cached share at

@@ -109,6 +109,41 @@ describe("StatusBar background tasks", () => {
   });
 });
 
+describe("StatusBar ctx field", () => {
+  it("shows the percent with used/window token counts", async () => {
+    const app = renderApp(
+      createElement(StatusBar, {
+        cwd: "/tmp/project",
+        model: "gpt6",
+        permissionMode: "auto",
+        tokens: 0,
+        contextPercent: 30,
+        contextTokens: { used: 60_700, window: 200_000 },
+      }),
+    );
+    await tick();
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("ctx: 30% (60.7K/200K)");
+    app.unmount();
+  });
+
+  it("renders the bare percent when token counts are unavailable", async () => {
+    const app = renderApp(
+      createElement(StatusBar, {
+        cwd: "/tmp/project",
+        model: "gpt6",
+        permissionMode: "auto",
+        tokens: 0,
+        contextPercent: 30,
+      }),
+    );
+    await tick();
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("ctx: 30%");
+    expect(frame).not.toContain("(60");
+    app.unmount();
+  });
+});
+
 describe("StatusBar cache field", () => {
   it("shows Not provided when no cache data was reported", async () => {
     const app = renderApp(

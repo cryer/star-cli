@@ -2,6 +2,7 @@ import { Box, Text } from "ink";
 import { useRef, useState } from "react";
 import {
   type ConnectAnswers,
+  DEFAULT_CUSTOM_PROTOCOL,
   PROTOCOLS,
   PROTOCOL_DESCRIPTIONS,
   PROVIDER_PRESETS,
@@ -61,7 +62,7 @@ export function ConnectWizard({
 }: ConnectWizardProps) {
   const [step, setStep] = useState<Step>("provider");
   const [preset, setPreset] = useState<ProviderPreset | null>(null);
-  const [protocol, setProtocol] = useState<Protocol>("openai-compatible");
+  const [protocol, setProtocol] = useState<Protocol>(DEFAULT_CUSTOM_PROTOCOL);
   const [baseURL, setBaseURL] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [modelId, setModelId] = useState("");
@@ -212,6 +213,7 @@ export function ConnectWizard({
           options={PROTOCOLS.map((p) => ({
             value: p,
             label: p,
+            hint: p === DEFAULT_CUSTOM_PROTOCOL ? "default" : undefined,
             description: PROTOCOL_DESCRIPTIONS[p],
           }))}
           onSelect={handleProtocolSelect}

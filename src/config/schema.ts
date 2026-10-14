@@ -105,9 +105,10 @@ export const ConfigSchema = z.object({
   // retries and auto-continue nudges do not consume steps. Reaching the cap
   // while tools still execute resets the budget with a notice; the turn stops
   // only when no tool ran since the last checkpoint (the doom-loop
-  // signature). 0 disables the cap entirely (opencode/codex have none).
-  maxSteps: z.number().int().min(0).default(100),
-  contextMaxTokens: z.number().int().positive().default(100_000),
+  // signature). 0 disables the cap entirely and is the default
+  // (opencode/codex have none).
+  maxSteps: z.number().int().min(0).default(0),
+  contextMaxTokens: z.number().int().positive().default(200_000),
   // Token threshold at which the agent loop auto-compacts the history.
   // Defaults to the effective context window (compact only when full); set a
   // lower value to compact earlier and keep headroom. Manual /compact ignores

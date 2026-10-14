@@ -251,6 +251,26 @@ describe("saveConnection", () => {
     expect(model?.completionPrice).toBe(0);
   });
 
+  it("creates a fresh config.toml with the docs header and tuned defaults", () => {
+    saveConnection(answers);
+    const content = fs.readFileSync(globalConfigPath(), "utf8");
+    expect(content.startsWith("# star-cli configuration")).toBe(true);
+    expect(content).toContain("more config details on https://github.com/cryer/star-cli");
+    expect(content).toContain("maxSteps = 0");
+    expect(content).toContain("contextMaxTokens = 200000");
+    expect(content).toContain("compactThresholdTokens = 100000");
+    expect(content).toContain('contextCompaction = "summary"');
+    expect(content).toContain('name = "openrouter"');
+  });
+
+  it("does not add the header to an existing config.toml", () => {
+    fs.writeFileSync(globalConfigPath(), 'defaultModel = "old"\n');
+    saveConnection(answers);
+    const content = fs.readFileSync(globalConfigPath(), "utf8");
+    expect(content.startsWith('defaultModel = "old"')).toBe(true);
+    expect(content).not.toContain("more config details on");
+  });
+
   it("updates an existing .env variable instead of duplicating it", () => {
     fs.writeFileSync(envFilePath(), "STAR_API_KEY_OPENROUTER=old-key\nOTHER=1\n");
     saveConnection(answers);

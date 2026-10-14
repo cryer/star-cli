@@ -1,6 +1,6 @@
 import { Box, Text, useStdout } from "ink";
 import { memo } from "react";
-import { formatDollars, formatTokens } from "../cost";
+import { formatDollars, formatTokens, formatTokensCompact } from "../cost";
 import { folderIcon } from "../icons";
 import { toTerminalSafe } from "../terminal-text";
 
@@ -13,6 +13,8 @@ interface StatusBarProps {
   gitBranch?: string | null;
   // Context window usage in percent; null when unknown (non-loop backend).
   contextPercent?: number | null;
+  // Token counts behind contextPercent, rendered as "(used/window)".
+  contextTokens?: { used: number; window: number } | null;
   // Prompt cache hit rate 0-100; null when the provider never reported cache
   // fields (rendered as "Not provided").
   cachePercent?: number | null;
@@ -40,6 +42,7 @@ export const StatusBar = memo(function StatusBar({
   tokens,
   gitBranch,
   contextPercent,
+  contextTokens,
   cachePercent,
   sessionCostUsd,
   backgroundTasks = [],
@@ -62,7 +65,14 @@ export const StatusBar = memo(function StatusBar({
         </Text>
       )}
       <Text dimColor>✦ {model}</Text>
-      {contextPercent != null && <Text dimColor>ctx: {contextPercent}%</Text>}
+      {contextPercent != null && (
+        <Text dimColor>
+          ctx: {contextPercent}%
+          {contextTokens
+            ? ` (${formatTokensCompact(contextTokens.used)}/${formatTokensCompact(contextTokens.window)})`
+            : ""}
+        </Text>
+      )}
       <Text dimColor>cache: {cachePercent != null ? `${cachePercent}%` : "Not provided"}</Text>
       {sessionCostUsd != null && sessionCostUsd > 0 && (
         <Text dimColor>${formatDollars(sessionCostUsd)}</Text>

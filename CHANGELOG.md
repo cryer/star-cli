@@ -10,6 +10,12 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ## [Unreleased]
 
+### Changed
+
+- **`/connect` custom providers now default to the `openai-responses` protocol**: the protocol picker of a custom endpoint opens with `openai-responses` highlighted (marked "default") instead of `openai-compatible` — relays fronting reasoning models increasingly expose only the Responses API. Preset providers keep their own protocols
+- **tuned onboarding defaults**: the global defaults are now `maxSteps = 0` (unlimited — the per-turn checkpoint was already only a soft stop) and `contextMaxTokens = 200000`. A config.toml created fresh by `/connect` also starts with a self-documenting header — `# more config details on https://github.com/cryer/star-cli` plus explicit `maxSteps = 0`, `contextMaxTokens = 200000`, `compactThresholdTokens = 100000` and `contextCompaction = "summary"` lines — and the wizard's result message points to the README for the full configuration reference. Existing config files are untouched
+- **the status bar ctx gauge shows the token counts behind the percent**: `ctx: 30% (60.7K/200K)` — one decimal via the new `formatTokensCompact`, trailing ".0" dropped
+
 ### Fixed
 
 - **markdown tables no longer misalign when cells contain inline markers**: cell padding was measured on the raw markdown source, but body cells render through `renderInline`, which strips backticks, `**` and link syntax — so every `` `code` `` span pulled that row's `│` joiners 2 cells left (varying per row), and wrapped continuation lines (empty raw cells) no longer matched the first line of their own row. Padding is now measured on the styled cell's visible width, keeping header, body and continuation rows on the same grid
