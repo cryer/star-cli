@@ -126,6 +126,31 @@ describe("renderMarkdown", () => {
     }
   });
 
+  it("keeps │ joiners aligned when cells contain inline markers", () => {
+    const md = [
+      "| 文件夹 | 是什么 |",
+      "| --- | --- |",
+      "| `farm_build/` | 🌾 欢乐农场（Happy Farm）早期版本 |",
+      "| `work_farm/` | 🌾 最新版 - 在 `farm_build` 基础上加机制 |",
+      "| plain | 🔫 无标记行 |",
+    ].join("\n");
+    const lines = stripAnsi(renderMarkdown(md, "32", 100)).split("\n");
+    const joinerColumns = (line: string): number[] => {
+      const positions: number[] = [];
+      let width = 0;
+      for (const ch of line) {
+        if (ch === "│") positions.push(width);
+        width += cellWidth(ch);
+      }
+      return positions;
+    };
+    const reference = joinerColumns(lines[0] ?? "");
+    expect(reference.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      if (line.includes("│")) expect(joinerColumns(line)).toEqual(reference);
+    }
+  });
+
   it("leaves non-table pipe lines alone", () => {
     expect(stripAnsi(renderMarkdown("a | b without separator"))).toBe("a | b without separator");
   });

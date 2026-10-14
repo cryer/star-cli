@@ -110,6 +110,9 @@ function splitTableRow(line: string): string[] | null {
   return stripped.split("|").map((cell) => cell.trim());
 }
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI is the point
+const ANSI_RE = /\u001B\[[0-9;]*m/g;
+
 const MIN_COLUMN_WIDTH = 4;
 
 // Wraps a cell to its column width by display cells. Breaks at the last
@@ -161,8 +164,10 @@ function renderTable(lines: string[], base: string, maxWidth: number): string[] 
     if (widths[widest] === undefined || widths[widest] <= MIN_COLUMN_WIDTH) break;
     widths[widest] -= 1;
   }
-  // Widths come from the raw cell text; padding is appended after styling so
-  // ANSI bytes never skew the alignment.
+  // Padding is appended after styling so ANSI bytes never skew the alignment,
+  // and is measured on the styled text's visible width: renderInline strips
+  // markers (backticks, **, link syntax), so the raw cell width would
+  // over-pad and push the │ joiners off the grid.
   const joiner = ` ${dim("│", base)} `;
   const formatRow = (row: string[], style: (cell: string) => string): string[] => {
     const wrapped = widths.map((width, column) => wrapCell(row[column] ?? "", width));
@@ -172,8 +177,9 @@ function renderTable(lines: string[], base: string, maxWidth: number): string[] 
       out.push(
         `  ${widths
           .map((width, column) => {
-            const raw = wrapped[column]?.[line] ?? "";
-            return style(raw) + " ".repeat(Math.max(0, width - cellWidth(raw)));
+            const rendered = style(wrapped[column]?.[line] ?? "");
+            const visible = cellWidth(rendered.replace(ANSI_RE, ""));
+            return rendered + " ".repeat(Math.max(0, width - visible));
           })
           .join(joiner)
           .trimEnd()}`,

@@ -12,6 +12,7 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ### Fixed
 
+- **markdown tables no longer misalign when cells contain inline markers**: cell padding was measured on the raw markdown source, but body cells render through `renderInline`, which strips backticks, `**` and link syntax — so every `` `code` `` span pulled that row's `│` joiners 2 cells left (varying per row), and wrapped continuation lines (empty raw cells) no longer matched the first line of their own row. Padding is now measured on the styled cell's visible width, keeping header, body and continuation rows on the same grid
 - **relay error payloads no longer display as `Error: [object Object]`, and overload errors now retry instead of killing the turn**: relays fronting overloaded upstreams often answer a 200 stream with an error chunk (`{"error": {"message": "The engine is currently overloaded…", "type": "engine_overloaded_error"}}`), which the SDK surfaces as a plain object rather than an Error — it stringified to `[object Object]` and, being statusless, failed fast with no retry. `toStreamErrorInfo` now unwraps plain-object payloads field by field (message/type/status/code, JSON fallback), and the retry policy retries statusless errors whose message names an unambiguously server-side transient condition (overloaded, rate limit, 5xx); bare network-sounding messages without an errno still fail fast as before
 
 ## [0.3.11] - 2026-10-09
