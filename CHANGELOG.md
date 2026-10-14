@@ -10,6 +10,8 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-10-14
+
 ### Changed
 
 - **`/connect` custom providers now default to the `openai-responses` protocol**: the protocol picker of a custom endpoint opens with `openai-responses` highlighted (marked "default") instead of `openai-compatible` — relays fronting reasoning models increasingly expose only the Responses API. Preset providers keep their own protocols
