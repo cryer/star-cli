@@ -10,6 +10,10 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ## [Unreleased]
 
+### Fixed
+
+- **Windows shell commands with `/`-style switches no longer arrive mangled**: bash tool and `!` shell-mode children run under Git Bash (MSYS2), which rewrites leading-slash arguments into Windows paths when spawning native programs — `ipconfig /all` became `ipconfig C:/all` and `cmd /c dir /w` broke on the converted `/c`. Child environments now set `MSYS_NO_PATHCONV=1` (unless the user already set `MSYS_NO_PATHCONV` or `MSYS2_ARG_CONV_EXCL`), so native switches survive. Note `!dir /w` still fails because Git Bash's `dir` is GNU coreutils `dir`, not cmd's — use `!cmd /c dir /w` or `!ls` instead
+
 ## [0.3.12] - 2026-10-14
 
 ### Changed

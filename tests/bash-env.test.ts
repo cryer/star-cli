@@ -85,3 +85,49 @@ describe("bash child env scrubbing", () => {
     expect(finished.output).not.toContain(VALUE);
   }, 15000);
 });
+
+describe("childEnv MSYS path conversion", () => {
+  const MSYS_KEYS = ["MSYS_NO_PATHCONV", "MSYS2_ARG_CONV_EXCL"] as const;
+  const saved = MSYS_KEYS.map((k) => process.env[k]);
+
+  beforeEach(() => {
+    for (const k of MSYS_KEYS) delete process.env[k];
+  });
+
+  afterEach(() => {
+    for (const [i, k] of MSYS_KEYS.entries()) {
+      if (saved[i] === undefined) delete process.env[k];
+      else process.env[k] = saved[i];
+    }
+  });
+
+  it("disables MSYS path conversion for win32 children", () => {
+    expect(childEnv("win32").MSYS_NO_PATHCONV).toBe("1");
+  });
+
+  it("leaves other platforms untouched", () => {
+    expect(childEnv("linux").MSYS_NO_PATHCONV).toBeUndefined();
+  });
+
+  it("respects a user-configured conversion setting", () => {
+    process.env.MSYS_NO_PATHCONV = "0";
+    expect(childEnv("win32").MSYS_NO_PATHCONV).toBe("0");
+    for (const k of MSYS_KEYS) delete process.env[k];
+    process.env.MSYS2_ARG_CONV_EXCL = "/ipconfig";
+    expect(childEnv("win32").MSYS_NO_PATHCONV).toBeUndefined();
+  });
+
+  const itWin = process.platform === "win32" ? it : it.skip;
+  itWin(
+    "bash children receive MSYS_NO_PATHCONV=1 on Windows",
+    async () => {
+      const res = await bashTool.execute(
+        { command: `node -e "console.log(process.env.MSYS_NO_PATHCONV ?? 'UNSET')"` },
+        { cwd: dir },
+      );
+      expect(res.isError).toBeUndefined();
+      expect(res.content.trim()).toBe("1");
+    },
+    15000,
+  );
+});

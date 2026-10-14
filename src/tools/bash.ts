@@ -207,10 +207,20 @@ export function decodeOutput(buf: Buffer, platform: NodeJS.Platform = process.pl
 // read from ~/.star-cli/.env (API secrets). In auto mode a child could
 // otherwise print them with `env` or exfiltrate via `curl $KEY`. The main
 // process's own process.env keeps them for provider calls.
-export function childEnv(): NodeJS.ProcessEnv {
+export function childEnv(platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
   const env = { ...process.env };
   for (const key of getEnvFileKeys()) {
     delete env[key];
+  }
+  // Git Bash (MSYS2) rewrites leading-slash arguments into Windows paths when
+  // spawning native programs, mangling switches like `ipconfig /all` or
+  // `cmd /c dir /w`. Opt out unless the user already configured conversion.
+  if (
+    platform === "win32" &&
+    env.MSYS_NO_PATHCONV === undefined &&
+    env.MSYS2_ARG_CONV_EXCL === undefined
+  ) {
+    env.MSYS_NO_PATHCONV = "1";
   }
   return env;
 }
