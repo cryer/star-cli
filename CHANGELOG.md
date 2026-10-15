@@ -12,7 +12,7 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ### Fixed
 
-- **publish workflow's GitHub Packages leg no longer fails with ENEEDAUTH**: `setup-node` points npm at `$NPM_CONFIG_USERCONFIG`, so appending the `GITHUB_TOKEN` to `~/.npmrc` was silently ignored. The token now goes to the config npm actually reads, and both publish legs skip versions that are already published so a partially-failed run can be retried safely
+- **publish workflow's GitHub Packages leg no longer fails with ENEEDAUTH**: `setup-node` points npm at `$NPM_CONFIG_USERCONFIG`, so appending the `GITHUB_TOKEN` to `~/.npmrc` was silently ignored. The leg now uses a second `setup-node` pass with `registry-url: https://npm.pkg.github.com` (the documented two-registry pattern) instead of hand-editing any `.npmrc`. Both publish legs skip versions that are already published so a partially-failed run can be retried safely, and the GitHub Packages leg builds `dist/` itself when the skipped npmjs leg never ran `prepublishOnly` (a re-run would otherwise publish a tarball without the bundled code)
 
 ## [0.3.13] - 2026-10-15
 

@@ -55,19 +55,30 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # Pipeline already ran above; --ignore-scripts avoids running it twice.
-      # setup-node points npm at $NPM_CONFIG_USERCONFIG, so the token must
-      # land there — appending to ~/.npmrc is silently ignored (ENEEDAUTH).
+      # GitHub Packages leg: a second setup-node pass rewrites
+      # NPM_CONFIG_USERCONFIG with the pkg.github.com registry + auth line —
+      # the documented two-registry pattern. Hand-appending to ~/.npmrc is
+      # silently ignored because npm only reads NPM_CONFIG_USERCONFIG, and
+      # appending to that file is brittle (no guaranteed trailing newline).
+      - name: Setup Node.js for GitHub Packages
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://npm.pkg.github.com
+
       - name: Publish to GitHub Packages
         run: |
-          NPMRC="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
-          echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" >> "$NPMRC"
+          # --ignore-scripts skips prepublishOnly, so when the npmjs leg was
+          # skipped (version already published) nothing has built dist/ yet.
+          if [ ! -f dist/main.js ]; then
+            pnpm build
+          fi
           PKG=$(node -p "require('./package.json').name")
           VER=$(node -p "require('./package.json').version")
-          if npm view "$PKG@$VER" version --registry=https://npm.pkg.github.com 2>/dev/null | grep -q .; then
+          if npm view "$PKG@$VER" version 2>/dev/null | grep -q .; then
             echo "$PKG@$VER is already on GitHub Packages — skipping"
           else
-            npm publish --ignore-scripts --registry=https://npm.pkg.github.com
+            npm publish --ignore-scripts
           fi
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
