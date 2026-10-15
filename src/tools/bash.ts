@@ -97,10 +97,14 @@ const schema = z.object({
 export function killTree(child: ChildProcess): void {
   if (process.platform === "win32") {
     if (child.pid) {
+      // taskkill itself may fail to spawn (stripped container, policy block,
+      // mangled PATH): an unlistened "error" event would crash the CLI.
       spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
         windowsHide: true,
         stdio: "ignore",
-      }).unref();
+      })
+        .on("error", () => {})
+        .unref();
     }
     return;
   }
