@@ -61,4 +61,16 @@ describe("globToRegExp", () => {
     expect(matchesGlob("a+b.txt", "aab.txt")).toBe(false);
     expect(matchesGlob("(v1)/x.txt", "(v1)/x.txt")).toBe(true);
   });
+
+  it("stays correct across compiled-pattern cache eviction", () => {
+    // matchesGlob caches compiled regexps (cap 500, LRU eviction): push well
+    // past the cap, then re-check both an early (evicted) and a late pattern.
+    for (let i = 0; i < 600; i += 1) {
+      expect(matchesGlob(`cachep${i}_*`, `cachep${i}_x`)).toBe(true);
+      expect(matchesGlob(`cachep${i}_*`, `other${i}_x`)).toBe(false);
+    }
+    expect(matchesGlob("cachep0_*", "cachep0_x")).toBe(true);
+    expect(matchesGlob("cachep599_*", "cachep599_x")).toBe(true);
+    expect(matchesGlob("cachep599_*", "cachep0_x")).toBe(false);
+  });
 });

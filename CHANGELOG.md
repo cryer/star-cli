@@ -26,6 +26,10 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 - **PowerShell `$env:NAME` spellings and system roots no longer slip past the dangerous-delete check**: the lexer normalized `$HOME`-style variables but left `$env:USERPROFILE` an unrecognized literal, so `powershell -c "Remove-Item -Recurse $env:USERPROFILE"` executed in auto mode; it now normalizes `$env:NAME` to `$NAME`, home variables compare case-insensitively and gained `$APPDATA`/`$LOCALAPPDATA`/`$PROGRAMDATA`/`$PROGRAMFILES`/`$SYSTEMROOT` (+ `%...%` forms). Recursive-delete targets also gained the Git Bash drive mounts (`/c`), Windows system dirs (`C:/Windows`, `C:/Users`, `Program Files`, `ProgramData` at any depth; a single profile dir under `Users`), and bare POSIX system roots (`/etc`, `/usr`, `/var`, `/home`, `/root`, …). Double-quoted backslashes now follow POSIX rules in the lexer (`"C:\Windows"` keeps its backslashes), so quoted Windows paths are judged by their real target
 - **write_file/edit_file refuse symlink-resolved sensitive targets**: the permission gate only name-checked the raw path, so a repo could plant `config.json -> .env` and get the secret overwritten — worse, the check lived only in the gate, which yolo mode and hooks bypass entirely. The tools now realpath the target (parent + basename for not-yet-created files) and refuse in-tool, exactly like read_file always did
 
+### Performance
+
+- **glob matching no longer recompiles a RegExp per file**: `matchesGlob` compiled its pattern fresh on every call — per walked file for grep glob filters and `.starignore` layers, hundreds of thousands of RegExp constructions on large trees, dominating walk time. Compiled patterns are now cached by pattern string (bounded LRU, 500 entries)
+
 ## [0.3.12] - 2026-10-14
 
 ### Changed

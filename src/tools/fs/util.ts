@@ -356,13 +356,37 @@ export function globToRegExp(pattern: string): RegExp {
   return new RegExp(`^${re}$`);
 }
 
+// globToRegExp compiles fresh on every call, but matchesGlob runs per walked
+// file (grep glob filters, .starignore layers, the glob tool): on a large
+// tree recompiling dominated the walk. Cache compiled regexps by pattern,
+// bounded with insertion-order LRU eviction (hits re-insert to stay recent).
+// Safe to share: the patterns carry no flags, so .test is stateless.
+const GLOB_CACHE_MAX = 500;
+const globCache = new Map<string, RegExp>();
+
+function compiledGlob(pattern: string): RegExp {
+  const hit = globCache.get(pattern);
+  if (hit !== undefined) {
+    globCache.delete(pattern);
+    globCache.set(pattern, hit);
+    return hit;
+  }
+  const re = globToRegExp(pattern);
+  if (globCache.size >= GLOB_CACHE_MAX) {
+    const oldest = globCache.keys().next().value;
+    if (oldest !== undefined) globCache.delete(oldest);
+  }
+  globCache.set(pattern, re);
+  return re;
+}
+
 export function matchesGlob(pattern: string, relPath: string): boolean {
   const normalized = pattern.replace(/\\/g, "/");
   if (!normalized.includes("/")) {
     const base = relPath.split("/").pop() ?? relPath;
-    return globToRegExp(normalized).test(base);
+    return compiledGlob(normalized).test(base);
   }
-  return globToRegExp(normalized).test(relPath);
+  return compiledGlob(normalized).test(relPath);
 }
 
 export const IGNORE_FILE = ".starignore";
