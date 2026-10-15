@@ -2008,4 +2008,39 @@ describe("pending subagent usage reset", () => {
 
     expect(lastFinish(events)?.usage).toMatchObject({ promptTokens: 5, completionTokens: 3 });
   });
+
+  it("loadMessages drops the replaced history's server-calibration delta", async () => {
+    // A provider reporting a much larger prompt than the local estimate
+    // leaves a positive calibration delta on the loop.
+    const loop = new AgentLoop({
+      model: mockModel([
+        [
+          { type: "text-delta", textDelta: "answer" },
+          {
+            type: "finish",
+            finishReason: "stop",
+            usage: { promptTokens: 50_000, completionTokens: 3 },
+          },
+        ],
+      ]),
+      registry: createDefaultRegistry(),
+      config: makeConfig(),
+      cwd,
+    });
+    await collect(loop.stream("hi", new AbortController().signal));
+    const inflated = loop.estimateContextTokens();
+
+    await loop.loadMessages([]);
+
+    // The stale delta belongs to the replaced conversation: the fresh
+    // estimate must match a loop that never saw it (history + tool schemas).
+    const fresh = new AgentLoop({
+      model: mockModel([]),
+      registry: createDefaultRegistry(),
+      config: makeConfig(),
+      cwd,
+    });
+    expect(loop.estimateContextTokens()).toBe(fresh.estimateContextTokens());
+    expect(inflated - loop.estimateContextTokens()).toBeGreaterThan(10_000);
+  });
 });

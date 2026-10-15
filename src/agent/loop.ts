@@ -616,6 +616,10 @@ export class AgentLoop {
     // usage accumulated for the previous conversation must not fold into
     // this one's first finish.
     this.subagentUsage = null;
+    // The calibration baseline pairs the replaced history's local estimate
+    // with its server-reported size; kept, its delta would inflate the new
+    // conversation's ctx gauge and compaction budget with dead tokens.
+    this.serverTokenBaseline = null;
     this.opts.registry?.resetVolatileState();
   }
 
