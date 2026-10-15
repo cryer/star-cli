@@ -10,6 +10,10 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ## [Unreleased]
 
+### Fixed
+
+- **publish workflow's GitHub Packages leg no longer fails with ENEEDAUTH**: `setup-node` points npm at `$NPM_CONFIG_USERCONFIG`, so appending the `GITHUB_TOKEN` to `~/.npmrc` was silently ignored. The token now goes to the config npm actually reads, and both publish legs skip versions that are already published so a partially-failed run can be retried safely
+
 ## [0.3.13] - 2026-10-15
 
 ### Added

@@ -41,15 +41,33 @@ jobs:
           fi
 
       # Runs prepublishOnly (pnpm test:pipeline: lint + typecheck + test + build + smoke).
+      # Idempotent: a re-run after a partial failure (e.g. only the GitHub
+      # Packages leg failed) must not die on "cannot republish a version".
       - name: Publish to npmjs
-        run: npm publish
+        run: |
+          PKG=$(node -p "require('./package.json').name")
+          VER=$(node -p "require('./package.json').version")
+          if npm view "$PKG@$VER" version --registry=https://registry.npmjs.org 2>/dev/null | grep -q .; then
+            echo "$PKG@$VER is already on npmjs — skipping"
+          else
+            npm publish
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # Pipeline already ran above; --ignore-scripts avoids running it twice.
+      # setup-node points npm at $NPM_CONFIG_USERCONFIG, so the token must
+      # land there — appending to ~/.npmrc is silently ignored (ENEEDAUTH).
       - name: Publish to GitHub Packages
         run: |
-          echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" >> ~/.npmrc
-          npm publish --ignore-scripts --registry=https://npm.pkg.github.com
+          NPMRC="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" >> "$NPMRC"
+          PKG=$(node -p "require('./package.json').name")
+          VER=$(node -p "require('./package.json').version")
+          if npm view "$PKG@$VER" version --registry=https://npm.pkg.github.com 2>/dev/null | grep -q .; then
+            echo "$PKG@$VER is already on GitHub Packages — skipping"
+          else
+            npm publish --ignore-scripts --registry=https://npm.pkg.github.com
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
