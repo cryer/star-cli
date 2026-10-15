@@ -120,7 +120,23 @@ export function lexShell(command: string): ShellToken[] {
       while (end < command.length && /[A-Za-z0-9_]/.test(command[end] ?? "")) {
         end += 1;
       }
-      word += command.slice(pos, end);
+      let name = command.slice(pos + 1, end);
+      // PowerShell spells environment variables $env:NAME — normalize to
+      // $NAME so the danger/hygiene checks (which know $HOME-style forms)
+      // recognize them, e.g. Remove-Item -Recurse $env:USERPROFILE.
+      if (
+        name.toLowerCase() === "env" &&
+        command[end] === ":" &&
+        /[A-Za-z_]/.test(command[end + 1] ?? "")
+      ) {
+        let varEnd = end + 1;
+        while (varEnd < command.length && /[A-Za-z0-9_]/.test(command[varEnd] ?? "")) {
+          varEnd += 1;
+        }
+        name = command.slice(end + 1, varEnd);
+        end = varEnd;
+      }
+      word += `$${name}`;
       return end;
     }
     word += "$";
@@ -134,8 +150,16 @@ export function lexShell(command: string): ShellToken[] {
         doubleQuoted = false;
         i += 1;
       } else if (c === "\\") {
-        if (i + 1 < command.length) {
-          word += command[i + 1];
+        const nextCh = command[i + 1];
+        // POSIX: inside double quotes a backslash escapes only $ ` " \ (and
+        // newline); before any other character it stays literal. Keeping it
+        // matters for the danger checks: rm -rf "C:\Windows" really does
+        // pass backslashes to rm, so the analysis must see them.
+        if (
+          nextCh !== undefined &&
+          (nextCh === "$" || nextCh === "`" || nextCh === '"' || nextCh === "\\")
+        ) {
+          word += nextCh;
           i += 2;
         } else {
           word += "\\";

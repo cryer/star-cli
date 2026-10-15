@@ -1,6 +1,6 @@
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { isSensitivePath, registerSensitivePatterns } from "../src/core/sensitive";
+import { isSecretEnvName, isSensitivePath, registerSensitivePatterns } from "../src/core/sensitive";
 import { checkPermission } from "../src/permissions/gate";
 import type { PermissionContext, PermissionRequest } from "../src/permissions/types";
 
@@ -23,6 +23,44 @@ describe("isSensitivePath builtins", () => {
     expect(isSensitivePath(".aws/credentials")).toBe(true);
     expect(isSensitivePath(".env.example")).toBe(false);
     expect(isSensitivePath("src/main.ts")).toBe(false);
+  });
+});
+
+describe("isSecretEnvName", () => {
+  it("flags well-known secret variable names, case-insensitively", () => {
+    for (const name of [
+      "OPENAI_API_KEY",
+      "anthropic_api_key",
+      "GITHUB_TOKEN",
+      "GH_TOKEN",
+      "AWS_SECRET_ACCESS_KEY",
+      "AWS_SESSION_TOKEN",
+      "AZURE_CLIENT_SECRET",
+      "DATABASE_PASSWORD",
+      "PGPASSWORD",
+      "MY_LLM_KEY",
+      "NPM_TOKEN",
+    ]) {
+      expect(isSecretEnvName(name), name).toBe(true);
+    }
+  });
+
+  it("spares ordinary and allowlisted variables", () => {
+    for (const name of [
+      "PATH",
+      "HOME",
+      "USERPROFILE",
+      "NODE_ENV",
+      "SSH_AUTH_SOCK",
+      "GPG_TTY",
+      "MONKEY",
+      "HOTKEY",
+      "TOKENIZERS_PARALLELISM",
+      "GOOGLE_APPLICATION_CREDENTIALS",
+      "AWS_SHARED_CREDENTIALS_FILE",
+    ]) {
+      expect(isSecretEnvName(name), name).toBe(false);
+    }
   });
 });
 

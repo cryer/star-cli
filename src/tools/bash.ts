@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { getEnvFileKeys } from "../config/env";
+import { isSecretEnvName } from "../core/sensitive";
 import { defaultTaskManager } from "../tasks/manager";
 import type { Tool, ToolResult } from "./types";
 
@@ -207,14 +208,22 @@ export function decodeOutput(buf: Buffer, platform: NodeJS.Platform = process.pl
   return text;
 }
 
-// Environment for child processes: process.env minus the keys loadEnvFile
-// read from ~/.star-cli/.env (API secrets). In auto mode a child could
-// otherwise print them with `env` or exfiltrate via `curl $KEY`. The main
-// process's own process.env keeps them for provider calls.
+// Environment for child processes: process.env minus (a) the keys
+// loadEnvFile read from ~/.star-cli/.env and (b) any variable whose NAME
+// looks like a secret (OPENAI_API_KEY, GITHUB_TOKEN, AWS_SECRET_ACCESS_KEY,
+// the user's apiKeyEnv names, ...). In auto mode a child could otherwise
+// print them with `env` or exfiltrate via `curl ...?k=$KEY` — whether they
+// came from the .env file or the real environment. The main process's own
+// process.env keeps them for provider calls. Trade-off: tools that read
+// credentials from the environment (e.g. `gh` with GH_TOKEN) no longer see
+// them inside bash; authenticate those tools outside the agent instead.
 export function childEnv(platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  for (const key of getEnvFileKeys()) {
-    delete env[key];
+  const fileKeys = getEnvFileKeys();
+  for (const key of Object.keys(env)) {
+    if (fileKeys.has(key) || isSecretEnvName(key)) {
+      delete env[key];
+    }
   }
   // Git Bash (MSYS2) rewrites leading-slash arguments into Windows paths when
   // spawning native programs, mangling switches like `ipconfig /all` or

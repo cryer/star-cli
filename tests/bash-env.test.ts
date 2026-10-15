@@ -86,6 +86,41 @@ describe("bash child env scrubbing", () => {
   }, 15000);
 });
 
+describe("childEnv secret-name scrubbing", () => {
+  // Names the .env file never mentioned: the pattern alone must catch them.
+  const SECRET_KEYS = ["STAR_TEST_API_KEY", "STAR_TEST_TOKEN", "MY_LLM_KEY"] as const;
+  const SAFE_KEY = "STAR_TEST_PLAIN_VAR";
+
+  beforeEach(() => {
+    for (const k of SECRET_KEYS) process.env[k] = VALUE;
+    process.env[SAFE_KEY] = "visible";
+  });
+
+  afterEach(() => {
+    for (const k of SECRET_KEYS) delete process.env[k];
+    delete process.env[SAFE_KEY];
+  });
+
+  it("drops secret-named variables but keeps the rest", () => {
+    const env = childEnv();
+    for (const k of SECRET_KEYS) expect(env[k], k).toBeUndefined();
+    expect(env[SAFE_KEY]).toBe("visible");
+    expect(env.PATH).toBe(process.env.PATH);
+    // The main process itself is unaffected.
+    expect(process.env.STAR_TEST_API_KEY).toBe(VALUE);
+  });
+
+  it("foreground bash children cannot read a secret-named variable", async () => {
+    const res = await bashTool.execute(
+      { command: `node -e "console.log(process.env.STAR_TEST_TOKEN ?? 'UNSET')"` },
+      { cwd: dir },
+    );
+    expect(res.isError).toBeUndefined();
+    expect(res.content).toContain("UNSET");
+    expect(res.content).not.toContain(VALUE);
+  }, 15000);
+});
+
 describe("childEnv MSYS path conversion", () => {
   const MSYS_KEYS = ["MSYS_NO_PATHCONV", "MSYS2_ARG_CONV_EXCL"] as const;
   const saved = MSYS_KEYS.map((k) => process.env[k]);
