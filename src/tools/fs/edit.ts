@@ -9,6 +9,7 @@ import {
   nextSnapshotId,
   pushSnapshot,
 } from "./snapshots";
+import { isSensitivePath, realpathForCheck } from "./util";
 
 // Same heuristic as read_file: a NUL in the first 8KB marks a binary file.
 // edit_file writes back as UTF-8, so an ASCII old_string that happens to
@@ -48,6 +49,13 @@ export const editFileTool: Tool<typeof schema> = {
   parameters: schema,
   async execute(args, ctx) {
     const filePath = path.resolve(ctx.cwd, args.path);
+    // Same symlink defense as read_file/write_file: refuse when the resolved
+    // target is a sensitive file, in-tool so yolo mode and hooks can't
+    // bypass the gate's raw-path name check.
+    const resolvedPath = await realpathForCheck(filePath);
+    if (isSensitivePath(filePath) || (resolvedPath !== null && isSensitivePath(resolvedPath))) {
+      return { content: `Refused to edit sensitive file: ${args.path}`, isError: true };
+    }
     let content: string;
     let readMtimeMs: number;
     try {

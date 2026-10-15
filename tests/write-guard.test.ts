@@ -1,8 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { appendCheckpointRecord, checkpointContentPath } from "../src/session/checkpoints";
+import { editFileTool } from "../src/tools/fs/edit";
 import {
   MAX_SNAPSHOT_CONTENT_BYTES,
   clearSnapshots,
@@ -46,6 +47,54 @@ describe("write_file guards", () => {
     const res = await writeFileTool.execute({ path: "ok.txt", content: "hello" }, ctx());
     expect(res.isError).toBeUndefined();
     expect(res.content).toContain("Wrote 5 bytes");
+  });
+});
+
+describe("sensitive-target guards", () => {
+  it("refuses raw sensitive paths at the tool level (gate-bypass proof)", async () => {
+    const res = await writeFileTool.execute({ path: ".env", content: "KEY=x" }, ctx());
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain("sensitive");
+    const edit = await editFileTool.execute(
+      { path: ".npmrc", old_string: "a", new_string: "b" },
+      ctx(),
+    );
+    expect(edit.isError).toBe(true);
+    expect(edit.content).toContain("sensitive");
+  });
+
+  it("refuses writes and edits through a junction whose target is sensitive", async () => {
+    const outside = mkdtempSync(path.join(os.tmpdir(), "star-write-link-outside-"));
+    try {
+      writeFileSync(path.join(outside, ".env"), "SECRET=1");
+      // A junction (dir symlink) inside the cwd pointing at the outside dir:
+      // the link's own name is harmless, the resolved basename is not.
+      symlinkSync(outside, path.join(dir, "link"), "junction");
+
+      const overwrite = await writeFileTool.execute({ path: "link/.env", content: "pwned" }, ctx());
+      expect(overwrite.isError).toBe(true);
+      expect(overwrite.content).toContain("sensitive");
+      expect(readFileSync(path.join(outside, ".env"), "utf8")).toBe("SECRET=1");
+
+      const edit = await editFileTool.execute(
+        { path: "link/.env", old_string: "SECRET", new_string: "pwned" },
+        ctx(),
+      );
+      expect(edit.isError).toBe(true);
+      expect(readFileSync(path.join(outside, ".env"), "utf8")).toBe("SECRET=1");
+
+      // Even a not-yet-existing sensitive name is caught via the resolved parent.
+      const create = await writeFileTool.execute({ path: "link/id_rsa", content: "x" }, ctx());
+      expect(create.isError).toBe(true);
+
+      // A benign file through the same link still writes fine.
+      const ok = await writeFileTool.execute({ path: "link/public.txt", content: "hi" }, ctx());
+      expect(ok.isError).toBeUndefined();
+      expect(readFileSync(path.join(outside, "public.txt"), "utf8")).toBe("hi");
+    } finally {
+      rmSync(path.join(dir, "link"), { force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });
 

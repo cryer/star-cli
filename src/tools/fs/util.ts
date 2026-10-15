@@ -20,6 +20,19 @@ export interface WalkedFile {
 
 export type IgnorePredicate = (absPath: string, isDir: boolean) => boolean;
 
+// realpath for sensitive-target checks in the write tools: the file itself
+// when it exists, otherwise the resolved parent with the basename
+// re-attached — a junctioned directory still exposes a planted `.env` name
+// even before the file exists. null when nothing on the path resolves.
+export async function realpathForCheck(filePath: string): Promise<string | null> {
+  const resolved = await realpath(filePath).catch(() => null);
+  if (resolved !== null) {
+    return resolved;
+  }
+  const parent = await realpath(path.dirname(filePath)).catch(() => null);
+  return parent === null ? null : path.join(parent, path.basename(filePath));
+}
+
 export interface WalkOptions {
   ignore?: IgnorePredicate;
   // Defaults to true. Pass false when the caller does not sort by mtime (e.g.
