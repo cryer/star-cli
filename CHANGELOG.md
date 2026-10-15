@@ -10,6 +10,8 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ## [Unreleased]
 
+## [0.3.13] - 2026-10-15
+
 ### Added
 
 - **tag-push release workflow**: pushing a `v*` tag now runs `.github/workflows/publish.yml`, which verifies the tag matches `package.json`'s version, then publishes to both npmjs (authenticated by the `NPM_TOKEN` Actions secret) and GitHub Packages (authenticated by the built-in `GITHUB_TOKEN`) — one tag releases both registries
