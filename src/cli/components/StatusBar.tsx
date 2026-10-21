@@ -2,7 +2,7 @@ import { Box, Text, useStdout } from "ink";
 import { memo } from "react";
 import { formatDollars, formatTokens, formatTokensCompact } from "../cost";
 import { folderIcon } from "../icons";
-import { toTerminalSafe } from "../terminal-text";
+import { displayWidth, toTerminalSafe, truncateToWidth } from "../terminal-text";
 
 interface StatusBarProps {
   cwd: string;
@@ -24,6 +24,8 @@ interface StatusBarProps {
 }
 
 const BG_LABEL_MAX = 40;
+const BG_LABEL_MIN = 8;
+const BG_PER_LABEL_MAX = 24;
 const WIDE_COLUMNS = 120;
 
 function cwdLabel(cwd: string, wide: boolean): string {
@@ -48,37 +50,59 @@ export const StatusBar = memo(function StatusBar({
   backgroundTasks = [],
 }: StatusBarProps) {
   const { stdout } = useStdout();
-  const wide = (stdout?.columns ?? 80) >= WIDE_COLUMNS;
-  // Task commands/descriptions are model-influenced; escape before display.
-  const joined = backgroundTasks.map((label) => toTerminalSafe(label)).join(", ");
-  const labels = joined.length > BG_LABEL_MAX ? `${joined.slice(0, BG_LABEL_MAX)}…` : joined;
+  const columns = stdout?.columns ?? 80;
+  const wide = columns >= WIDE_COLUMNS;
+  const cwdSegment = `${folderIcon}${cwdLabel(cwd, wide)}${gitBranch ? ` [${gitBranch}]` : ""}`;
+  const modelSegment = `✦ ${model}`;
+  const ctxSegment =
+    contextPercent != null
+      ? `ctx: ${contextPercent}%${
+          contextTokens
+            ? ` (${formatTokensCompact(contextTokens.used)}/${formatTokensCompact(contextTokens.window)})`
+            : ""
+        }`
+      : null;
+  const cacheSegment = `cache: ${cachePercent != null ? `${cachePercent}%` : "Not provided"}`;
+  const costSegment =
+    sessionCostUsd != null && sessionCostUsd > 0 ? `$${formatDollars(sessionCostUsd)}` : null;
+  const tokensSegment = `${formatTokens(tokens)} tokens`;
+  const modeSegment = `mode: ${permissionMode}`;
+  // The bg segment gets whatever width the other segments leave; labels are
+  // dropped entirely when there is no room, so the bar never wraps.
+  let bgSegment: string | null = null;
+  if (backgroundTasks.length > 0) {
+    const prefix = `bg: ${backgroundTasks.length}`;
+    const others = [
+      cwdSegment,
+      modelSegment,
+      ctxSegment,
+      cacheSegment,
+      costSegment,
+      tokensSegment,
+      modeSegment,
+    ].filter((s): s is string => s != null);
+    const fixed = others.reduce((total, s) => total + displayWidth(s), 0);
+    const gaps = others.length; // one space per neighbour pair, bg included
+    const budget = columns - fixed - gaps - displayWidth(prefix) - 2; // 2 for " (" + ")"
+    bgSegment = prefix;
+    if (budget >= BG_LABEL_MIN) {
+      // Task commands/descriptions are model-influenced; escape before display.
+      const joined = backgroundTasks
+        .map((label) => truncateToWidth(toTerminalSafe(label), BG_PER_LABEL_MAX))
+        .join(", ");
+      bgSegment = `${prefix} (${truncateToWidth(joined, Math.min(budget, BG_LABEL_MAX))})`;
+    }
+  }
   return (
     <Box justifyContent="space-between">
-      <Text dimColor>
-        {folderIcon}
-        {cwdLabel(cwd, wide)}
-        {gitBranch ? ` [${gitBranch}]` : ""}
-      </Text>
-      {backgroundTasks.length > 0 && (
-        <Text color="yellow">
-          bg: {backgroundTasks.length} ({labels})
-        </Text>
-      )}
-      <Text dimColor>✦ {model}</Text>
-      {contextPercent != null && (
-        <Text dimColor>
-          ctx: {contextPercent}%
-          {contextTokens
-            ? ` (${formatTokensCompact(contextTokens.used)}/${formatTokensCompact(contextTokens.window)})`
-            : ""}
-        </Text>
-      )}
-      <Text dimColor>cache: {cachePercent != null ? `${cachePercent}%` : "Not provided"}</Text>
-      {sessionCostUsd != null && sessionCostUsd > 0 && (
-        <Text dimColor>${formatDollars(sessionCostUsd)}</Text>
-      )}
-      <Text dimColor>{formatTokens(tokens)} tokens</Text>
-      <Text dimColor>mode: {permissionMode}</Text>
+      <Text dimColor>{cwdSegment}</Text>
+      {bgSegment && <Text color="yellow">{bgSegment}</Text>}
+      <Text dimColor>{modelSegment}</Text>
+      {ctxSegment && <Text dimColor>{ctxSegment}</Text>}
+      <Text dimColor>{cacheSegment}</Text>
+      {costSegment && <Text dimColor>{costSegment}</Text>}
+      <Text dimColor>{tokensSegment}</Text>
+      <Text dimColor>{modeSegment}</Text>
     </Box>
   );
 });

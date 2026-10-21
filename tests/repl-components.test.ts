@@ -107,6 +107,25 @@ describe("StatusBar background tasks", () => {
     expect(frame).not.toContain(long);
     app.unmount();
   });
+
+  it("keeps the bar on one line with double-width CJK labels", async () => {
+    const app = renderApp(
+      createElement(StatusBar, {
+        cwd: "/tmp/project",
+        model: "gpt6",
+        permissionMode: "auto",
+        tokens: 0,
+        backgroundTasks: ["分析服务端玩法机制并优化整体性能", "分析客户端UI/UX与表现渲染管线"],
+      }),
+    );
+    await tick();
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("bg: 2");
+    expect(frame).toContain("…");
+    expect(frame).not.toContain("渲染管线");
+    expect(frame.trim().split("\n").length).toBe(1);
+    app.unmount();
+  });
 });
 
 describe("StatusBar ctx field", () => {

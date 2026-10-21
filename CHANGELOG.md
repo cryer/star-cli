@@ -12,6 +12,7 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ### Fixed
 
+- **status bar no longer wraps when background tasks have CJK labels**: the `bg: N (…)` segment truncated labels by character count, so two Chinese task descriptions (double-width in the terminal) overflowed the bar, wrapped it to a second line, and squeezed the model name against the remaining fields. Truncation is now display-width aware (CJK/emoji count as two cells), each label is capped individually, the segment only gets the columns the other fields actually leave, and labels are dropped entirely (plain `bg: N`) when there is no room
 - **publish workflow's GitHub Packages leg no longer fails with ENEEDAUTH**: `setup-node` points npm at `$NPM_CONFIG_USERCONFIG`, so appending the `GITHUB_TOKEN` to `~/.npmrc` was silently ignored. The leg now uses a second `setup-node` pass with `registry-url: https://npm.pkg.github.com` (the documented two-registry pattern) instead of hand-editing any `.npmrc`. Both publish legs skip versions that are already published so a partially-failed run can be retried safely, and the GitHub Packages leg builds `dist/` itself when the skipped npmjs leg never ran `prepublishOnly` (a re-run would otherwise publish a tarball without the bundled code)
 
 ## [0.3.13] - 2026-10-15
