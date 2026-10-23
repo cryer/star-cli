@@ -186,6 +186,43 @@ describe("elideStaleContent", () => {
   });
 });
 
+describe("elideStaleContent options", () => {
+  const history = () =>
+    star([
+      system("sys"),
+      toolCallAssistant("c1"),
+      toolResult("c1", bigText),
+      ...Array.from({ length: 30 }, (_, i) => user(`u${i}`)),
+    ]);
+
+  it("honors a custom activation fraction", () => {
+    const messages = history();
+    // ~500 tokens of content: below 90% of an 800 threshold, over 10%.
+    expect(elideStaleContent(messages, 800, 0, { activationFraction: 0.9 })).toBeNull();
+    expect(elideStaleContent(messages, 800, 0, { activationFraction: 0.1 })).not.toBeNull();
+  });
+
+  it("honors a custom recent-message frontier", () => {
+    const messages = history();
+    // The big result sits 31 messages back: inside a 40-message frontier,
+    // outside a 10-message one.
+    expect(elideStaleContent(messages, 800, 0, { keepRecentMessages: 40 })).toBeNull();
+    expect(elideStaleContent(messages, 800, 0, { keepRecentMessages: 10 })).not.toBeNull();
+  });
+
+  it("honors a custom minimum elision size", () => {
+    const messages = star([
+      system("sys"),
+      toolCallAssistant("c1"),
+      toolResult("c1", "smallish output"),
+      ...Array.from({ length: 30 }, (_, i) => user(`u${i}`)),
+    ]);
+    // Too small for the default 250, big enough for a floor of 1.
+    expect(elideStaleContent(messages, 50)).toBeNull();
+    expect(elideStaleContent(messages, 50, 0, { minTokens: 1 })).not.toBeNull();
+  });
+});
+
 describe("elision in the agent loop", () => {
   let cwd: string;
   let home: string;

@@ -192,6 +192,9 @@ describe("AgentLoop skills integration", () => {
       hooks: [],
       doomLoopThreshold: 3,
       gitSnapshots: true,
+      elisionThresholdFraction: 0.5,
+      elisionKeepRecentMessages: 24,
+      elisionMinTokens: 250,
       webFetchAllowPrivateHosts: false,
     };
   }

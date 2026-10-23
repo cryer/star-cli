@@ -3,13 +3,21 @@ import { estimateMessageTokens } from "./tokens";
 
 // Elision only earns its history rewrite once the window is filling; below
 // this fraction of the compaction threshold the history stays untouched, so
-// short sessions never elide.
-const ACTIVATION_FRACTION = 0.5;
+// short sessions never elide. Configurable via elisionThresholdFraction.
+export const DEFAULT_ELISION_ACTIVATION_FRACTION = 0.5;
 // The newest messages are the model's active working set and are never
 // touched; value decay only justifies elision well behind the frontier.
-const KEEP_RECENT_MESSAGES = 24;
+// Configurable via elisionKeepRecentMessages.
+export const DEFAULT_ELISION_KEEP_RECENT_MESSAGES = 24;
 // A tool result smaller than this is cheaper to keep than to re-fetch.
-const MIN_ELISION_TOKENS = 250;
+// Configurable via elisionMinTokens.
+export const DEFAULT_ELISION_MIN_TOKENS = 250;
+
+export interface ElisionOptions {
+  activationFraction?: number;
+  keepRecentMessages?: number;
+  minTokens?: number;
+}
 
 export const ELIDED_TOOL_RESULT_TEXT =
   "[stale tool output elided to free context — it was shown in full earlier; re-run the tool if you need it again]";
@@ -48,11 +56,15 @@ export function elideStaleContent(
   messages: readonly StarMessage[],
   thresholdTokens: number,
   overheadTokens = 0,
+  options: ElisionOptions = {},
 ): ElisionResult | null {
+  const activationFraction = options.activationFraction ?? DEFAULT_ELISION_ACTIVATION_FRACTION;
+  const keepRecentMessages = options.keepRecentMessages ?? DEFAULT_ELISION_KEEP_RECENT_MESSAGES;
+  const minTokens = options.minTokens ?? DEFAULT_ELISION_MIN_TOKENS;
   let total = overheadTokens;
   for (const star of messages) total += estimateMessageTokens(star.message);
-  if (total < thresholdTokens * ACTIVATION_FRACTION) return null;
-  const cutoff = messages.length - KEEP_RECENT_MESSAGES;
+  if (total < thresholdTokens * activationFraction) return null;
+  const cutoff = messages.length - keepRecentMessages;
   if (cutoff <= 0) return null;
 
   let elidedCount = 0;
@@ -62,7 +74,7 @@ export function elideStaleContent(
     if (!star || star.meta?.elided) continue;
     const message = star.message;
     if (message.role === "tool") {
-      if (estimateMessageTokens(message) < MIN_ELISION_TOKENS) continue;
+      if (estimateMessageTokens(message) < minTokens) continue;
       out[i] = {
         message: {
           ...message,
@@ -76,7 +88,7 @@ export function elideStaleContent(
       elidedCount++;
     } else if (message.role === "assistant" && Array.isArray(message.content)) {
       if (!message.content.some((part) => part.type === "tool-call")) continue;
-      if (estimateMessageTokens(message) < MIN_ELISION_TOKENS) continue;
+      if (estimateMessageTokens(message) < minTokens) continue;
       out[i] = {
         message: {
           ...message,

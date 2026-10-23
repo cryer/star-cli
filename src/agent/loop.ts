@@ -1064,7 +1064,11 @@ export class AgentLoop {
       // before the conversation around it does, and replacing it in place
       // leaves message indices — and therefore /undo turn markers — intact.
       // It often shrinks the history enough that compaction never fires.
-      const elided = elideStaleContent(this.messages, threshold, toolSchemaTokens + calibration);
+      const elided = elideStaleContent(this.messages, threshold, toolSchemaTokens + calibration, {
+        activationFraction: config.elisionThresholdFraction,
+        keepRecentMessages: config.elisionKeepRecentMessages,
+        minTokens: config.elisionMinTokens,
+      });
       if (elided) {
         this.messages = elided.messages;
         // Persist the rewrite like compaction does (memory and disk must

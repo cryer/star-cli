@@ -10,6 +10,10 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ## [Unreleased]
 
+### Added
+
+- **stale-content elision thresholds are now configurable**: three new top-level keys — `elisionThresholdFraction` (fraction of the compaction threshold at which elision activates, default 0.5; 1 = only at the compaction point, effectively off), `elisionKeepRecentMessages` (newest messages never elided, default 24) and `elisionMinTokens` (minimum size of a tool result / tool-call argument payload worth eliding, default 250) — tune the previously hardcoded elision knobs; documented in both READMEs. Global config only (not settable from a project's `.star/config.toml`)
+
 ### Fixed
 
 - **status bar no longer wraps when background tasks have CJK labels**: the `bg: N (…)` segment truncated labels by character count, so two Chinese task descriptions (double-width in the terminal) overflowed the bar, wrapped it to a second line, and squeezed the model name against the remaining fields. Truncation is now display-width aware (CJK/emoji count as two cells), each label is capped individually, the segment only gets the columns the other fields actually leave, and labels are dropped entirely (plain `bg: N`) when there is no room

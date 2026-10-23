@@ -17,7 +17,7 @@ Multi-model LLM access · streaming terminal UI · tool calling · permission co
 
 </div>
 
-Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers with an interactive `/connect` onboarding wizard · built-in fs / bash / web tools with a permission gate · git integration (`/commit` drafts Conventional Commits messages, `/diff` shows a colored working-tree diff, repo status sent as a per-turn request-scoped reminder so it never breaks the prompt cache) · prompt caching on Anthropic providers (cache breakpoints on the stable prefix and the history tail; OpenAI-style protocols cache server-side automatically) with a status-bar hit rate · token thrift: re-reading an unchanged file answers with a one-line note, and auxiliary calls (summaries, titles) can run on a cheaper `smallModel` · plan mode with read-only research and plan approval · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · conversation compaction (`/compact`) · session persistence and resume with auto-generated titles (`/resume`, `star -r`) · subagent delegation for focused subtasks · lifecycle hooks (`PreToolUse`/`PostToolUse`/`Stop` shell commands from config) · file-write snapshots with `/undo` and checkpoint rollback with `/rewind` · TODO task tracking · background shell tasks with status-bar visibility (`/tasks`) · terminal bell on long turns and background-task completion · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
+Features: streaming REPL with slash commands (+ autocomplete) · OpenAI / Anthropic / OpenAI-compatible providers with an interactive `/connect` onboarding wizard · built-in fs / bash / web tools with a permission gate · git integration (`/commit` drafts Conventional Commits messages, `/diff` shows a colored working-tree diff, repo status sent as a per-turn request-scoped reminder so it never breaks the prompt cache) · prompt caching on Anthropic providers (cache breakpoints on the stable prefix and the history tail; OpenAI-style protocols cache server-side automatically) with a status-bar hit rate · token thrift: re-reading an unchanged file answers with a one-line note, and auxiliary calls (summaries, titles) can run on a cheaper `smallModel` · plan mode with read-only research and plan approval · thinking spinner with dim reasoning preview · diff preview on write/edit approval · `@file` mentions · `!cmd` shell passthrough · custom slash commands from Markdown files · stale-context elision (old tool outputs, tool-call arguments and attached images are replaced in place with placeholders — tunable via `elision*`) · conversation compaction (`/compact`) · session persistence and resume with auto-generated titles (`/resume`, `star -r`) · subagent delegation for focused subtasks · lifecycle hooks (`PreToolUse`/`PostToolUse`/`Stop` shell commands from config) · file-write snapshots with `/undo` and checkpoint rollback with `/rewind` · TODO task tracking · background shell tasks with status-bar visibility (`/tasks`) · terminal bell on long turns and background-task completion · Markdown session export (`/export`) · `/init` + `/doctor` project scaffolding and environment checks · cost estimation · update notifier · `--json` NDJSON output for scripting.
 
 ## Requirements
 
@@ -58,6 +58,17 @@ contextMaxTokens = 100000         # context window in tokens (per-model override
 # compactThresholdTokens = 80000  # optional auto-compaction trigger in tokens; defaults to the
                                   # context window and is clamped to it (top-level only — there is
                                   # no per-model override). /compact always compacts, regardless.
+# Stale-content elision: once estimated context usage reaches
+# elisionThresholdFraction of the compaction threshold, bulk older than
+# elisionKeepRecentMessages messages (stale tool results, old tool-call
+# arguments, old attached images) is replaced in place with a placeholder —
+# message count and order are unchanged, so /undo markers stay valid and
+# compaction often never fires. Smaller-than-elisionMinTokens results are
+# kept (cheaper than re-fetching). Set the fraction to 1 to elide only at
+# the compaction point (effectively off), 0 to elide even in short sessions.
+elisionThresholdFraction = 0.5
+elisionKeepRecentMessages = 24
+elisionMinTokens = 250
 # Max model round-trips ("steps") per turn between progress checkpoints — one
 # step is a reply plus the tool calls it asked for; retries and auto-continue
 # nudges don't count. Reaching the cap while tools still execute resets it

@@ -114,6 +114,18 @@ export const ConfigSchema = z.object({
   // lower value to compact earlier and keep headroom. Manual /compact ignores
   // this — it always compacts.
   compactThresholdTokens: z.number().int().positive().optional(),
+  // Stale-content elision (context/elision.ts) replaces old bulk — stale tool
+  // results, old tool-call arguments, old attached images — with placeholders
+  // BEFORE whole-turn compaction fires, keeping message count and order (and
+  // therefore /undo markers) intact. These tune it:
+  // fraction of the compaction threshold at which elision activates (0 = even
+  // in short sessions, 1 = only at the compaction point — effectively off).
+  elisionThresholdFraction: z.number().min(0).max(1).default(0.5),
+  // newest messages never elided — the model's active working set.
+  elisionKeepRecentMessages: z.number().int().min(0).default(24),
+  // tool results / tool-call args smaller than this are cheaper kept than
+  // re-fetched.
+  elisionMinTokens: z.number().int().min(0).default(250),
   // Seconds without any stream part before a stalled response is ended
   // gracefully (some relays never send the terminal chunks). Applies once
   // content has started streaming; the wait for the first content part gets
