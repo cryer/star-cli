@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/star-cli-logo.svg" alt="Star CLI" width="320" />
+<img src="assets/star-cli-logo.svg" alt="Star CLI" width="480" />
 
 **An AI agent command-line interface written in TypeScript**
 
