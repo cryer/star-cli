@@ -26,6 +26,30 @@ export function registerSensitivePatterns(patterns: readonly string[]): void {
   extraPatterns.push(...patterns.map((p) => p.trim()).filter((p) => p.length > 0));
 }
 
+export function sensitiveExcludePatterns(): string[] {
+  return [
+    ".env",
+    ".env.*",
+    "!.env.example",
+    "!.env.sample",
+    "!.env.template",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    ".npmrc",
+    ".netrc",
+    ".pgpass",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "**/.aws/credentials",
+    "**/.kube/config",
+    ...extraPatterns,
+  ];
+}
+
 function globToRegExp(pattern: string): RegExp {
   const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
   return new RegExp(`^${escaped}$`, "i");

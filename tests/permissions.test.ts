@@ -102,6 +102,34 @@ describe("dangerous bash commands", () => {
     }
   });
 
+  it("fails closed on dynamic targets of destructive commands", () => {
+    for (const command of [
+      'rm -rf "$(printf /)"',
+      'target=/; rm -rf "$target"',
+      "rm -rf `printf /`",
+      "rm -rf >(printf /)",
+      'chmod -R 000 "$target"',
+      'powershell -c "Remove-Item -Recurse $env:TARGET"',
+      'find "$target" -delete',
+      'dd of="$target"',
+      'format "$target"',
+    ]) {
+      expect(checkPermission("auto", req("bash", { command }, "exec"), ctx), command).toBe("deny");
+    }
+  });
+
+  it("keeps static safe targets and non-destructive dynamic commands allowed", () => {
+    for (const command of [
+      "rm -rf ./dist",
+      "chmod -R 755 ./dist",
+      'echo "$target"',
+      'printf "%s" "$(date)"',
+      'rm -f "$target"',
+    ]) {
+      expect(checkPermission("auto", req("bash", { command }, "exec"), ctx), command).toBe("allow");
+    }
+  });
+
   it("blocks dangerous commands with reordered flags, wrappers and substitutions", () => {
     const payloads = [
       "rm -fr /",
@@ -765,7 +793,7 @@ describe("windows command coverage", () => {
     ]) {
       expect(isDangerousCommand(command), command).toBe(true);
     }
-    expect(isDangerousCommand('powershell -c "Remove-Item -Recurse $env:TEMP\\build"')).toBe(false);
+    expect(isDangerousCommand('powershell -c "Remove-Item -Recurse $env:TEMP\\build"')).toBe(true);
   });
 
   it("flags Windows and POSIX system roots as recursive-delete targets", () => {

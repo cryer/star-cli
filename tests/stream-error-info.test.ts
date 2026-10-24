@@ -112,6 +112,26 @@ describe("toStreamErrorInfo", () => {
     expect(info.message).toBe('{"status":503,"code":"upstream_down"}');
     expect(info.name).toBe("Error");
   });
+
+  it("preserves retry and response details on plain-object errors", () => {
+    const info = toStreamErrorInfo({
+      message: "network unreachable",
+      isRetryable: true,
+      responseHeaders: { "retry-after": "4", "x-count": 7 },
+      responseBody: "upstream unreachable",
+      cause: { code: "ENETUNREACH" },
+    });
+    expect(info).toEqual({
+      name: "Error",
+      message: "network unreachable",
+      isRetryable: true,
+      responseHeaders: { "retry-after": "4" },
+      responseBody: "upstream unreachable",
+      causeCode: "ENETUNREACH",
+    });
+    expect(isRetryableStreamError(info)).toBe(true);
+    expect(summarizeStreamError(info)).toContain("upstream unreachable");
+  });
 });
 
 describe("error event serialization", () => {

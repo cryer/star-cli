@@ -61,12 +61,19 @@ describe("edit_file CRLF tolerance", () => {
 
   it("writes LF back when the original file is dominantly LF", async () => {
     // One stray CRLF in an LF file: an LF old_string never matches the raw
-    // bytes exactly, the normalized space matches, and the write-back
-    // follows the dominant LF ending (the stray CRLF is unified away).
+    // bytes exactly, the normalized space matches, and replacement lines
+    // follow the dominant LF ending.
     writeFileSync(path.join(dir, "mixed.txt"), "a\r\nb\nc\n");
     const res = await edit("mixed.txt", "a\nb", "A\nB");
     expect(res.isError).toBeUndefined();
     expect(readFileSync(path.join(dir, "mixed.txt"), "utf8")).toBe("A\nB\nc\n");
+  });
+
+  it("preserves LF-only lines outside a CRLF fallback replacement", async () => {
+    writeFileSync(path.join(dir, "preserve.txt"), "a\r\nb\r\nuntouched\nc\r\n");
+    const res = await edit("preserve.txt", "a\nb", "A\nB");
+    expect(res.isError).toBeUndefined();
+    expect(readFileSync(path.join(dir, "preserve.txt"), "utf8")).toBe("A\r\nB\r\nuntouched\nc\r\n");
   });
 
   it("still errors on ambiguous matches in the normalized space", async () => {

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
@@ -49,12 +50,23 @@ export function setTodoSession(id: string | null): void {
   boundSessionId = id;
 }
 
+export interface TodoStoreOptions {
+  persistence?: "file" | "memory";
+}
+
 export class TodoStore {
   private items = new Map<number, TodoItem>();
+  private readonly persistence: "file" | "memory";
+  private readonly tmpSuffix = `${process.pid}-${randomUUID()}`;
+  private saveQueue: Promise<void> = Promise.resolve();
   // Bumped on every replace() — the agent loop watches it to detect
   // todo_write landings, so a list left untouched for many steps (with open
   // items) can be flagged as stale and the model reminded to reconcile it.
   private revisionValue = 0;
+
+  constructor(options: TodoStoreOptions = {}) {
+    this.persistence = options.persistence ?? "file";
+  }
 
   get revision(): number {
     return this.revisionValue;
@@ -73,6 +85,7 @@ export class TodoStore {
   }
 
   async load(cwd: string, sessionId?: string): Promise<void> {
+    if (this.persistence === "memory") return;
     let raw: string;
     try {
       raw = await readFile(fileFor(cwd), "utf8");
@@ -104,23 +117,27 @@ export class TodoStore {
     }
   }
 
-  // Atomic write (tmp + rename): a crash or failed save can never leave a
-  // truncated todos.json behind. An empty or fully completed list has no
-  // resume value — rehydrating it would only restore finished work — so the
-  // file is deleted instead of persisted.
-  async save(cwd: string): Promise<void> {
-    if (!persistGuard()) {
-      return;
-    }
+  // Atomic write (unique tmp + rename) with per-store serialization: parallel
+  // saves cannot share a temp file or finish out of order. An empty or fully
+  // completed list has no resume value, so the file is deleted instead.
+  save(cwd: string): Promise<void> {
+    if (this.persistence === "memory" || !persistGuard()) return Promise.resolve();
     const items = this.list();
+    const sessionId = boundSessionId;
+    const saving = this.saveQueue.catch(() => {}).then(() => this.saveNow(cwd, items, sessionId));
+    this.saveQueue = saving;
+    return saving;
+  }
+
+  private async saveNow(cwd: string, items: TodoItem[], sessionId: string | null): Promise<void> {
     const file = fileFor(cwd);
     if (items.length === 0 || items.every((it) => it.status === "done")) {
       await rm(file, { force: true });
       return;
     }
     await mkdir(path.join(cwd, ".star"), { recursive: true });
-    const tmp = `${file}.tmp`;
-    await writeFile(tmp, `${JSON.stringify({ sessionId: boundSessionId, items }, null, 2)}\n`);
+    const tmp = `${file}.${this.tmpSuffix}.tmp`;
+    await writeFile(tmp, `${JSON.stringify({ sessionId, items }, null, 2)}\n`);
     await rename(tmp, file);
   }
 }

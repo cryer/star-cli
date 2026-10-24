@@ -120,3 +120,121 @@ export function elideStaleContent(
   if (elidedCount === 0) return null;
   return { messages: out, elidedCount };
 }
+
+export const ELIDED_ASSISTANT_TEXT = "[assistant content elided by emergency context reduction]";
+
+export interface EmergencyElisionOptions {
+  minTokens?: number;
+}
+
+export interface EmergencyElisionResult extends ElisionResult {
+  estimatedTokens: number;
+  withinBudget: boolean;
+}
+
+function isElidedToolCallArgs(args: unknown): boolean {
+  return (
+    args !== null &&
+    typeof args === "object" &&
+    (args as { elided?: unknown }).elided === ELIDED_TOOL_CALL_ARGS_TEXT
+  );
+}
+
+function emergencyElideMessage(star: StarMessage): StarMessage | null {
+  const message = star.message;
+  if (message.role === "system") return null;
+  if (message.role === "tool") {
+    if (message.content.every((part) => part.result === ELIDED_TOOL_RESULT_TEXT)) return null;
+    return {
+      message: {
+        ...message,
+        content: message.content.map((part) => ({
+          ...part,
+          result: ELIDED_TOOL_RESULT_TEXT,
+        })),
+      },
+      meta: { ...star.meta, elided: true },
+    };
+  }
+  if (message.role === "user") {
+    if (!Array.isArray(message.content)) return null;
+    if (!message.content.some((part) => part.type === "image" || part.type === "file")) {
+      return null;
+    }
+    return {
+      message: {
+        ...message,
+        content: message.content.map((part) =>
+          part.type === "image" || part.type === "file"
+            ? { type: "text" as const, text: ELIDED_IMAGE_TEXT }
+            : part,
+        ),
+      },
+      meta: { ...star.meta, elided: true },
+    };
+  }
+  if (typeof message.content === "string") {
+    if (message.content === ELIDED_ASSISTANT_TEXT) return null;
+    return {
+      message: { ...message, content: ELIDED_ASSISTANT_TEXT },
+      meta: { ...star.meta, elided: true },
+    };
+  }
+  let changed = false;
+  const content = message.content.map((part) => {
+    if (part.type === "tool-call" && !isElidedToolCallArgs(part.args)) {
+      changed = true;
+      return { ...part, args: { elided: ELIDED_TOOL_CALL_ARGS_TEXT } };
+    }
+    if (
+      (part.type === "text" || part.type === "reasoning") &&
+      part.text !== ELIDED_ASSISTANT_TEXT
+    ) {
+      changed = true;
+      return { ...part, text: ELIDED_ASSISTANT_TEXT };
+    }
+    return part;
+  });
+  if (!changed) return null;
+  return { message: { ...message, content }, meta: { ...star.meta, elided: true } };
+}
+
+// Last-resort, in-place reduction after ordinary compaction. Unlike stale
+// elision it has no recent-message frontier: oldest bulky messages are reduced
+// first, including a single huge result or attachment in the active turn.
+// User text and system instructions are never rewritten, and no messages or
+// tool-call ids are removed. estimatedTokens includes overheadTokens.
+export function emergencyElideContent(
+  messages: readonly StarMessage[],
+  maxTokens: number,
+  overheadTokens = 0,
+  options: EmergencyElisionOptions = {},
+): EmergencyElisionResult {
+  const minTokens = options.minTokens ?? 1;
+  const out = messages.slice();
+  const tokens = messages.map((star) => estimateMessageTokens(star.message));
+  let estimatedTokens = overheadTokens;
+  for (const count of tokens) estimatedTokens += count;
+  let elidedCount = 0;
+  const floors =
+    minTokens < DEFAULT_ELISION_MIN_TOKENS ? [DEFAULT_ELISION_MIN_TOKENS, minTokens] : [minTokens];
+  for (const floor of floors) {
+    for (let i = 0; i < out.length && estimatedTokens > maxTokens; i++) {
+      const star = out[i];
+      if (!star || (tokens[i] ?? 0) < floor) continue;
+      const replacement = emergencyElideMessage(star);
+      if (!replacement) continue;
+      const replacementTokens = estimateMessageTokens(replacement.message);
+      if (replacementTokens >= (tokens[i] ?? 0)) continue;
+      out[i] = replacement;
+      estimatedTokens += replacementTokens - (tokens[i] ?? 0);
+      elidedCount++;
+    }
+  }
+  return {
+    messages: out,
+    elidedCount,
+    estimatedTokens,
+    withinBudget: estimatedTokens <= maxTokens,
+  };
+}

@@ -55,6 +55,10 @@ export interface WalkOptions {
   // syscall. Inside a symlinked subtree the rules anchor at the link's walk
   // position (paths stay lexical; the file content comes from the target).
   nestedIgnore?: boolean;
+  // Stream each directory's sorted files to the caller. Returning false stops
+  // dispatching further work. collect:false avoids retaining the walked tree.
+  onBatch?: (files: WalkedFile[]) => Promise<unknown> | unknown;
+  collect?: boolean;
 }
 
 export interface WalkResult {
@@ -120,6 +124,21 @@ export async function walkFiles(
   const out: WalkedFile[] = [];
   const limit = createLimiter(WALK_CONCURRENCY);
   const signal = options.signal;
+  let stopped = false;
+  let callbackChain = Promise.resolve();
+  const emitBatch = (files: WalkedFile[]) => {
+    if (!options.onBatch || files.length === 0) return callbackChain;
+    files.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+    callbackChain = callbackChain.then(async () => {
+      if (stopped) return;
+      if ((await options.onBatch?.(files)) === false) stopped = true;
+    });
+    return callbackChain;
+  };
+  const collect = (file: WalkedFile, batch: WalkedFile[]) => {
+    batch.push(file);
+    if (options.collect !== false) out.push(file);
+  };
   const caseKey = (p: string) => (process.platform === "win32" ? p.toLowerCase() : p);
   // Realpaths of directories already entered. Only symlink targets can create
   // a cycle (A↔B, link to an ancestor), so real directories are not tracked.
@@ -153,7 +172,7 @@ export async function walkFiles(
   }
 
   async function walkDir(dir: string, relBase: string, parentLayers: IgnoreLayer[]): Promise<void> {
-    if (signal?.aborted) {
+    if (signal?.aborted || stopped) {
       return;
     }
     const entries = await limit(() => readdir(dir, { withFileTypes: true })).catch(() => null);
@@ -168,8 +187,9 @@ export async function walkFiles(
       }
     }
     const subs: Promise<void>[] = [];
+    const batch: WalkedFile[] = [];
     for (const entry of entries) {
-      if (signal?.aborted) {
+      if (signal?.aborted || stopped) {
         break;
       }
       const abs = path.join(dir, entry.name);
@@ -214,26 +234,30 @@ export async function walkFiles(
           continue;
         }
         if (options.withMtime === false) {
-          out.push(
+          collect(
             resolved === undefined ? { abs, rel, mtimeMs: 0 } : { abs, rel, mtimeMs: 0, resolved },
+            batch,
           );
           continue;
         }
         const st = targetStat ?? (await limit(() => stat(abs)).catch(() => null));
         if (st) {
-          out.push(
+          collect(
             resolved === undefined
               ? { abs, rel, mtimeMs: st.mtimeMs }
               : { abs, rel, mtimeMs: st.mtimeMs, resolved },
+            batch,
           );
         }
       }
     }
+    await emitBatch(batch);
     await Promise.all(subs);
   }
   await walkDir(root, "", []);
-  // Concurrent pushes arrive in nondeterministic order; sort so grep's match
-  // order and truncation cut are stable from run to run.
+  await callbackChain;
+  // Concurrent pushes arrive in nondeterministic order; collected results keep
+  // a stable lexical order. Streaming batches are sorted per directory above.
   out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
   return { files: out, aborted: signal?.aborted ?? false };
 }

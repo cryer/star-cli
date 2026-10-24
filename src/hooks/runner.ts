@@ -105,6 +105,9 @@ function runCommand(
     if (inputViaStdin && inputJson !== undefined && child.stdin) {
       child.stdin.on("error", () => {});
       child.stdin.end(inputJson);
+    } else {
+      child.stdin?.on("error", () => {});
+      child.stdin?.end();
     }
     let stderr = "";
     // Chunk-wise toString would corrupt multi-byte UTF-8 split across chunks.

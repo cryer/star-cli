@@ -23,6 +23,7 @@ afterEach(async () => {
 async function makeSession(cwd: string): Promise<SessionStore> {
   const store = await SessionStore.create(cwd, "m");
   await store.append({ role: "user", content: "hi" });
+  await store.close();
   return store;
 }
 
@@ -114,6 +115,17 @@ describe("clearSessions", () => {
 });
 
 describe("deleteSession", () => {
+  it("does not delete a session held open by another Store", async () => {
+    const store = await SessionStore.create("/work/here", "m");
+    await store.append({ role: "user", content: "live" });
+
+    await deleteSession(store.id);
+
+    expect(fs.existsSync(store.dir)).toBe(true);
+    expect(await store.messages()).toEqual([{ role: "user", content: "live" }]);
+    await store.close();
+  });
+
   it("deletes only the named session", async () => {
     const keep = await makeSession("/work/here");
     const gone = await makeSession("/work/here");

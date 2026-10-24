@@ -6,7 +6,12 @@ import {
   filterArgHints,
   filterCommands,
 } from "../commands/suggest";
-import { type PathSuggestion, extractAtToken, suggestPaths } from "../path-suggest";
+import {
+  PATH_SUGGEST_DEBOUNCE_MS,
+  type PathSuggestion,
+  cachedSuggestPaths,
+  extractAtToken,
+} from "../path-suggest";
 import { useInput } from "../use-input";
 
 export interface InputRefill {
@@ -14,24 +19,51 @@ export interface InputRefill {
   seq: number;
 }
 
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+export function previousGraphemeBoundary(value: string, cursor: number): number {
+  let previous = 0;
+  for (const { index } of graphemeSegmenter.segment(value.slice(0, cursor))) previous = index;
+  return previous;
+}
+
+export function nextGraphemeBoundary(value: string, cursor: number): number {
+  const next = graphemeSegmenter.segment(value.slice(cursor))[Symbol.iterator]().next();
+  return next.done ? value.length : cursor + next.value.segment.length;
+}
+
+function graphemeColumn(value: string, start: number, end: number): number {
+  return Array.from(graphemeSegmenter.segment(value.slice(start, end))).length;
+}
+
+function cursorAtGraphemeColumn(value: string, start: number, end: number, column: number): number {
+  let count = 0;
+  for (const { index, segment } of graphemeSegmenter.segment(value.slice(start, end))) {
+    if (count === column) return start + index;
+    count += 1;
+    if (count > column) return start + index + segment.length;
+  }
+  return end;
+}
+
 // Cursor position one visual line up/down (lines split on \n), keeping the
-// column clamped to the target line's length. Null when there is no line in
+// grapheme column clamped to the target line. Null when there is no line in
 // that direction.
 export function moveCursorLines(value: string, cursor: number, delta: -1 | 1): number | null {
   const lineStart = value.lastIndexOf("\n", cursor - 1) + 1;
-  const col = cursor - lineStart;
+  const col = graphemeColumn(value, lineStart, cursor);
   if (delta === -1) {
     if (lineStart === 0) return null;
     const prevEnd = lineStart - 1;
     const prevStart = value.lastIndexOf("\n", prevEnd - 1) + 1;
-    return prevStart + Math.min(col, prevEnd - prevStart);
+    return cursorAtGraphemeColumn(value, prevStart, prevEnd, col);
   }
   const lineEndIndex = value.indexOf("\n", cursor);
   if (lineEndIndex === -1) return null;
   const nextStart = lineEndIndex + 1;
   const nextEndIndex = value.indexOf("\n", nextStart);
   const nextEnd = nextEndIndex === -1 ? value.length : nextEndIndex;
-  return nextStart + Math.min(col, nextEnd - nextStart);
+  return cursorAtGraphemeColumn(value, nextStart, nextEnd, col);
 }
 
 // Case-insensitive substring scan for reverse history search: step -1 walks
@@ -356,21 +388,22 @@ export const InputBox = memo(function InputBox({
       : [];
 
   useEffect(() => {
-    if (!suggestionsEnabled || !cwd) {
-      setPathSuggestions([]);
-      return;
-    }
-    const token = extractAtToken(value, cursor);
-    if (!token) {
-      setPathSuggestions([]);
-      return;
-    }
     let cancelled = false;
-    void suggestPaths(token.token, cwd).then((result) => {
-      if (!cancelled) setPathSuggestions(result);
-    });
+    setPathSuggestions([]);
+    const token = suggestionsEnabled && cwd ? extractAtToken(value, cursor) : null;
+    if (!token || !cwd) return;
+    const timer = setTimeout(() => {
+      void cachedSuggestPaths(token.token, cwd)
+        .then((result) => {
+          if (!cancelled) setPathSuggestions(result);
+        })
+        .catch(() => {
+          if (!cancelled) setPathSuggestions([]);
+        });
+    }, PATH_SUGGEST_DEBOUNCE_MS);
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [value, cursor, cwd, suggestionsEnabled]);
 
@@ -475,7 +508,7 @@ export const InputBox = memo(function InputBox({
       const requery = (query: string) =>
         setSearch({ query, match: findHistoryMatch(history, query, history.length - 1, -1) });
       if (key.backspace || key.delete) {
-        requery(search.query.slice(0, -1));
+        requery(search.query.slice(0, previousGraphemeBoundary(search.query, search.query.length)));
         return;
       }
       if (key.upArrow) {
@@ -615,13 +648,13 @@ export const InputBox = memo(function InputBox({
       if (moved !== null) setCursor(moved);
       return;
     } else if (key.leftArrow) {
-      setCursor((prev) => Math.max(0, prev - 1));
+      setCursor((prev) => previousGraphemeBoundary(value, prev));
       return;
     } else if (key.rightArrow) {
       if (suggestionCount > 0 && cursor === value.length) {
         completeHighlighted();
       } else {
-        setCursor((prev) => Math.min(value.length, prev + 1));
+        setCursor((prev) => nextGraphemeBoundary(value, prev));
       }
       return;
     }
@@ -654,17 +687,17 @@ export const InputBox = memo(function InputBox({
       if (cursor === 0) return;
       // A placeholder immediately before the cursor is deleted as a unit so
       // it can never be half-removed (which would break expansion).
-      let remove = 1;
+      let removeStart = previousGraphemeBoundary(value, cursor);
       for (const match of value.matchAll(PASTE_TOKEN_RE)) {
         if (match.index + match[0].length === cursor) {
-          remove = match[0].length;
+          removeStart = match.index;
           const id = Number(match[1]);
           pastesRef.current.delete(id);
           if (lastPasteRef.current?.id === id) lastPasteRef.current = null;
           break;
         }
       }
-      edit(value.slice(0, cursor - remove) + value.slice(cursor), cursor - remove);
+      edit(value.slice(0, removeStart) + value.slice(cursor), removeStart);
       return;
     }
     if (input && !key.ctrl && !key.meta) {
@@ -673,12 +706,13 @@ export const InputBox = memo(function InputBox({
   });
 
   const before = value.slice(0, cursor);
-  const at = value[cursor];
-  const after = value.slice(cursor + 1);
+  const nextBoundary = nextGraphemeBoundary(value, cursor);
+  const at = value.slice(cursor, nextBoundary);
+  const after = value.slice(nextBoundary);
   // A newline under the cursor is shown as an inverse space at the line end,
   // with the newline itself rendered after it. The (invisible) paste-token
   // delimiter also yields an inverse space so the cursor stays visible.
-  const cursorChar = at === "\n" || at === undefined || at === PASTE_DELIM ? " " : at;
+  const cursorChar = at === "\n" || at === "" || at === PASTE_DELIM ? " " : at;
   const tail = (at === "\n" ? "\n" : "") + stylePasteTokens(after);
 
   // One pre-styled string in a single Text node. Sibling Text nodes wrap

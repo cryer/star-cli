@@ -27,10 +27,12 @@ function readMeta(dir: string): SessionMeta {
 }
 
 describe("SessionStore", () => {
-  it("create writes nothing to disk until the first append", async () => {
+  it("create takes the lifecycle lock before the first append", async () => {
     const store = await SessionStore.create("/tmp/work", "test-model");
     expect(store.dir).toBe(path.join(sessionsDir(), store.id));
-    expect(fs.existsSync(store.dir)).toBe(false);
+    expect(fs.existsSync(path.join(store.dir, ".lock"))).toBe(true);
+    expect(fs.existsSync(path.join(store.dir, "meta.json"))).toBe(false);
+    expect(fs.existsSync(path.join(store.dir, "messages.jsonl"))).toBe(false);
 
     await store.append({ role: "user", content: "你好" });
     expect(fs.existsSync(store.dir)).toBe(true);
@@ -178,6 +180,7 @@ describe("SessionStore", () => {
     const store = await SessionStore.create("/a", "m");
     expect(await SessionStore.open(store.id)).toBeNull();
     await store.append({ role: "user", content: "hi" });
+    await store.close();
     expect((await SessionStore.open(store.id))?.id).toBe(store.id);
   });
 
@@ -207,6 +210,7 @@ describe("SessionStore", () => {
   it("falls back to default meta when meta.json is corrupt", async () => {
     const store = await SessionStore.create("/a", "m");
     await store.append({ role: "user", content: "hi" });
+    await store.close();
     fs.writeFileSync(path.join(store.dir, "meta.json"), "{not json");
 
     const reopened = await SessionStore.open(store.id);
@@ -249,6 +253,7 @@ describe("SessionStore", () => {
     await store.append({ role: "user", content: "hi" });
     await store.addUsage({ promptTokens: 20, completionTokens: 7, totalTokens: 27 });
 
+    await store.close();
     const reopened = await SessionStore.open(store.id);
     expect((await reopened?.meta())?.usage).toEqual({
       requests: 2,
@@ -258,6 +263,29 @@ describe("SessionStore", () => {
     });
   });
 
+  it("records actual cost and token usage separately for each model", async () => {
+    const store = await SessionStore.create("/a", "cheap");
+    await store.addUsage(
+      { promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+      { modelName: "cheap", costUsd: 0.01 },
+    );
+    await store.addUsage(
+      { promptTokens: 50, completionTokens: 10, totalTokens: 60 },
+      { modelName: "expensive", costUsd: 0.05 },
+    );
+    await store.addUsage(
+      { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      { modelName: "unpriced", costUsd: null },
+    );
+
+    const meta = await store.meta();
+    expect(meta.usage?.costUsd).toBeCloseTo(0.06);
+    expect(meta.usage?.costUnknown).toBe(true);
+    expect(meta.usageByModel?.cheap).toMatchObject({ requests: 1, costUsd: 0.01 });
+    expect(meta.usageByModel?.expensive).toMatchObject({ requests: 1, costUsd: 0.05 });
+    expect(meta.usageByModel?.unpriced).toMatchObject({ requests: 1, costUnknown: true });
+  });
+
   it("loads metas without a usage field", async () => {
     const store = await SessionStore.create("/a", "m");
     await store.append({ role: "user", content: "hi" });
@@ -265,6 +293,7 @@ describe("SessionStore", () => {
     meta.usage = undefined;
     fs.writeFileSync(path.join(store.dir, "meta.json"), JSON.stringify(meta));
 
+    await store.close();
     const reopened = await SessionStore.open(store.id);
     expect((await reopened?.meta())?.usage).toBeUndefined();
 
@@ -320,6 +349,7 @@ describe("SessionStore", () => {
     const orphan = path.join(store.dir, "meta.json.tmp-99999-0");
     fs.writeFileSync(orphan, "partial");
 
+    await store.close();
     const reopened = await SessionStore.open(store.id);
 
     expect(reopened).not.toBeNull();
@@ -398,7 +428,7 @@ describe("SessionStore", () => {
     }
   });
 
-  it("degrades to a warning instead of throwing when a message append keeps failing", async () => {
+  it("reports append failure and repairs the full history on the next append", async () => {
     const spy = vi
       .spyOn(fsPromises, "appendFile")
       .mockRejectedValue(
@@ -407,16 +437,19 @@ describe("SessionStore", () => {
     const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     try {
       const store = await SessionStore.create("/a", "m");
-      await expect(store.append({ role: "user", content: "lost" })).resolves.toBeUndefined();
+      await expect(store.append({ role: "user", content: "lost" })).resolves.toBe(false);
 
-      // The failed line is dropped from disk but the turn survives: the store
-      // keeps working and later appends persist normally.
       expect(await store.messages()).toEqual([]);
+      expect(store.persistenceDegraded).toBe(true);
       expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("message append failed"));
 
       spy.mockRestore();
-      await store.append({ role: "user", content: "kept" });
-      expect(await store.messages()).toEqual([{ role: "user", content: "kept" }]);
+      await expect(store.append({ role: "user", content: "kept" })).resolves.toBe(true);
+      expect(store.persistenceDegraded).toBe(false);
+      expect(await store.messages()).toEqual([
+        { role: "user", content: "lost" },
+        { role: "user", content: "kept" },
+      ]);
     } finally {
       spy.mockRestore();
       stderrSpy.mockRestore();
@@ -471,15 +504,19 @@ describe("SessionStore", () => {
     try {
       await expect(
         store.replaceMessages([{ message: { role: "user", content: "replacement" } }]),
-      ).resolves.toBeUndefined();
+      ).resolves.toBe(false);
 
-      // The failed rewrite is dropped with a warning; the old messages.jsonl
-      // stays intact and no tmp orphan is left behind.
+      expect(store.persistenceDegraded).toBe(true);
       expect(await store.messages()).toEqual([{ role: "user", content: "original" }]);
       expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining("history rewrite failed"));
       expect(
         fs.readdirSync(store.dir).filter((entry) => entry.startsWith("messages.jsonl.tmp-")),
       ).toEqual([]);
+
+      spy.mockRestore();
+      await expect(store.recoverMessages()).resolves.toBe(true);
+      expect(store.persistenceDegraded).toBe(false);
+      expect(await store.messages()).toEqual([{ role: "user", content: "replacement" }]);
     } finally {
       spy.mockRestore();
       stderrSpy.mockRestore();
@@ -589,6 +626,7 @@ describe("SessionStore", () => {
     const orphan = path.join(store.dir, "messages.jsonl.tmp-99999-0");
     fs.writeFileSync(orphan, "partial");
 
+    await store.close();
     const reopened = await SessionStore.open(store.id);
 
     expect(reopened).not.toBeNull();
@@ -722,6 +760,7 @@ describe("resumeSession", () => {
     const store = await SessionStore.create("/a", "m");
     await store.append({ role: "user", content: "恢复我" });
     await store.setTitle("恢复我");
+    await store.close();
 
     const resumed = await resumeSession(store.id);
     expect(resumed?.meta.id).toBe(store.id);

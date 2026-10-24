@@ -50,6 +50,25 @@ describe("SelectPrompt", () => {
     app.unmount();
   });
 
+  it("sanitizes control characters in every caller-controlled field", async () => {
+    const { app } = setup([
+      {
+        value: "a",
+        label: "bad\rlabel\u001b[2J",
+        description: "desc\u0007ription",
+        hint: "hi\tnt",
+      },
+    ]);
+    await tick();
+    const out = app.lastFrame() ?? "";
+    expect(out).not.toContain("\r");
+    expect(out).not.toContain("\u0007");
+    expect(stripAnsi(out)).toContain("badlabel[2J");
+    expect(stripAnsi(out)).toContain("description");
+    expect(stripAnsi(out)).toContain("hi  nt");
+    app.unmount();
+  });
+
   it("highlights the first option initially and moves with arrows", async () => {
     const { app } = setup(simpleOptions);
     await tick();

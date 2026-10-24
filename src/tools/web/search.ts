@@ -4,6 +4,7 @@ import type { Tool } from "../types";
 import { decodeEntities } from "./fetch";
 
 const TIMEOUT_MS = 15000;
+const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAX_RESULTS = 5;
 const MAX_RESULTS_LIMIT = 10;
 const USER_AGENT =
@@ -165,6 +166,26 @@ const SEARCH_SOURCES: SearchSource[] = [
   },
 ];
 
+async function readLimitedBody(res: Response): Promise<string> {
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = "";
+  try {
+    while (bytes < MAX_BODY_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return text;
+}
+
 export const webSearchTool: Tool<typeof schema> = {
   name: "web_search",
   description:
@@ -206,7 +227,7 @@ export const webSearchTool: Tool<typeof schema> = {
       }
       let html: string;
       try {
-        html = await res.text();
+        html = await readLimitedBody(res);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         failures.push(`${source.name}: failed to read search response: ${message}`);

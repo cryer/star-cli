@@ -46,6 +46,8 @@ const NETWORK_ERROR_CODES = new Set([
   "EAI_AGAIN",
   "ENOTFOUND",
   "ECONNABORTED",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
 ]);
 
 // Node's fetch reports transport failures as TypeError("fetch failed")

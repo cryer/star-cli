@@ -1,4 +1,8 @@
 import dns from "node:dns";
+import http from "node:http";
+import https from "node:https";
+import { BlockList, isIPv4, isIPv6 } from "node:net";
+import { Readable } from "node:stream";
 import { z } from "zod";
 import type { Tool } from "../types";
 
@@ -44,31 +48,66 @@ export function setWebFetchAllowPrivateHosts(allow: boolean): void {
   configuredAllowPrivateHosts = allow;
 }
 
-function isPrivateIpv4(ip: string): boolean {
-  const parts = ip.split(".").map(Number);
-  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
-    return false;
-  }
-  const [a = 0, b = 0] = parts;
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 169 && b === 254)
-  );
+const reservedIpv4 = new BlockList();
+for (const [address, prefix] of [
+  ["0.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["100.64.0.0", 10],
+  ["127.0.0.0", 8],
+  ["169.254.0.0", 16],
+  ["172.16.0.0", 12],
+  ["192.0.0.0", 24],
+  ["192.0.2.0", 24],
+  ["192.88.99.0", 24],
+  ["192.168.0.0", 16],
+  ["198.18.0.0", 15],
+  ["198.51.100.0", 24],
+  ["203.0.113.0", 24],
+  ["224.0.0.0", 4],
+  ["240.0.0.0", 4],
+] as const) {
+  reservedIpv4.addSubnet(address, prefix, "ipv4");
 }
 
-function isPrivateAddress(address: string): boolean {
-  let ip = address.toLowerCase();
-  if (ip.startsWith("::ffff:")) ip = ip.slice("::ffff:".length);
-  if (ip.includes(".")) return isPrivateIpv4(ip);
-  if (ip === "::1" || ip === "::") return true;
-  // fc00::/7 (ULA) and fe80::/10 (link-local).
-  if (ip.startsWith("fc") || ip.startsWith("fd")) return true;
-  if (/^fe[89ab]/.test(ip)) return true;
-  return false;
+const reservedIpv6 = new BlockList();
+for (const [address, prefix] of [
+  ["::", 96],
+  ["100::", 64],
+  ["64:ff9b::", 96],
+  ["64:ff9b:1::", 48],
+  ["2001::", 23],
+  ["2001:db8::", 32],
+  ["2002::", 16],
+  ["fc00::", 7],
+  ["fe80::", 10],
+  ["fec0::", 10],
+  ["ff00::", 8],
+] as const) {
+  reservedIpv6.addSubnet(address, prefix, "ipv6");
+}
+
+function mappedIpv4(ip: string): string | null {
+  const dotted = /^(?:::|(?:0:){5})ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);
+  if (dotted?.[1]) return dotted[1];
+  const hexadecimal = /^(?:::|(?:0:){5})ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(ip);
+  if (!hexadecimal) return null;
+  const value =
+    Number.parseInt(hexadecimal[1] ?? "0", 16) * 0x10000 +
+    Number.parseInt(hexadecimal[2] ?? "0", 16);
+  return [(value >>> 24) & 255, (value >>> 16) & 255, (value >>> 8) & 255, value & 255].join(".");
+}
+
+export function isPrivateAddress(address: string): boolean {
+  const ip =
+    address
+      .replace(/^\[|\]$/g, "")
+      .split("%")[0]
+      ?.toLowerCase() ?? "";
+  const mapped = mappedIpv4(ip);
+  if (mapped !== null) return !isIPv4(mapped) || reservedIpv4.check(mapped, "ipv4");
+  if (isIPv4(ip)) return reservedIpv4.check(ip, "ipv4");
+  if (isIPv6(ip)) return reservedIpv6.check(ip, "ipv6");
+  return true;
 }
 
 function isLocalHostname(hostname: string): boolean {
@@ -78,29 +117,76 @@ function isLocalHostname(hostname: string): boolean {
   );
 }
 
-// Returns a refusal message when the URL's host is local/private/reserved,
-// null when it is safe to connect. DNS answers are checked too, so a public
-// hostname that resolves to 169.254.169.254 is refused like a literal IP.
-async function privateHostRefusal(url: URL, resolve: WebFetchResolver): Promise<string | null> {
+interface ValidatedTarget {
+  address: string;
+  family: 4 | 6;
+}
+
+async function validateTarget(
+  url: URL,
+  resolve: WebFetchResolver,
+): Promise<{ target: ValidatedTarget } | { refusal: string }> {
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
   if (isLocalHostname(hostname)) {
-    return `"${hostname}" is a local/internal hostname`;
+    return { refusal: `"${hostname}" is a local/internal hostname` };
   }
   let addresses: string[];
   try {
     addresses = await resolve(hostname);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return `could not resolve "${hostname}" (${message})`;
+    return { refusal: `could not resolve "${hostname}" (${message})` };
   }
   const blocked = addresses.find(isPrivateAddress);
   if (blocked !== undefined) {
-    return `"${hostname}" resolves to a private/reserved address (${blocked})`;
+    return { refusal: `"${hostname}" resolves to a private/reserved address (${blocked})` };
   }
-  if (addresses.length === 0) {
-    return `could not resolve "${hostname}"`;
+  const address = addresses[0];
+  if (address === undefined) {
+    return { refusal: `could not resolve "${hostname}"` };
   }
-  return null;
+  return { target: { address, family: isIPv4(address) ? 4 : 6 } };
+}
+
+function nativeFetch(url: URL, signal: AbortSignal, target?: ValidatedTarget): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const transport = url.protocol === "https:" ? https : http;
+    const hostname = url.hostname.replace(/^\[|\]$/g, "");
+    const request = transport.request(url, {
+      method: "GET",
+      signal,
+      servername: isIPv6(hostname) || isIPv4(hostname) ? "" : hostname,
+      lookup: target
+        ? (_hostname, options, callback) => {
+            if (options.all) {
+              callback(null, [{ address: target.address, family: target.family }]);
+            } else {
+              callback(null, target.address, target.family);
+            }
+          }
+        : undefined,
+      headers: { "accept-encoding": "identity" },
+    });
+    request.once("error", reject);
+    request.once("response", (incoming) => {
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(incoming.headers)) {
+        if (Array.isArray(value)) {
+          for (const item of value) headers.append(name, item);
+        } else if (value !== undefined) {
+          headers.set(name, value);
+        }
+      }
+      resolve(
+        new Response(Readable.toWeb(incoming) as ReadableStream<Uint8Array>, {
+          status: incoming.statusCode ?? 500,
+          statusText: incoming.statusMessage,
+          headers,
+        }),
+      );
+    });
+    request.end();
+  });
 }
 
 // String.fromCodePoint throws a RangeError on code points past U+10FFFF;
@@ -280,7 +366,7 @@ function truncate(s: string, maxChars: number): string {
 
 export function createWebFetchTool(options: WebFetchToolOptions = {}): Tool<typeof schema> {
   const resolve = options.resolver ?? defaultResolver;
-  const fetchImpl = options.fetchImpl ?? ((...args: Parameters<typeof fetch>) => fetch(...args));
+  const fetchImpl = options.fetchImpl;
   const allowPrivate = () => options.allowPrivateHosts ?? configuredAllowPrivateHosts;
   return {
     name: "web_fetch",
@@ -301,24 +387,32 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): Tool<type
           isError: true,
         };
       }
-      if (!allowPrivate()) {
-        const refusal = await privateHostRefusal(url, resolve);
-        if (refusal !== null) {
-          return { content: `ERROR: refused to fetch ${args.url}: ${refusal}`, isError: true };
-        }
-      }
       const maxChars = args.maxChars ?? DEFAULT_MAX_CHARS;
       const timeoutSignal = AbortSignal.timeout(TIMEOUT_MS);
       const signal = ctx.abortSignal
         ? AbortSignal.any([timeoutSignal, ctx.abortSignal])
         : timeoutSignal;
       // Redirects are followed manually so every hop's host is re-validated;
-      // a public page must not bounce the tool into a metadata endpoint.
+      // the native transport then connects to that exact validated address.
       let res: Response | undefined;
       let current = url;
       for (let hops = 0; ; hops += 1) {
+        let target: ValidatedTarget | undefined;
+        if (!allowPrivate()) {
+          const validated = await validateTarget(current, resolve);
+          if ("refusal" in validated) {
+            const prefix = hops === 0 ? "refused to fetch" : "refused redirect to";
+            return {
+              content: `ERROR: ${prefix} ${current.href}: ${validated.refusal}`,
+              isError: true,
+            };
+          }
+          target = validated.target;
+        }
         try {
-          res = await fetchImpl(current, { signal, redirect: "manual" });
+          res = fetchImpl
+            ? await fetchImpl(current, { signal, redirect: "manual" })
+            : await nativeFetch(current, signal, target);
         } catch (err) {
           if (ctx.abortSignal?.aborted) {
             return { content: "ERROR: request aborted", isError: true };
@@ -346,15 +440,6 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): Tool<type
               content: `ERROR: redirect to non-http(s) URL refused: ${next.protocol}`,
               isError: true,
             };
-          }
-          if (!allowPrivate()) {
-            const refusal = await privateHostRefusal(next, resolve);
-            if (refusal !== null) {
-              return {
-                content: `ERROR: refused redirect to ${next.href}: ${refusal}`,
-                isError: true,
-              };
-            }
           }
           current = next;
           continue;

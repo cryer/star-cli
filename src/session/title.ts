@@ -1,4 +1,5 @@
 import { type LanguageModel, generateText } from "ai";
+import type { TokenUsage } from "../core/events";
 import type { SessionStore } from "./store";
 
 const TITLE_MAX_CHARS = 50;
@@ -30,14 +31,17 @@ function sanitizeTitle(raw: string): string {
 export async function generateSessionTitle(
   userText: string,
   model: LanguageModel,
+  onUsage?: (usage: TokenUsage) => void,
 ): Promise<string> {
-  const { text } = await generateText({
+  const { text, usage } = await generateText({
     model,
     system: TITLE_SYSTEM_PROMPT,
     prompt: userText.slice(0, TITLE_INPUT_MAX_CHARS),
     maxTokens: TITLE_MAX_TOKENS,
+    maxRetries: 0,
     abortSignal: AbortSignal.timeout(TITLE_TIMEOUT_MS),
   });
+  onUsage?.(usage);
   return sanitizeTitle(text);
 }
 
@@ -49,11 +53,12 @@ export function scheduleSessionTitle(
   store: SessionStore,
   userText: string,
   model: LanguageModel,
+  onUsage?: (usage: TokenUsage) => void,
 ): void {
   void (async () => {
     const meta = await store.meta();
     if (meta.title) return;
-    const title = await generateSessionTitle(userText, model);
+    const title = await generateSessionTitle(userText, model, onUsage);
     if (!title) return;
     const current = await store.meta();
     if (current.title) return;

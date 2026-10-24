@@ -24,7 +24,6 @@ interface StatusBarProps {
 }
 
 const BG_LABEL_MAX = 40;
-const BG_LABEL_MIN = 8;
 const BG_PER_LABEL_MAX = 24;
 const WIDE_COLUMNS = 120;
 
@@ -35,6 +34,37 @@ function cwdLabel(cwd: string, wide: boolean): string {
     .split(/[\\/]/)
     .pop();
   return base && base.length > 0 ? base : cwd;
+}
+
+export function fitStatusSegments(segments: Array<string | null>, columns: number): string[] {
+  const clean = segments
+    .filter((s): s is string => s != null)
+    .map((s) => toTerminalSafe(s).replaceAll("\n", " "));
+  if (clean.length === 0) return [];
+  const available = Math.max(0, columns - clean.length + 1);
+  const widths = clean.map(displayWidth);
+  const budgets = clean.map(() => 0);
+  let active = clean.map((_, index) => index);
+  let remaining = available;
+  while (remaining > 0 && active.length > 0) {
+    const share = Math.floor(remaining / active.length);
+    if (share === 0) {
+      for (const index of active.slice(0, remaining)) budgets[index] = (budgets[index] ?? 0) + 1;
+      break;
+    }
+    let used = 0;
+    const next: number[] = [];
+    for (const index of active) {
+      const grant = Math.min((widths[index] ?? 0) - (budgets[index] ?? 0), share);
+      budgets[index] = (budgets[index] ?? 0) + grant;
+      used += grant;
+      if ((budgets[index] ?? 0) < (widths[index] ?? 0)) next.push(index);
+    }
+    if (used === 0) break;
+    remaining -= used;
+    active = next;
+  }
+  return clean.map((segment, index) => truncateToWidth(segment, budgets[index] ?? 0));
 }
 
 export const StatusBar = memo(function StatusBar({
@@ -67,42 +97,38 @@ export const StatusBar = memo(function StatusBar({
     sessionCostUsd != null && sessionCostUsd > 0 ? `$${formatDollars(sessionCostUsd)}` : null;
   const tokensSegment = `${formatTokens(tokens)} tokens`;
   const modeSegment = `mode: ${permissionMode}`;
-  // The bg segment gets whatever width the other segments leave; labels are
-  // dropped entirely when there is no room, so the bar never wraps.
   let bgSegment: string | null = null;
   if (backgroundTasks.length > 0) {
-    const prefix = `bg: ${backgroundTasks.length}`;
-    const others = [
-      cwdSegment,
-      modelSegment,
-      ctxSegment,
-      cacheSegment,
-      costSegment,
-      tokensSegment,
-      modeSegment,
-    ].filter((s): s is string => s != null);
-    const fixed = others.reduce((total, s) => total + displayWidth(s), 0);
-    const gaps = others.length; // one space per neighbour pair, bg included
-    const budget = columns - fixed - gaps - displayWidth(prefix) - 2; // 2 for " (" + ")"
-    bgSegment = prefix;
-    if (budget >= BG_LABEL_MIN) {
-      // Task commands/descriptions are model-influenced; escape before display.
-      const joined = backgroundTasks
-        .map((label) => truncateToWidth(toTerminalSafe(label), BG_PER_LABEL_MAX))
-        .join(", ");
-      bgSegment = `${prefix} (${truncateToWidth(joined, Math.min(budget, BG_LABEL_MAX))})`;
-    }
+    const joined = backgroundTasks
+      .map((label) => truncateToWidth(toTerminalSafe(label), BG_PER_LABEL_MAX))
+      .join(", ");
+    bgSegment = `bg: ${backgroundTasks.length} (${truncateToWidth(joined, BG_LABEL_MAX)})`;
   }
+  const raw = [
+    cwdSegment,
+    bgSegment,
+    modelSegment,
+    ctxSegment,
+    cacheSegment,
+    costSegment,
+    tokensSegment,
+    modeSegment,
+  ];
+  const keys = ["cwd", "bg", "model", "ctx", "cache", "cost", "tokens", "mode"].filter(
+    (_, index) => raw[index] != null,
+  );
+  const fitted = fitStatusSegments(raw, columns);
   return (
     <Box justifyContent="space-between">
-      <Text dimColor>{cwdSegment}</Text>
-      {bgSegment && <Text color="yellow">{bgSegment}</Text>}
-      <Text dimColor>{modelSegment}</Text>
-      {ctxSegment && <Text dimColor>{ctxSegment}</Text>}
-      <Text dimColor>{cacheSegment}</Text>
-      {costSegment && <Text dimColor>{costSegment}</Text>}
-      <Text dimColor>{tokensSegment}</Text>
-      <Text dimColor>{modeSegment}</Text>
+      {fitted.map((segment, index) => (
+        <Text
+          key={keys[index]}
+          color={keys[index] === "bg" ? "yellow" : undefined}
+          dimColor={keys[index] !== "bg"}
+        >
+          {segment}
+        </Text>
+      ))}
     </Box>
   );
 });

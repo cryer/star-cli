@@ -67,6 +67,22 @@ export function toStreamErrorInfo(error: unknown): StreamErrorInfo {
     if (typeof raw.statusCode === "number") info.statusCode = raw.statusCode;
     if (typeof raw.status === "number") info.statusCode = raw.status;
     if (typeof raw.code === "string") info.code = raw.code;
+    if (raw.isRetryable === true) info.isRetryable = true;
+    const causeCode =
+      raw.cause && typeof raw.cause === "object"
+        ? (raw.cause as { code?: unknown }).code
+        : undefined;
+    if (typeof causeCode === "string") info.causeCode = causeCode;
+    if (raw.responseHeaders && typeof raw.responseHeaders === "object") {
+      const strings: Record<string, string> = {};
+      for (const [key, value] of Object.entries(raw.responseHeaders)) {
+        if (typeof value === "string") strings[key] = value;
+      }
+      if (Object.keys(strings).length > 0) info.responseHeaders = strings;
+    }
+    if (typeof raw.responseBody === "string" && raw.responseBody.length > 0) {
+      info.responseBody = raw.responseBody;
+    }
     return info;
   }
   const err = error instanceof Error ? error : new Error(String(error));

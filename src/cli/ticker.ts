@@ -1,5 +1,9 @@
 export const TICK_MS = 100;
 
+export function isMotionDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.STAR_NO_MOTION === "1";
+}
+
 export interface FlushState {
   streamed: string;
   reasoning: string;

@@ -312,6 +312,7 @@ describe("rewind after session resume", () => {
     // Simulate a fresh process resuming the session: no in-memory snapshots.
     setSnapshotHooks(null);
     clearSnapshots();
+    await store.close();
     const reopened = await SessionStore.open(store.id);
     expect(reopened).not.toBeNull();
     if (!reopened) return;
@@ -353,6 +354,7 @@ describe("message retraction", () => {
 
     expect(removed).toBe(2);
     expect(loop.getMessages().map((m) => m.role)).toEqual(["user", "assistant"]);
+    await store.close();
     const reopened = await SessionStore.open(store.id);
     expect((await reopened?.messages())?.map((m) => m.role)).toEqual(["user", "assistant"]);
   });

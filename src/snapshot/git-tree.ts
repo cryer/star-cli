@@ -5,7 +5,7 @@ import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { gitTreesDir } from "../config/paths";
-import { isSensitivePath } from "../core/sensitive";
+import { isSensitivePath, sensitiveExcludePatterns } from "../core/sensitive";
 
 const GIT_TIMEOUT_MS = 10_000;
 // gc repacks the object store and legitimately takes longer than the budget
@@ -25,32 +25,6 @@ const TRACK_FAILURE_TTL_MS = 5 * 60 * 1000;
 // matching the per-file snapshot stack cap.
 const MAX_PINNED_REFS = 50;
 const PINNED_REF_PREFIX = "refs/star/";
-
-// Likely-secret files that must never enter the internal snapshot repos,
-// pinned into each repo's info/exclude so `git add -A` skips them even in
-// projects with no .gitignore and `git clean -fd` on restore leaves them
-// alone. Mirrors isSensitivePath (src/core/sensitive.ts), including the
-// template exemptions.
-const SENSITIVE_EXCLUDE_PATTERNS = [
-  ".env",
-  ".env.*",
-  "!.env.example",
-  "!.env.sample",
-  "!.env.template",
-  "id_rsa",
-  "id_dsa",
-  "id_ecdsa",
-  "id_ed25519",
-  ".npmrc",
-  ".netrc",
-  ".pgpass",
-  "*.pem",
-  "*.key",
-  "*.p12",
-  "*.pfx",
-  "**/.aws/credentials",
-  "**/.kube/config",
-];
 
 // Forced config for every invocation: no CRLF translation (a file captured
 // with LF endings must restore byte-identically even on a machine whose
@@ -105,8 +79,6 @@ let gitAvailable: boolean | null = null;
 const trackFailureUntil = new Map<string, number>();
 // Successful captures per repo since process start, driving the periodic gc.
 const trackCounts = new Map<string, number>();
-// Repos whose index was already scrubbed of excluded entries this process.
-const scrubbedRepos = new Set<string>();
 
 export async function isGitAvailable(): Promise<boolean> {
   if (gitAvailable === null) {
@@ -122,12 +94,11 @@ export function resetGitTreeAvailability(): void {
 }
 
 // Test hook: drop every piece of cached state (availability probe, failure
-// negative cache, gc counters, scrub bookkeeping, capture chains).
+// negative cache, gc counters, capture chains).
 export function resetGitTreeCaches(): void {
   gitAvailable = null;
   trackFailureUntil.clear();
   trackCounts.clear();
-  scrubbedRepos.clear();
   trackChains.clear();
 }
 
@@ -148,7 +119,6 @@ export async function removeTreeRepo(cwd: string): Promise<void> {
   const dir = treeRepoDir(cwd);
   trackFailureUntil.delete(path.resolve(cwd));
   trackCounts.delete(dir);
-  scrubbedRepos.delete(dir);
   await rm(dir, { recursive: true, force: true }).catch(() => {});
 }
 
@@ -197,12 +167,17 @@ async function ensureTreeRepo(cwd: string): Promise<string | null> {
       // cover repos created before the repo-local setting existed.
       await runGit([`--git-dir=${dir}`, "config", "core.autocrlf", "false"]);
     }
-    // Rewritten on every call: repos created before the exclusion existed
-    // pick it up here without any migration step.
+    // Rewritten on every call so config changes immediately protect captures,
+    // previews, restores and cleans, including in pre-existing repos.
     await mkdir(path.join(dir, "info"), { recursive: true });
     await writeFile(
       path.join(dir, "info", "exclude"),
-      `${SENSITIVE_EXCLUDE_PATTERNS.join("\n")}\n`,
+      `${sensitiveExcludePatterns().join("\n")}\n`,
+      "utf8",
+    );
+    await writeFile(
+      path.join(dir, "info", "attributes"),
+      "* -text -filter -working-tree-encoding\n",
       "utf8",
     );
   } catch {
@@ -281,6 +256,14 @@ async function trackTreeGuarded(cwd: string): Promise<string | null> {
 // millisecond timestamps make that order chronological. Pure housekeeping —
 // a failure here never fails the capture.
 async function pinTree(base: string[], tree: string): Promise<void> {
+  const existing = await runGit([
+    ...base,
+    "for-each-ref",
+    "--format=%(refname)",
+    `--points-at=${tree}`,
+    PINNED_REF_PREFIX,
+  ]);
+  if (existing === null || existing !== "") return;
   const ref = `${PINNED_REF_PREFIX}${Date.now()}-${randomBytes(4).toString("hex")}`;
   if ((await runGit([...base, "update-ref", ref, tree])) === null) return;
   const listed = await runGit([...base, "for-each-ref", "--format=%(refname)", PINNED_REF_PREFIX]);
@@ -295,10 +278,7 @@ async function trackTreeUncached(cwd: string): Promise<string | null> {
   const dir = await ensureTreeRepo(cwd);
   if (!dir) return null;
   const base = repoArgs(dir, cwd);
-  if (!scrubbedRepos.has(dir)) {
-    if (!(await untrackExcluded(dir, cwd))) return null;
-    scrubbedRepos.add(dir);
-  }
+  if (!(await untrackExcluded(dir, cwd))) return null;
   if ((await runGit([...base, "add", "-A"])) === null) return null;
   const tree = await runGit([...base, "write-tree"]);
   if (tree === null) return null;
@@ -340,6 +320,7 @@ export async function diffTreeNames(cwd: string, hash: string): Promise<string[]
   if (!(await isGitAvailable())) return null;
   const dir = treeRepoDir(cwd);
   if (!existsSync(path.join(dir, "HEAD"))) return null;
+  if (!(await ensureTreeRepo(cwd))) return null;
   const base = repoArgs(dir, cwd);
   const changed = await runGit([...base, "diff", "--name-only", hash]);
   const untracked = await runGit([...base, "ls-files", "--others", "--exclude-standard"]);

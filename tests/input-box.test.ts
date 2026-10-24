@@ -60,6 +60,22 @@ describe("InputBox", () => {
     app.unmount();
   });
 
+  it("moves and deletes by grapheme without splitting emoji or combining characters", async () => {
+    const { app, onSubmit } = setup();
+    const family = "👨‍👩‍👧‍👦";
+    const combined = "e\u0301";
+    await type(app.stdin, `A${family}${combined}B`, LEFT, LEFT, BACKSPACE, ENTER);
+    await submitted(onSubmit, `A${combined}B`);
+    app.unmount();
+  });
+
+  it("inserts after a whole grapheme and deletes a combining sequence as one unit", async () => {
+    const { app, onSubmit } = setup();
+    await type(app.stdin, "👨‍👩‍👧‍👦", CTRL_A, RIGHT, "X", CTRL_E, "e\u0301", BACKSPACE, ENTER);
+    await submitted(onSubmit, "👨‍👩‍👧‍👦X");
+    app.unmount();
+  });
+
   it("terminal backspace (\\x7f) also deletes the char before the cursor", async () => {
     const { app, onSubmit } = setup();
     await type(app.stdin, "hellxo", LEFT, DELETE, ENTER);

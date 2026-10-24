@@ -1,11 +1,7 @@
 import { Command } from "commander";
 import { defaultAgentTasks } from "./agent/agent-tasks";
 import type { AgentLoop } from "./agent/loop";
-import { formatTokens } from "./cli/cost";
-import { formatStreamError } from "./cli/format";
-import { MAX_IMAGE_BYTES, imageMimeType, readImageInput, resolveMentions } from "./cli/mentions";
-import { printEventLine } from "./cli/print-human";
-import { UsageTracker, eventToJsonLine } from "./cli/print-json";
+import { printMode } from "./cli/print-mode";
 import {
   imageRequiresPrintError,
   installStdoutEpipeGuard,
@@ -15,7 +11,7 @@ import {
 import { SYSTEM_PROMPT } from "./cli/system-prompt";
 import { loadConfigSync } from "./config/loader";
 import { type StarConfig, contextWindowTokens } from "./config/schema";
-import { type ImageInput, type StarMessage, reconcileStarMessages } from "./core/messages";
+import { type StarMessage, reconcileStarMessages } from "./core/messages";
 import { resolveModelConfig, resolveStartupModel } from "./llm/registry";
 import { loadSessionSnapshots } from "./session/checkpoints";
 import { clearSessions } from "./session/clear";
@@ -49,114 +45,13 @@ async function createLoop(
     sessionStore,
     modelName,
     contextMaxTokens: contextWindowTokens(config, modelName),
+    maxTokens: modelConfig.maxTokens,
     providerMetadata: reasoningEffortMetadata(config, modelName),
     temperature: modelConfig.temperature,
     streamIdleTimeoutSec: modelConfig.streamIdleTimeoutSec,
     streamFirstChunkTimeoutSec: modelConfig.streamFirstChunkTimeoutSec,
     vision: modelConfig.vision,
   });
-}
-
-async function printMode(
-  loop: AgentLoop,
-  prompt: string,
-  cwd: string,
-  json: boolean,
-  imagePaths: string[],
-  sessionStore: SessionStore | null,
-): Promise<number> {
-  const flagImages: ImageInput[] = [];
-  for (const imagePath of imagePaths) {
-    if (!imageMimeType(imagePath)) {
-      process.stderr.write(
-        `[error] unsupported image type: ${imagePath} (supported: png, jpg, jpeg, gif, webp)\n`,
-      );
-      return 1;
-    }
-    const image = await readImageInput(imagePath, cwd);
-    if (!image) {
-      process.stderr.write(
-        `[error] cannot read image: ${imagePath} (missing, unreadable, or larger than ${MAX_IMAGE_BYTES / (1024 * 1024)}MB)\n`,
-      );
-      return 1;
-    }
-    flagImages.push(image);
-  }
-  const controller = new AbortController();
-  process.on("SIGINT", () => controller.abort());
-  loop.onHookWarning = (message) => {
-    process.stderr.write(`[hook] ${message}\n`);
-  };
-  const resolved = await resolveMentions(prompt, cwd);
-  if (resolved.attached.length > 0) {
-    process.stderr.write(`[attached] ${resolved.attached.join(", ")}\n`);
-  }
-  for (const skip of resolved.skipped) {
-    process.stderr.write(`[skipped] @${skip.path}: ${skip.reason}\n`);
-  }
-  const images = [...flagImages, ...resolved.images];
-  const input: string | { text: string; images: ImageInput[] } =
-    images.length > 0 ? { text: resolved.input, images } : resolved.input;
-  const usage = new UsageTracker();
-  let exitCode = 0;
-  try {
-    for await (const event of loop.stream(input, controller.signal, {
-      persistAs: prompt,
-    })) {
-      if (json) {
-        const line = eventToJsonLine(event);
-        if (line) process.stdout.write(`${line}\n`);
-      } else {
-        // Human-readable path: tool args are the one-line summarizeArgs
-        // digest (same as the REPL tool cards), never the full JSON.
-        const line = printEventLine(event);
-        if (line) {
-          (line.stream === "stdout" ? process.stdout : process.stderr).write(line.text);
-        }
-      }
-      switch (event.type) {
-        case "finish":
-          usage.add(event.usage);
-          // A resumed session (-c/-r -p) must accumulate this turn's usage,
-          // same as the REPL does; plain print runs have no store.
-          if (event.usage) {
-            sessionStore?.addUsage(event.usage).catch(() => {});
-          }
-          break;
-        case "error":
-          exitCode = 1;
-          break;
-      }
-      if (exitCode !== 0) break;
-    }
-  } catch (error) {
-    if (!(error instanceof DOMException && error.name === "AbortError")) {
-      const message = error instanceof Error ? formatStreamError(error) : String(error);
-      process.stderr.write(`\n[error] ${message}\n`);
-      exitCode = 1;
-    }
-  }
-  const usageLine = usage.toJsonLine();
-  if (usageLine) {
-    if (json) {
-      process.stdout.write(`${usageLine}\n`);
-    } else {
-      const t = usage.totals;
-      process.stderr.write(
-        `[usage] ${t.requests} requests, ${formatTokens(t.promptTokens)} prompt + ${formatTokens(t.completionTokens)} completion = ${formatTokens(t.totalTokens)} tokens\n`,
-      );
-    }
-  }
-  if (!json) process.stdout.write("\n");
-  const killedShells = defaultTaskManager.cleanup();
-  const killedAgents = defaultAgentTasks.cleanup();
-  const stopped = killedShells.length + killedAgents.length;
-  if (stopped > 0) {
-    process.stderr.write(
-      `[info] ${stopped} background task(s) were still running and have been stopped.\n`,
-    );
-  }
-  return exitCode;
 }
 
 const program = new Command();
@@ -182,7 +77,6 @@ program
     "delete stored sessions for the current directory ('all' deletes every session) and exit",
   )
   .action(async (opts) => {
-    installStdoutEpipeGuard();
     const cwd = process.cwd();
 
     if (opts.json && opts.print === undefined) {
@@ -232,6 +126,17 @@ program
     }
 
     let sessionStore: SessionStore | null = null;
+    let shuttingDown = false;
+    installStdoutEpipeGuard(process.stdout, () => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      void (async () => {
+        defaultTaskManager.cleanup();
+        defaultAgentTasks.cleanup();
+        await sessionStore?.close();
+        process.exit(0);
+      })();
+    });
     let resumed: { meta: SessionMeta; messages: StarMessage[] } | null = null;
     let resumeId: string | null = null;
     if (typeof opts.resume === "string") {
@@ -260,8 +165,8 @@ program
       }
       const [meta, loaded] = await Promise.all([sessionStore.meta(), sessionStore.starMessages()]);
       const messages = reconcileStarMessages(loaded);
-      if (messages.length !== loaded.length) {
-        await sessionStore.replaceMessages(messages);
+      if (messages.length !== loaded.length && !(await sessionStore.replaceMessages(messages))) {
+        throw new Error(`Could not repair persisted history for session ${resumeId}`);
       }
       resumed = { meta, messages };
       setTodoSession(resumeId);
@@ -285,7 +190,7 @@ program
       process.exit(1);
     }
 
-    if (!resumeId && !opts.print) {
+    if (!resumeId && opts.print === undefined) {
       sessionStore = await SessionStore.create(cwd, modelName);
       setTodoSession(sessionStore.id);
     }
@@ -308,7 +213,7 @@ program
       }
     }
 
-    if (opts.print) {
+    if (opts.print !== undefined) {
       // Let the loop drain instead of process.exit(): force-exiting on Windows
       // can hit a libuv assertion while undici keep-alive handles are closing.
       process.exitCode = await printMode(
@@ -348,4 +253,9 @@ program
     });
   });
 
-program.parse(process.argv);
+try {
+  await program.parseAsync(process.argv);
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+}

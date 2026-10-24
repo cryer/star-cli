@@ -12,6 +12,7 @@ const calls: string[][] = [];
 const pinnedRefs = new Map<string, string>();
 const createdRefs: string[] = [];
 let failOn: ((args: string[]) => boolean) | null = null;
+let treeHash = "f".repeat(40);
 // When set, `git add -A` invocations don't complete until released by hand —
 // the overlap window for the capture-serialization test.
 let holdAdds = false;
@@ -45,11 +46,16 @@ vi.mock("node:child_process", async (importOriginal) => {
         return;
       }
       if (argv.includes("for-each-ref")) {
-        callback(null, `${[...pinnedRefs.keys()].sort().join("\n")}\n`);
+        const pointsAt = argv.find((arg) => arg.startsWith("--points-at="))?.slice(12);
+        const refs = [...pinnedRefs.entries()]
+          .filter(([, hash]) => pointsAt === undefined || hash === pointsAt)
+          .map(([ref]) => ref)
+          .sort();
+        callback(null, `${refs.join("\n")}\n`);
         return;
       }
       if (argv.includes("write-tree")) {
-        callback(null, `${"f".repeat(40)}\n`);
+        callback(null, `${treeHash}\n`);
         return;
       }
       callback(null, "");
@@ -74,6 +80,7 @@ beforeEach(() => {
   pinnedRefs.clear();
   createdRefs.length = 0;
   failOn = null;
+  treeHash = "f".repeat(40);
   holdAdds = false;
   heldAddRelease = null;
   resetGitTreeCaches();
@@ -121,8 +128,16 @@ describe("undo-target ref pinning", () => {
     expect(entry[1]).toBe("f".repeat(40));
   });
 
+  it("does not add a second pin for an unchanged tree", async () => {
+    await trackTree(dir);
+    await trackTree(dir);
+    expect(createdRefs).toHaveLength(1);
+    expect(pinnedRefs.size).toBe(1);
+  });
+
   it("prunes pins beyond the newest 50", async () => {
     for (let i = 0; i < 55; i++) {
+      treeHash = i.toString(16).padStart(40, "0");
       expect(await trackTree(dir)).not.toBeNull();
     }
     expect(createdRefs).toHaveLength(55);

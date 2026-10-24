@@ -9,9 +9,15 @@ import { AgentLoop } from "../agent/loop";
 import { globalConfigPath } from "../config/paths";
 import { addAllowRule, savePermissionMode, saveReasoningEffort } from "../config/save";
 import { type StarConfig, contextWindowTokens } from "../config/schema";
-import { getGitSummaryCached } from "../core/git";
+import type { TokenUsage } from "../core/events";
+import { getGitSummaryCachedAsync } from "../core/git";
 import { MAX_IMAGE_DIMENSION } from "../core/image";
-import type { CoreMessage, ImageInput, StarMessage } from "../core/messages";
+import {
+  type CoreMessage,
+  type ImageInput,
+  type StarMessage,
+  reconcileStarMessages,
+} from "../core/messages";
 import { createModel, reasoningEffortMetadata } from "../llm/provider";
 import { listModels, resolveModelConfig } from "../llm/registry";
 import { buildAllowRule, isAllowedByRules } from "../permissions/allow";
@@ -131,6 +137,8 @@ export interface UsageStats {
   // Prompt-cache totals; absent until a provider reports cache fields.
   cachedPromptTokens?: number;
   cacheReadInputTokens?: number;
+  costUsd?: number;
+  costUnknown?: boolean;
   cache?: CacheTotals;
 }
 
@@ -247,6 +255,7 @@ export function Repl({
   const [epoch, setEpoch] = useState(0);
   const [streamingText, setStreamingText] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [shellRunning, setShellRunning] = useState(false);
   const [thinking, setThinking] = useState(false);
   const [thinkingText, setThinkingText] = useState("");
   const [thoughtSummary, setThoughtSummary] = useState<string | null>(null);
@@ -267,6 +276,8 @@ export function Repl({
   const backendRef = useRef<ChatBackend>(backend);
   const nextIdRef = useRef(initialDisplay.length);
   const abortRef = useRef<AbortController | null>(null);
+  const operationKindRef = useRef<"model" | "shell" | "command" | null>(null);
+  const operationIdRef = useRef(0);
   // Name of a long-running slash command currently in flight (only /compact
   // for now): prompts queue and session-rewriting commands are refused just
   // like during a stream — /compact ends with backend.loadMessages(), which
@@ -474,16 +485,42 @@ export function Repl({
     setPendingImages([]);
   }, []);
 
-  // Numeric session cost (USD) from the accumulated usage; null when the
-  // active model has no pricing configured.
-  const sessionCostUsd = useCallback(
-    () =>
-      computeCostUsd(
-        usageRef.current,
-        config.models.find((m) => m.name === modelNameRef.current),
-      ),
-    [config],
+  const recordUsage = useCallback(
+    (delta: TokenUsage, _modelName: string, costUsd: number | null) => {
+      const usage = usageRef.current;
+      usage.requests += 1;
+      usage.promptTokens += delta.promptTokens;
+      usage.completionTokens += delta.completionTokens;
+      usage.totalTokens += delta.promptTokens + delta.completionTokens || delta.totalTokens;
+      if (delta.cachedPromptTokens) {
+        usage.cachedPromptTokens = (usage.cachedPromptTokens ?? 0) + delta.cachedPromptTokens;
+      }
+      if (delta.cacheReadInputTokens) {
+        usage.cacheReadInputTokens = (usage.cacheReadInputTokens ?? 0) + delta.cacheReadInputTokens;
+      }
+      if (costUsd === null) usage.costUnknown = true;
+      else usage.costUsd = (usage.costUsd ?? 0) + costUsd;
+      if (cacheUsageReported(delta)) {
+        if (!usage.cache) usage.cache = { cachedTokens: 0, promptTokens: 0 };
+        addToCacheTotals(usage.cache, delta);
+      }
+      setUsageVersion((version) => version + 1);
+    },
+    [],
   );
+
+  useEffect(() => {
+    if (backendRef.current instanceof AgentLoop) backendRef.current.onUsage = recordUsage;
+  }, [recordUsage]);
+
+  const sessionCostUsd = useCallback(() => {
+    const usage = usageRef.current;
+    if (usage.costUsd !== undefined || usage.costUnknown) return usage.costUsd ?? 0;
+    return computeCostUsd(
+      usage,
+      config.models.find((model) => model.name === modelNameRef.current),
+    );
+  }, [config]);
 
   const handlePasteImage = useCallback(() => {
     void readClipboardImage().then((result) => {
@@ -710,11 +747,19 @@ export function Repl({
     const stopped = stopBackgroundWork();
     if (stopped > 0) {
       pushMessage("system", `${stopped} background task(s) still running; reports will be lost.`);
-      // Let the warning commit to static output before the app tears down.
-      setTimeout(exit, 50);
-      return;
     }
-    exit();
+    void (async () => {
+      try {
+        await sessionStoreRef.current?.close();
+      } catch (error) {
+        pushMessage(
+          "system",
+          `Failed to flush session metadata: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (stopped > 0) setTimeout(exit, 50);
+      else exit();
+    })();
   }, [exit, pushMessage, stopBackgroundWork]);
 
   useInput((_input, key) => {
@@ -816,6 +861,7 @@ export function Repl({
           system: SYSTEM_PROMPT,
           sessionStore: sessionStoreRef.current,
           contextMaxTokens: contextWindowTokens(config, name),
+          maxTokens: modelConfig.maxTokens,
           providerMetadata: reasoningEffortMetadata(config, name),
           temperature: modelConfig.temperature,
           streamIdleTimeoutSec: modelConfig.streamIdleTimeoutSec,
@@ -830,6 +876,7 @@ export function Repl({
           await loop.loadMessages([...prev.getStarMessages()]);
         }
         attachConfirmHandler(loop);
+        loop.onUsage = recordUsage;
         backendRef.current = loop;
         modelNameRef.current = name;
         setModelName(name);
@@ -839,7 +886,7 @@ export function Repl({
         return `Failed to switch model: ${error instanceof Error ? error.message : String(error)}`;
       }
     },
-    [config, cwd, attachConfirmHandler],
+    [config, cwd, attachConfirmHandler, recordUsage],
   );
 
   // Follow-up to the model picker: applies the chosen reasoning effort to the
@@ -906,11 +953,18 @@ export function Repl({
       if (!resolvedId) {
         return `Session not found: ${id}`;
       }
-      const resumed = await resumeSession(resolvedId);
+      const currentStore = sessionStoreRef.current;
+      const sameStore = currentStore?.id === resolvedId ? currentStore : null;
+      const resumed = sameStore
+        ? await (async () => {
+            const [meta, loaded] = await Promise.all([sameStore.meta(), sameStore.starMessages()]);
+            return { meta, messages: reconcileStarMessages(loaded) };
+          })()
+        : await resumeSession(resolvedId);
       if (!resumed) {
         return `Session not found: ${id}`;
       }
-      const store = await SessionStore.open(resolvedId);
+      const store = sameStore ?? (await SessionStore.open(resolvedId));
       if (!store) {
         return `Session not found: ${id}`;
       }
@@ -922,8 +976,10 @@ export function Repl({
       // Rebind persistence to the resumed session before anything else can
       // write: without this, new messages/usage/snapshots keep landing in the
       // previous session's directory.
+      const previousStore = sessionStoreRef.current;
       current.setSessionStore(store);
       sessionStoreRef.current = store;
+      if (previousStore !== store) await previousStore?.close();
       // Resuming is the explicit "continue this project" gesture: bring the
       // persisted todo list back into the panel (and the model's todo_read) —
       // but only when this session actually owns it.
@@ -932,14 +988,16 @@ export function Repl({
       hydrateSnapshots(await loadSessionSnapshots(store.dir));
       const display = buildDisplayMessages(resumed.messages);
       nextIdRef.current = display.length;
-      applyMessages(display);
+      redrawMessages(display);
       usageRef.current = resumed.meta.usage ? { ...resumed.meta.usage } : emptyUsage();
+      budgetWarnedRef.current = false;
+      budgetExceededRef.current = false;
       setUsageVersion((v) => v + 1);
       const stoppedNote =
         stopped > 0 ? ` Stopped ${stopped} background task(s) from the previous session.` : "";
       return `Resumed session ${resolvedId} (${resumed.messages.length} messages).${stoppedNote}`;
     },
-    [applyMessages, cwd, stopBackgroundWork],
+    [cwd, redrawMessages, stopBackgroundWork],
   );
 
   const terminalTitle = useCallback(() => {
@@ -947,9 +1005,39 @@ export function Repl({
     return titleRef.current;
   }, [cwd]);
 
+  const drainQueue = useCallback(() => {
+    if (abortRef.current || busyCommandRef.current || planApprovalRef.current) return;
+    const status = budgetState(sessionCostUsd(), config.sessionBudgetUsd);
+    const nextPrompt = queueRef.current.dequeue();
+    if (!nextPrompt) return;
+    if (status === "exceeded") {
+      const dropped = queueRef.current.clear().length + 1;
+      setQueueItems([]);
+      pushMessage("system", `Dropped ${dropped} queued message(s) — session budget exceeded.`);
+    } else {
+      setQueueItems(queueRef.current.list());
+      void runStreamRef.current?.(nextPrompt.text, nextPrompt.images);
+    }
+  }, [config.sessionBudgetUsd, pushMessage, sessionCostUsd]);
+
   const runStream = useCallback(
     async (input: string, extraImages: ImageInput[] = []) => {
-      const resolved = await resolveMentions(input, cwd);
+      const controller = new AbortController();
+      const operationId = ++operationIdRef.current;
+      abortRef.current = controller;
+      operationKindRef.current = "model";
+      let resolved: Awaited<ReturnType<typeof resolveMentions>>;
+      try {
+        resolved = await resolveMentions(input, cwd);
+      } catch (error) {
+        if (operationIdRef.current === operationId) {
+          abortRef.current = null;
+          operationKindRef.current = null;
+        }
+        pushMessage("system", `Error: ${error instanceof Error ? error.message : String(error)}`);
+        drainQueue();
+        return;
+      }
       const images = [...resolved.images, ...extraImages];
       pushMessage(
         "user",
@@ -961,8 +1049,6 @@ export function Repl({
       for (const skip of resolved.skipped) {
         pushMessage("system", `Skipped @${skip.path}: ${skip.reason}`);
       }
-      const controller = new AbortController();
-      abortRef.current = controller;
       const turnStartedAt = Date.now();
       turnStartedAtRef.current = turnStartedAt;
       streamedRef.current = "";
@@ -1093,28 +1179,6 @@ export function Repl({
             reasoningRef.current = "";
             setThinking(true);
             setThinkingText("");
-          } else if (event.type === "finish") {
-            if (event.usage) {
-              const usage = usageRef.current;
-              usage.requests += 1;
-              usage.promptTokens += event.usage.promptTokens;
-              usage.completionTokens += event.usage.completionTokens;
-              usage.totalTokens += event.usage.totalTokens;
-              if (event.usage.cachedPromptTokens) {
-                usage.cachedPromptTokens =
-                  (usage.cachedPromptTokens ?? 0) + event.usage.cachedPromptTokens;
-              }
-              if (event.usage.cacheReadInputTokens) {
-                usage.cacheReadInputTokens =
-                  (usage.cacheReadInputTokens ?? 0) + event.usage.cacheReadInputTokens;
-              }
-              if (cacheUsageReported(event.usage)) {
-                if (!usage.cache) usage.cache = { cachedTokens: 0, promptTokens: 0 };
-                addToCacheTotals(usage.cache, event.usage);
-              }
-              setUsageVersion((v) => v + 1);
-              sessionStoreRef.current?.addUsage(event.usage).catch(() => {});
-            }
           } else if (event.type === "retry") {
             // The resend re-streams the reply from scratch, so roll the
             // buffer back to the committed prefix: the failed attempt's
@@ -1150,7 +1214,10 @@ export function Repl({
       } finally {
         tickerStopRef.current?.();
         tickerStopRef.current = null;
-        abortRef.current = null;
+        if (operationIdRef.current === operationId) {
+          abortRef.current = null;
+          operationKindRef.current = null;
+        }
         setIsStreaming(false);
         thinkingRef.current = false;
         reasoningRef.current = "";
@@ -1214,35 +1281,21 @@ export function Repl({
             `Session budget exceeded: $${formatDollars(cost ?? 0)} of $${formatDollars(budget ?? 0)} (sessionBudgetUsd). New prompts are blocked — raise sessionBudgetUsd in the config or start a /new session.`,
           );
         }
-        // Steers submitted mid-turn that never reached a step boundary (the
-        // turn ended, errored or was Esc-aborted first) must not silently
-        // vanish: recover them at the front of the typeahead queue so they
-        // still run, ahead of prompts queued after them.
         const backend = backendRef.current;
         if (backend instanceof AgentLoop) {
           const undelivered = backend.takeUndeliveredSteers();
-          for (const text of [...undelivered].reverse()) {
-            queueRef.current.enqueueFront({ text, images: [] });
-          }
-          if (undelivered.length > 0) setQueueItems(queueRef.current.list());
-        }
-        // Typeahead queue: send the next queued prompt FIFO once this turn is
-        // fully done (permission prompts included). A crossed budget drops the
-        // queue instead.
-        const nextPrompt = queueRef.current.dequeue();
-        if (nextPrompt) {
-          if (status === "exceeded") {
-            const dropped = queueRef.current.clear().length + 1;
-            setQueueItems([]);
-            pushMessage(
-              "system",
-              `Dropped ${dropped} queued message(s) — session budget exceeded.`,
-            );
+          if (interrupted && undelivered.length > 0) {
+            refillSeqRef.current += 1;
+            setInputRefill({ text: undelivered.join("\n"), seq: refillSeqRef.current });
+            pushMessage("system", "Undelivered steering input restored to the draft.");
           } else {
-            setQueueItems(queueRef.current.list());
-            void runStreamRef.current?.(nextPrompt.text, nextPrompt.images);
+            for (const text of [...undelivered].reverse()) {
+              queueRef.current.enqueueFront({ text, images: [] });
+            }
+            if (undelivered.length > 0) setQueueItems(queueRef.current.list());
           }
         }
+        drainQueue();
       }
     },
     [
@@ -1254,6 +1307,7 @@ export function Repl({
       config,
       sessionCostUsd,
       terminalTitle,
+      drainQueue,
     ],
   );
 
@@ -1264,13 +1318,17 @@ export function Repl({
   const handlePlanDecision = useCallback(
     (decision: ExitPlanDecision) => {
       setPlanApproval(false);
-      if (decision === "no") return;
+      if (decision === "no") {
+        drainQueue();
+        return;
+      }
+      if (abortRef.current || busyCommandRef.current) return;
       const restore = prevModeRef.current ?? "ask";
       applySessionMode(restore);
       pushMessage("system", `Plan approved — permission mode restored to ${restore}.`);
       void runStream("The plan above is approved. Proceed with the implementation.");
     },
-    [applySessionMode, pushMessage, runStream, setPlanApproval],
+    [applySessionMode, drainQueue, pushMessage, runStream, setPlanApproval],
   );
 
   const registry = useMemo(() => {
@@ -1466,12 +1524,16 @@ export function Repl({
           return "Nothing to fork — the current session has no messages yet.";
         }
         const fork = await SessionStore.create(cwd, modelNameRef.current);
-        await fork.replaceMessages(messages);
+        if (!(await fork.replaceMessages(messages))) {
+          await fork.close();
+          return "Failed to persist the fork; the current session is unchanged.";
+        }
         const oldMeta = await store.meta();
         const title = `Fork of ${oldMeta.title || shortSessionId(oldMeta.id)}`;
         await fork.setTitle(title);
         current.setSessionStore(fork);
         sessionStoreRef.current = fork;
+        await store.close();
         setTodoSession(fork.id);
         return `Forked into new session ${fork.id} ("${title}") and switched to it. Checkpoints and rewind history do not carry over.`;
       },
@@ -1485,8 +1547,10 @@ export function Repl({
         // history and its file changes into its checkpoints.
         const stopped = stopBackgroundWork();
         const store = await SessionStore.create(cwd, modelNameRef.current);
+        const previousStore = sessionStoreRef.current;
         current.setSessionStore(store);
         sessionStoreRef.current = store;
+        await previousStore?.close();
         setTodoSession(store.id);
         // Keep the leading system prompt, drop everything else.
         const [first] = current.getStarMessages();
@@ -1527,8 +1591,13 @@ export function Repl({
       },
       listTasks: () => formatTaskList(defaultTaskManager.list()),
       showUsage: () => {
+        const usage = usageRef.current;
         const modelConfig = config.models.find((m) => m.name === modelNameRef.current);
-        return `${formatUsage(usageRef.current)}\n${estimateCost(usageRef.current, modelNameRef.current, modelConfig)}`;
+        const cost =
+          usage.costUsd !== undefined || usage.costUnknown
+            ? `Estimated cost: $${formatDollars(usage.costUsd ?? 0)} across recorded models${usage.costUnknown ? " (some requests have no configured price)" : ""}`
+            : estimateCost(usage, modelNameRef.current, modelConfig);
+        return `${formatUsage(usage)}\n${cost}`;
       },
       showGlobalUsage: async () => formatUsageDashboard(await collectUsageStats(), config.models),
       compactContext: async () => {
@@ -1538,6 +1607,8 @@ export function Repl({
           return `Busy — /${busyCommandRef.current} is still running.`;
         }
         busyCommandRef.current = "compact";
+        const operationId = ++operationIdRef.current;
+        operationKindRef.current = "command";
         const controller = new AbortController();
         busyAbortRef.current = controller;
         // The busy label's spinner animates on the indicator's own ticker
@@ -1556,22 +1627,19 @@ export function Repl({
           if (result.compacted && result.messages) {
             const display = buildDisplayMessages(result.messages);
             nextIdRef.current = display.length;
-            applyMessages(display);
+            redrawMessages(display);
           }
           return result.message;
         } finally {
           tickerStopRef.current?.();
           tickerStopRef.current = null;
           setActivity(null);
-          busyCommandRef.current = null;
-          busyAbortRef.current = null;
-          // Prompts queued while compaction ran start now that the history
-          // rewrite is done (same drain as the end of a stream turn).
-          const nextPrompt = queueRef.current.dequeue();
-          if (nextPrompt) {
-            setQueueItems(queueRef.current.list());
-            void runStreamRef.current?.(nextPrompt.text, nextPrompt.images);
+          if (operationIdRef.current === operationId) {
+            busyCommandRef.current = null;
+            busyAbortRef.current = null;
+            operationKindRef.current = null;
           }
+          drainQueue();
         }
       },
       exportSession: (arg) =>
@@ -1805,7 +1873,6 @@ export function Repl({
     pickReasoningEffort,
     resume,
     runStream,
-    applyMessages,
     redrawMessages,
     applySessionMode,
     setPendingRewind,
@@ -1814,13 +1881,17 @@ export function Repl({
     handlePickerCancel,
     setPicker,
     stopBackgroundWork,
+    drainQueue,
   ]);
 
   const runShellBang = useCallback(
     async (raw: string) => {
       pushMessage("user", `!${raw.trim()}`);
       const controller = new AbortController();
+      const operationId = ++operationIdRef.current;
       abortRef.current = controller;
+      operationKindRef.current = "shell";
+      setShellRunning(true);
       try {
         const outcome = await executeShellBang(raw, cwd, controller.signal);
         if (!outcome.ok) {
@@ -1846,13 +1917,18 @@ export function Repl({
         if (current instanceof AgentLoop) {
           await current.appendContextMessage(outcome.contextMessage);
         }
+      } catch (error) {
+        pushMessage("system", `Error: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
-        if (abortRef.current === controller) {
+        if (operationIdRef.current === operationId) {
           abortRef.current = null;
+          operationKindRef.current = null;
         }
+        setShellRunning(false);
+        drainQueue();
       }
     },
-    [cwd, pushMessage],
+    [cwd, drainQueue, pushMessage],
   );
 
   const handleSubmit = useCallback(
@@ -1894,7 +1970,29 @@ export function Repl({
             return;
           }
         }
-        void command.run(parsed.args, registry.ctx);
+        const lifecycleCommand =
+          BUSY_BLOCKED_COMMANDS.has(parsed.name) && parsed.name !== "compact";
+        const operationId = ++operationIdRef.current;
+        if (lifecycleCommand) {
+          busyCommandRef.current = parsed.name;
+          operationKindRef.current = "command";
+        }
+        void (async () => {
+          try {
+            await command.run(parsed.args, registry.ctx);
+          } catch (error) {
+            pushMessage(
+              "system",
+              `Error: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          } finally {
+            if (lifecycleCommand && operationIdRef.current === operationId) {
+              busyCommandRef.current = null;
+              operationKindRef.current = null;
+              drainQueue();
+            }
+          }
+        })();
         return;
       }
       const budget = config.sessionBudgetUsd;
@@ -1914,7 +2012,13 @@ export function Repl({
         // image payloads stay queue-only — the tool-image injection path is
         // for tool attachments.
         const backend = backendRef.current;
-        if (abortRef.current && images.length === 0 && backend instanceof AgentLoop) {
+        if (
+          abortRef.current &&
+          operationKindRef.current === "model" &&
+          images.length === 0 &&
+          backend instanceof AgentLoop
+        ) {
+          const requestedOperation = operationIdRef.current;
           void (async () => {
             const picked = await showPicker("Turn is running — how should this be sent?", [
               {
@@ -1928,6 +2032,15 @@ export function Repl({
                 description: "sent as a new prompt once the current turn finishes",
               },
             ]);
+            if (operationIdRef.current !== requestedOperation || !abortRef.current) {
+              if (!abortRef.current && !busyCommandRef.current) {
+                void runStream(text, images);
+              } else {
+                queueRef.current.enqueue({ text, images });
+                setQueueItems(queueRef.current.list());
+              }
+              return;
+            }
             if (picked === "steer") {
               backend.injectUserMessage(text);
               pushMessage(
@@ -1941,7 +2054,6 @@ export function Repl({
               );
               return;
             }
-            // "queue" or an Esc-cancelled picker: never drop user input.
             queueRef.current.enqueue({ text, images });
             setQueueItems(queueRef.current.list());
           })();
@@ -1962,6 +2074,7 @@ export function Repl({
       clearPendingImages,
       sessionCostUsd,
       showPicker,
+      drainQueue,
     ],
   );
 
@@ -1976,24 +2089,18 @@ export function Repl({
     [registry],
   );
 
-  // Expensive status-bar bits (git branch, token estimate over the full
-  // history) refresh on turn boundaries, history rewrites and model switches,
-  // not per tick. The git probe goes through the 15s TTL cache: the uncached
-  // summary runs several synchronous git processes that would block the
-  // event loop on every refresh. A long multi-step turn changes none of the
-  // effect's deps while the history keeps growing, so while streaming a slow
-  // interval re-estimates — the per-message token cache makes each pass a
-  // cheap sum over WeakMap hits.
   // biome-ignore lint/correctness/useExhaustiveDependencies: isStreaming, epoch and modelName are deliberate refresh triggers, not values read inside
   useEffect(() => {
+    let cancelled = false;
     const refresh = () => {
-      setGitBranch(getGitSummaryCached(cwd)?.branch ?? null);
+      void getGitSummaryCachedAsync(cwd).then((summary) => {
+        if (!cancelled) setGitBranch(summary?.branch ?? null);
+      });
       const current = backendRef.current;
       if (current instanceof AgentLoop) {
         const window_ = contextWindowTokens(config, modelNameRef.current);
         const used = current.estimateContextTokens();
         const pct = (used / window_) * 100;
-        // One decimal below 10% so small-but-real usage doesn't display as 0%.
         setContextUsage({
           percent: pct < 10 ? Math.round(pct * 10) / 10 : Math.round(pct),
           used,
@@ -2004,9 +2111,11 @@ export function Repl({
       }
     };
     refresh();
-    if (!isStreaming) return;
-    const timer = setInterval(refresh, 2000);
-    return () => clearInterval(timer);
+    const timer = isStreaming ? setInterval(refresh, 2000) : null;
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+    };
   }, [cwd, config, isStreaming, epoch, modelName]);
 
   const sessionCost = sessionCostUsd();
@@ -2079,7 +2188,7 @@ export function Repl({
       ))}
       <TodoPanel todos={todos} />
       <InputBox
-        isStreaming={isStreaming}
+        isStreaming={isStreaming || shellRunning}
         disabled={
           pending !== null ||
           planApproval ||

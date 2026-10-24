@@ -50,6 +50,7 @@ export function displayWidth(text: string): number {
 }
 
 export function truncateToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return "";
   if (displayWidth(text) <= maxWidth) return text;
   const limit = Math.max(0, maxWidth - 1);
   let width = 0;

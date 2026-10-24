@@ -101,6 +101,19 @@ describe("printEventLine", () => {
     });
   });
 
+  it("sanitizes TTY output but preserves piped stdout bytes", () => {
+    const event = { type: "text-delta", text: "a\rb\tc\u001bd" } as const;
+    expect(printEventLine(event, { stdoutIsTTY: true })).toEqual({
+      stream: "stdout",
+      text: "ab  cd",
+    });
+    expect(printEventLine(event, { stdoutIsTTY: false })?.text).toBe(event.text);
+    expect(
+      printEventLine({ type: "notice", message: "bad\u0007\u001b[2J\t" }, { stderrIsTTY: true })
+        ?.text,
+    ).toBe("\n[notice] bad[2J  \n");
+  });
+
   it("renders tool-call args as the one-line summary, not the full JSON", () => {
     const bigArgs = { path: "a.ts", content: "x".repeat(500) };
     const line = printEventLine({ type: "tool-call", id: "c1", name: "write_file", args: bigArgs });

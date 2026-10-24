@@ -1,5 +1,6 @@
 import { Box, Text } from "ink";
 import { useRef, useState } from "react";
+import { toTerminalSafe } from "../terminal-text";
 import { useInput } from "../use-input";
 
 export interface SelectOption {
@@ -88,7 +89,7 @@ export function SelectPrompt({ title, options, onSelect, onCancel, onDelete }: S
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
       <Text bold color="cyan">
-        {title}
+        {toTerminalSafe(title)}
       </Text>
       {above > 0 && <Text dimColor>… {above} more above</Text>}
       {visible.map((option, i) => {
@@ -97,16 +98,16 @@ export function SelectPrompt({ title, options, onSelect, onCancel, onDelete }: S
           <Text key={option.value}>
             <Text bold={active} inverse={active}>
               {active ? "❯ " : "  "}
-              {option.label}
+              {toTerminalSafe(option.label)}
             </Text>
-            {option.hint && <Text dimColor> ({option.hint})</Text>}
-            {option.description && <Text dimColor> — {option.description}</Text>}
+            {option.hint && <Text dimColor> ({toTerminalSafe(option.hint)})</Text>}
+            {option.description && <Text dimColor> — {toTerminalSafe(option.description)}</Text>}
           </Text>
         );
       })}
       {below > 0 && <Text dimColor>… {below} more below</Text>}
       {confirming ? (
-        <Text color="red">Delete {confirming.label}? [y] yes [n] no</Text>
+        <Text color="red">Delete {toTerminalSafe(confirming.label)}? [y] yes [n] no</Text>
       ) : (
         <Text dimColor>
           [↑/↓ or j/k] move [Enter] select{onDelete ? " [Ctrl+X] delete" : ""} [Esc] cancel

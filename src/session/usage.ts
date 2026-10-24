@@ -110,25 +110,32 @@ export function aggregateUsage(metas: SessionMeta[]): GlobalUsageStats {
       }
     }
 
-    const name = typeof meta.model === "string" && meta.model.trim() ? meta.model : "unknown";
-    const entry = models.get(name) ?? {
-      model: name,
-      sessions: 0,
-      requests: 0,
-      promptTokens: 0,
-      completionTokens: 0,
-      totalTokens: 0,
-    };
-    entry.sessions += 1;
-    entry.requests += requestCount;
-    addTo(entry, totals);
-    if (hasTotals && meta.usage) {
-      const cached = tokens(meta.usage.cachedPromptTokens);
-      const cacheRead = tokens(meta.usage.cacheReadInputTokens);
+    const fallbackName =
+      typeof meta.model === "string" && meta.model.trim() ? meta.model : "unknown";
+    const perModel = meta.usageByModel !== null && typeof meta.usageByModel === "object";
+    const modelTotals = perModel
+      ? Object.entries(meta.usageByModel ?? {})
+      : [[fallbackName, hasTotals ? meta.usage : undefined] as const];
+    for (const [name, modelUsage] of modelTotals) {
+      if (!modelUsage) continue;
+      const modelBucket = bucketOf(modelUsage);
+      const entry = models.get(name) ?? {
+        model: name,
+        sessions: 0,
+        requests: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+      };
+      entry.sessions += 1;
+      entry.requests += perModel ? tokens(modelUsage.requests) : requestCount;
+      addTo(entry, modelBucket);
+      const cached = tokens(modelUsage.cachedPromptTokens);
+      const cacheRead = tokens(modelUsage.cacheReadInputTokens);
       if (cached > 0) entry.cachedPromptTokens = (entry.cachedPromptTokens ?? 0) + cached;
       if (cacheRead > 0) entry.cacheReadInputTokens = (entry.cacheReadInputTokens ?? 0) + cacheRead;
+      models.set(name, entry);
     }
-    models.set(name, entry);
   }
 
   return {

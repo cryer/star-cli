@@ -440,6 +440,7 @@ describe("resumeSession repair", () => {
     await store.append({ role: "user", content: "run something" });
     await store.append(assistantWithCalls([["fc_1", "bash"]]));
     expect(danglingToolCallIds(await store.messages())).toEqual(["fc_1"]);
+    await store.close();
 
     const resumed = await resumeSession(store.id);
 
@@ -475,6 +476,7 @@ describe("resumeSession repair", () => {
     });
     await store.append({ role: "assistant", content: "done" });
     const before = await store.messages();
+    await store.close();
 
     const resumed = await resumeSession(store.id);
 

@@ -24,6 +24,9 @@ export interface FileSnapshot {
   // metadata is kept (no content, no persisted content file) and revert()
   // skips the file instead of restoring it.
   contentTooLarge?: boolean;
+  // The file existed but reading its pre-change bytes failed. Keep existed
+  // true so an undo can never mistake it for a newly created file and delete it.
+  captureFailed?: boolean;
   // Lazy source for the old content once it left memory: the per-process
   // spill file (pushed snapshots) or the persisted session checkpoint content
   // file (snapshots hydrated from a resumed session).
@@ -135,6 +138,7 @@ export async function captureSnapshot(
   let content: string | Buffer | null = null;
   let existed = false;
   let contentTooLarge = false;
+  let captureFailed = false;
   const st = await stat(filePath).catch(() => null);
   if (st?.isFile()) {
     existed = true;
@@ -146,8 +150,7 @@ export async function captureSnapshot(
         // even for binary files (write_file may overwrite one).
         content = await readFile(filePath);
       } catch {
-        // unreadable files keep the old behavior: recorded as non-existent
-        existed = false;
+        captureFailed = true;
       }
     }
   }
@@ -157,6 +160,7 @@ export async function captureSnapshot(
     existed,
     content,
     contentTooLarge: contentTooLarge || undefined,
+    captureFailed: captureFailed || undefined,
     toolName,
     timestamp: Date.now(),
     turn: snapshotContext?.turn ?? activeTurn,
@@ -187,7 +191,16 @@ export async function pushSnapshot(snapshot: FileSnapshot): Promise<void> {
 }
 
 async function removeFromStore(ids: number[]): Promise<void> {
-  if (ids.length > 0) await hooks?.onRemove?.(ids);
+  if (ids.length === 0) return;
+  try {
+    await hooks?.onRemove?.(ids);
+  } catch (err) {
+    // The file operation already succeeded. Keep its result successful and the
+    // in-memory stack authoritative even if checkpoint cleanup is unavailable.
+    if (process.env.STAR_DEBUG) {
+      console.error("[star] failed to remove snapshot checkpoint:", err);
+    }
+  }
 }
 
 export function snapshotCount(): number {

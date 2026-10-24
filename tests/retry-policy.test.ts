@@ -106,6 +106,14 @@ describe("isRetryableStreamError", () => {
     const undici = new Error("connect timeout");
     Object.assign(undici, { code: "UND_ERR_CONNECT_TIMEOUT" });
     expect(isRetryableStreamError(undici)).toBe(true);
+    for (const code of ["EHOSTUNREACH", "ENETUNREACH"]) {
+      expect(isRetryableStreamError(toStreamErrorInfo({ message: "unreachable", code }))).toBe(
+        true,
+      );
+      expect(
+        isRetryableStreamError(toStreamErrorInfo({ message: "fetch failed", cause: { code } })),
+      ).toBe(true);
+    }
   });
 
   it("fails fast on statusless errors that are not network failures", () => {

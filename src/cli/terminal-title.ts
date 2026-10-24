@@ -1,5 +1,6 @@
 import path from "node:path";
 import { resolveIconMode } from "./icons";
+import { isMotionDisabled } from "./ticker";
 
 // Terminal tab/window title via OSC 0: a braille spinner runs in the title
 // while a turn is in flight and a bell glyph replaces it when the turn
@@ -31,6 +32,7 @@ export function setTerminalTitle(title: string, deps: TerminalTitleDeps = {}): v
 export class TerminalTitle {
   private timer: NodeJS.Timeout | null = null;
   private frame = 0;
+  private running = false;
 
   private constructor(
     private readonly base: string,
@@ -42,8 +44,10 @@ export class TerminalTitle {
   }
 
   start(): void {
-    if (this.timer) return;
+    if (this.running) return;
+    this.running = true;
     this.render(SPINNER_FRAMES[this.frame] ?? "⠋");
+    if (isMotionDisabled(this.deps.env)) return;
     this.timer = setInterval(() => {
       this.frame = (this.frame + 1) % SPINNER_FRAMES.length;
       this.render(SPINNER_FRAMES[this.frame] ?? "⠋");
@@ -54,6 +58,7 @@ export class TerminalTitle {
   // "done" leaves a bell glyph in the title until the next turn starts;
   // "idle" (interrupt, unmount) restores the bare title.
   stop(kind: "done" | "idle" = "done"): void {
+    this.running = false;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;

@@ -6,10 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentLoop } from "../src/agent/loop";
 import type { StarConfig } from "../src/config/schema";
 import {
+  ELIDED_ASSISTANT_TEXT,
   ELIDED_IMAGE_TEXT,
   ELIDED_TOOL_CALL_ARGS_TEXT,
   ELIDED_TOOL_RESULT_TEXT,
   elideStaleContent,
+  emergencyElideContent,
 } from "../src/context/elision";
 import type { CoreMessage, StarMessage } from "../src/core/messages";
 import { createDefaultRegistry } from "../src/tools";
@@ -220,6 +222,101 @@ describe("elideStaleContent options", () => {
     // Too small for the default 250, big enough for a floor of 1.
     expect(elideStaleContent(messages, 50)).toBeNull();
     expect(elideStaleContent(messages, 50, 0, { minTokens: 1 })).not.toBeNull();
+  });
+});
+
+describe("emergencyElideContent", () => {
+  it("reduces a single huge recent tool result without breaking its call pairing", () => {
+    const messages = star([
+      system("sys"),
+      user("preserve this exact request"),
+      toolCallAssistant("c1"),
+      toolResult("c1", bigText),
+      assistant("working"),
+    ]);
+    const result = emergencyElideContent(messages, 120);
+    expect(result.withinBudget).toBe(true);
+    expect(result.messages).toHaveLength(messages.length);
+    expect(result.messages[1]?.message).toEqual(user("preserve this exact request"));
+    const call = result.messages[2]?.message;
+    const tool = result.messages[3]?.message;
+    if (call?.role === "assistant" && Array.isArray(call.content) && tool?.role === "tool") {
+      expect(call.content[0]?.type).toBe("tool-call");
+      expect(tool.content[0]?.toolCallId).toBe("c1");
+      expect(tool.content[0]?.result).toBe(ELIDED_TOOL_RESULT_TEXT);
+    } else {
+      throw new Error("expected the original tool-call/tool-result positions");
+    }
+  });
+
+  it("elides a huge active-turn attachment but preserves the user's text", () => {
+    const attachment: CoreMessage = {
+      role: "user",
+      content: [
+        { type: "file", data: "aGVsbG8=", mimeType: "application/pdf" },
+        { type: "text", text: "summarize this exact file request" },
+      ],
+    };
+    const result = emergencyElideContent(
+      star([system("sys"), attachment, assistant("working")]),
+      100,
+    );
+    expect(result.withinBudget).toBe(true);
+    expect(result.messages[1]?.message.role).toBe("user");
+    const message = result.messages[1]?.message;
+    if (message?.role === "user" && Array.isArray(message.content)) {
+      expect(message.content).toEqual([
+        { type: "text", text: ELIDED_IMAGE_TEXT },
+        { type: "text", text: "summarize this exact file request" },
+      ]);
+    } else {
+      throw new Error("expected user array content");
+    }
+  });
+
+  it("reduces oldest content first and stops as soon as the budget is met", () => {
+    const messages = star([
+      system("sys"),
+      toolCallAssistant("c1"),
+      toolResult("c1", bigText),
+      toolCallAssistant("c2"),
+      toolResult("c2", bigText),
+      user("latest"),
+    ]);
+    const result = emergencyElideContent(messages, 600);
+    expect(result.elidedCount).toBe(1);
+    expect(result.messages[1]?.message).toEqual(toolCallAssistant("c1"));
+    expect(result.messages[2]?.meta?.elided).toBe(true);
+    expect(result.messages[4]?.meta?.elided).toBeUndefined();
+    expect(result.messages[4]?.message).toEqual(toolResult("c2", bigText));
+  });
+
+  it("can reduce large assistant text while leaving real user requests untouched", () => {
+    const messages = star([system("sys"), user(bigText), assistant(bigText), user("latest")]);
+    const result = emergencyElideContent(messages, 600);
+    expect(result.messages[1]?.message).toEqual(user(bigText));
+    expect(result.messages[2]?.message.content).toBe(ELIDED_ASSISTANT_TEXT);
+    expect(result.messages.map((star) => star.message.role)).toEqual(
+      messages.map((star) => star.message.role),
+    );
+  });
+
+  it("reports an impossible budget without sacrificing user text or system instructions", () => {
+    const messages = star([system("sys"), user(bigText), assistant("short")]);
+    const result = emergencyElideContent(messages, 20);
+    expect(result.withinBudget).toBe(false);
+    expect(result.messages[0]?.message).toEqual(system("sys"));
+    expect(result.messages[1]?.message).toEqual(user(bigText));
+  });
+
+  it("is idempotent and includes fixed overhead in its accounting", () => {
+    const messages = star([toolCallAssistant("c1"), toolResult("c1", bigText)]);
+    const first = emergencyElideContent(messages, 100, 20);
+    expect(first.estimatedTokens).toBeLessThanOrEqual(100);
+    const second = emergencyElideContent(first.messages, 100, 20);
+    expect(second.elidedCount).toBe(0);
+    expect(second.messages).toEqual(first.messages);
+    expect(emergencyElideContent(messages, 1).estimatedTokens).toBeGreaterThan(1);
   });
 });
 

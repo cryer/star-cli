@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toTerminalSafe } from "../src/cli/terminal-text";
+import { toTerminalSafe, truncateToWidth } from "../src/cli/terminal-text";
 
 describe("toTerminalSafe", () => {
   it("returns clean text unchanged", () => {
@@ -26,5 +26,10 @@ describe("toTerminalSafe", () => {
   it("drops DEL and leaves CJK/emoji widths alone", () => {
     expect(toTerminalSafe("a\u007fb")).toBe("ab");
     expect(toTerminalSafe("中文🙂")).toBe("中文🙂");
+  });
+
+  it("returns an empty truncation when no cells are available", () => {
+    expect(truncateToWidth("abc", 0)).toBe("");
+    expect(truncateToWidth("abc", -1)).toBe("");
   });
 });

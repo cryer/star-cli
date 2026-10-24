@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
 export type DiffLineKind = "add" | "del" | "context" | "marker";
@@ -19,6 +19,11 @@ const MAX_HUNK_LINES = 15;
 const MAX_TOTAL_LINES = 12;
 const NEW_FILE_PREVIEW_LINES = 10;
 const MAX_DP_CELLS = 250_000;
+export const MAX_DIFF_PREVIEW_CHARS = 1_000_000;
+
+function largeDiffSummary(): DiffLine[] {
+  return [{ kind: "marker", text: "... (large diff omitted; preview work budget exceeded)" }];
+}
 
 interface Op {
   kind: Exclude<DiffLineKind, "marker">;
@@ -115,6 +120,8 @@ function hunkRanges(ops: Op[]): Array<[number, number]> {
 }
 
 export function buildDiffLines(oldText: string, newText: string): DiffLine[] {
+  if (oldText === newText) return [];
+  if (oldText.length + newText.length > MAX_DIFF_PREVIEW_CHARS) return largeDiffSummary();
   const ops = diffOps(oldText, newText);
   if (ops.length === 0) return [];
   const ranges = hunkRanges(ops);
@@ -195,6 +202,9 @@ function applyEdit(
 }
 
 function newFilePreview(content: string, label: string): DiffPreview {
+  if (content.length > MAX_DIFF_PREVIEW_CHARS) {
+    return { type: "new-file", label, lines: largeDiffSummary() };
+  }
   const all = content.split("\n");
   const shown = all.slice(0, NEW_FILE_PREVIEW_LINES);
   const lines: DiffLine[] = shown.map((text) => ({ kind: "add", text }));
@@ -213,6 +223,10 @@ export async function generateDiffPreview(
   const filePath = getStringArg(args, "path");
   if (filePath === undefined) return null;
   const absolute = path.resolve(cwd, filePath);
+  const metadata = await stat(absolute).catch(() => null);
+  if (metadata?.isFile() && metadata.size > MAX_DIFF_PREVIEW_CHARS) {
+    return { type: "diff", label: filePath, lines: largeDiffSummary() };
+  }
   let existing: string | null;
   try {
     existing = await readFile(absolute, "utf8");

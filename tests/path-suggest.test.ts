@@ -3,7 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { createElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { extractAtToken, suggestPaths } from "../src/cli/path-suggest";
+import {
+  cachedSuggestPaths,
+  clearPathSuggestionCache,
+  extractAtToken,
+  suggestPaths,
+} from "../src/cli/path-suggest";
 import { renderApp, stripAnsi, tick, typeText } from "./ink-harness";
 
 const { InputBox } = await import("../src/cli/components/InputBox");
@@ -11,6 +16,7 @@ const { InputBox } = await import("../src/cli/components/InputBox");
 let dir: string;
 
 beforeEach(() => {
+  clearPathSuggestionCache();
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "star-path-suggest-"));
   fs.writeFileSync(path.join(dir, "README.md"), "# hi");
   fs.writeFileSync(path.join(dir, "package.json"), "{}");
@@ -99,6 +105,14 @@ describe("suggestPaths", () => {
     const results = await suggestPaths("cap-", dir, 3);
     expect(results.length).toBeLessThanOrEqual(3);
   });
+
+  it("caches lookups by cwd and token", async () => {
+    const first = await cachedSuggestPaths("RE", dir);
+    fs.rmSync(path.join(dir, "README.md"));
+    expect(await cachedSuggestPaths("RE", dir)).toBe(first);
+    clearPathSuggestionCache();
+    expect(await cachedSuggestPaths("RE", dir)).toEqual([]);
+  });
 });
 
 const TAB = "\t";
@@ -119,12 +133,11 @@ describe("InputBox @ path completion", () => {
     return { app, onSubmit };
   }
 
-  it("suggests a matching file and completes it on tab", async () => {
+  it("debounces, suggests a matching file and completes it on tab", async () => {
     const { app, onSubmit } = setup(dir);
     await typeText(app.stdin, "@RE");
-    await tick();
-    await tick();
-    expect(stripAnsi(app.lastFrame() ?? "")).toContain("@README.md");
+    expect(stripAnsi(app.lastFrame() ?? "")).not.toContain("@README.md");
+    await vi.waitFor(() => expect(stripAnsi(app.lastFrame() ?? "")).toContain("@README.md"));
     await typeText(app.stdin, TAB, ENTER);
     await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith("@README.md"));
     app.unmount();
@@ -133,15 +146,21 @@ describe("InputBox @ path completion", () => {
   it("descends into a directory on tab", async () => {
     const { app } = setup(dir);
     await typeText(app.stdin, "@s");
-    await tick();
-    await tick();
-    expect(stripAnsi(app.lastFrame() ?? "")).toContain("@src/");
+    await vi.waitFor(() => expect(stripAnsi(app.lastFrame() ?? "")).toContain("@src/"));
     await typeText(app.stdin, TAB);
-    await tick();
-    await tick();
-    const frame = stripAnsi(app.lastFrame() ?? "");
-    expect(frame).toContain("@src/cli/");
-    expect(frame).toContain("@src/index.ts");
+    await vi.waitFor(() => {
+      const frame = stripAnsi(app.lastFrame() ?? "");
+      expect(frame).toContain("@src/cli/");
+      expect(frame).toContain("@src/index.ts");
+    });
+    app.unmount();
+  });
+
+  it("does not show a stale result after the token changes", async () => {
+    const { app } = setup(dir);
+    await typeText(app.stdin, "@RE", "\x15", "@package");
+    await vi.waitFor(() => expect(stripAnsi(app.lastFrame() ?? "")).toContain("@package.json"));
+    expect(stripAnsi(app.lastFrame() ?? "")).not.toContain("@README.md");
     app.unmount();
   });
 

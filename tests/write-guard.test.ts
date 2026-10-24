@@ -7,6 +7,10 @@ import { editFileTool } from "../src/tools/fs/edit";
 import {
   MAX_SNAPSHOT_CONTENT_BYTES,
   clearSnapshots,
+  nextSnapshotId,
+  pushSnapshot,
+  setSnapshotHooks,
+  snapshotCount,
   undoLastSnapshot,
 } from "../src/tools/fs/snapshots";
 import { writeFileTool } from "../src/tools/fs/write";
@@ -23,6 +27,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setSnapshotHooks(null);
   clearSnapshots();
   rmSync(dir, { recursive: true, force: true });
 });
@@ -95,6 +100,50 @@ describe("sensitive-target guards", () => {
       rmSync(path.join(dir, "link"), { force: true });
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+});
+
+describe("snapshot failure handling", () => {
+  it("keeps an existing file when its snapshot has no recoverable content", async () => {
+    const file = path.join(dir, "unreadable.txt");
+    writeFileSync(file, "original");
+    await pushSnapshot({
+      id: nextSnapshotId(),
+      path: file,
+      existed: true,
+      content: null,
+      captureFailed: true,
+      toolName: "write_file",
+      timestamp: Date.now(),
+      turn: 0,
+      messageIndex: -1,
+    });
+
+    expect(await undoLastSnapshot()).toContain("no longer available");
+    expect(readFileSync(file, "utf8")).toBe("original");
+  });
+
+  it("does not fail a successful write when evicted checkpoint cleanup fails", async () => {
+    setSnapshotHooks({ onRemove: () => Promise.reject(new Error("disk unavailable")) });
+    for (let i = 0; i < 51; i++) {
+      const res = await writeFileTool.execute(
+        { path: "checkpoint.txt", content: `version ${i}` },
+        ctx(),
+      );
+      expect(res.isError).toBeUndefined();
+    }
+    expect(readFileSync(path.join(dir, "checkpoint.txt"), "utf8")).toBe("version 50");
+    expect(snapshotCount()).toBe(50);
+  });
+
+  it("keeps undo successful and consistent when checkpoint removal fails", async () => {
+    writeFileSync(path.join(dir, "undo.txt"), "old");
+    await writeFileTool.execute({ path: "undo.txt", content: "new" }, ctx());
+    setSnapshotHooks({ onRemove: () => Promise.reject(new Error("disk unavailable")) });
+
+    expect(await undoLastSnapshot()).toContain("Restored");
+    expect(readFileSync(path.join(dir, "undo.txt"), "utf8")).toBe("old");
+    expect(snapshotCount()).toBe(0);
   });
 });
 

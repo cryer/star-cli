@@ -104,16 +104,24 @@ export class SseNormalizeTransform extends TransformStream<string, string> {
         return;
       }
       if (line.startsWith("data:")) {
-        // A new data field closes any event already being assembled.
-        flushPending(controller);
-        emitPayload(line.slice(5).replace(/^ /, ""), controller);
+        const payload = line.slice(5).replace(/^ /, "");
+        // Standard SSE joins repeated data fields with a newline. A complete
+        // JSON object followed by another one is instead the relay's batched
+        // shape, so only an incomplete payload absorbs the next data field.
+        if (pending !== null && splitJsonPrefix(pending)) flushPending(controller);
+        if (pending === null) emitPayload(payload, controller);
+        else emitPayload(`${pending}\n${payload}`, controller);
         return;
       }
       if (line.startsWith("{") && pending !== null) {
-        // A continuation line of a batched payload: the previous object is
-        // complete, so it becomes its own event and this line opens the next.
-        flushPending(controller);
-        emitPayload(line, controller);
+        if (splitJsonPrefix(pending)) {
+          // A continuation line of a batched payload: the previous object is
+          // complete, so it becomes its own event and this line opens the next.
+          flushPending(controller);
+          emitPayload(line, controller);
+        } else {
+          emitPayload(`${pending}\n${line}`, controller);
+        }
         return;
       }
       // Comments, event:/id:/retry: fields, and anything else: pass through

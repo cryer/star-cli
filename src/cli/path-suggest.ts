@@ -6,6 +6,9 @@ import { MAX_SUGGESTIONS } from "./commands/suggest";
 // Lazy scan: only the single directory the typed prefix points into is read,
 // and no more than this many entries are examined per lookup.
 export const MAX_SCAN_ENTRIES = 2000;
+export const PATH_SUGGEST_DEBOUNCE_MS = 100;
+const PATH_SUGGEST_CACHE_MS = 2000;
+const PATH_SUGGEST_CACHE_LIMIT = 100;
 
 export interface AtToken {
   // Path prefix typed after the "@".
@@ -63,4 +66,41 @@ export async function suggestPaths(
   }
   matches.sort((a, b) => a.path.localeCompare(b.path));
   return matches.slice(0, maxSuggestions);
+}
+
+interface CacheEntry {
+  createdAt: number;
+  pending: Promise<PathSuggestion[]>;
+}
+
+const suggestionCache = new Map<string, CacheEntry>();
+
+export function clearPathSuggestionCache(): void {
+  suggestionCache.clear();
+}
+
+export function cachedSuggestPaths(
+  token: string,
+  cwd: string,
+  maxScanEntries: number = MAX_SCAN_ENTRIES,
+  maxSuggestions: number = MAX_SUGGESTIONS,
+): Promise<PathSuggestion[]> {
+  const key = `${path.resolve(cwd)}\0${token}\0${maxScanEntries}\0${maxSuggestions}`;
+  const now = Date.now();
+  const cached = suggestionCache.get(key);
+  if (cached && now - cached.createdAt <= PATH_SUGGEST_CACHE_MS) {
+    suggestionCache.delete(key);
+    suggestionCache.set(key, cached);
+    return cached.pending;
+  }
+  const pending = Promise.resolve().then(() =>
+    suggestPaths(token, cwd, maxScanEntries, maxSuggestions),
+  );
+  suggestionCache.delete(key);
+  suggestionCache.set(key, { createdAt: now, pending });
+  if (suggestionCache.size > PATH_SUGGEST_CACHE_LIMIT) {
+    const oldest = suggestionCache.keys().next();
+    if (!oldest.done) suggestionCache.delete(oldest.value);
+  }
+  return pending;
 }

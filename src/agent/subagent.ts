@@ -30,6 +30,7 @@ export interface SubagentDeps {
   providerMetadata?: Record<string, Record<string, unknown>>;
   // Inherited from the parent loop (the model's [[models]] temperature key).
   temperature?: number;
+  maxTokens?: number;
   // Inherited from the parent loop (the model's [[models]] stream watchdog
   // overrides); unset falls back to the top-level config values.
   streamIdleTimeoutSec?: number;
@@ -46,9 +47,9 @@ export interface SubagentDeps {
   getConfirmHandler?: () => ((req: PermissionRequest) => Promise<boolean>) | undefined;
   // Receives the child loop's accumulated token usage once the run settles
   // (sync or background, success or failure), along with the model the
-  // child ran on and its [[models]] entry name. The parent loop folds it
-  // into its own finish events, so subagent spend flows into /cost, /usage
-  // and sessionBudgetUsd without those consumers changing.
+  // child ran on and its [[models]] entry name. The parent records it in
+  // the per-model session ledger immediately, covering /cost, /usage and
+  // sessionBudgetUsd even when no further parent finish event arrives.
   onUsage?: (usage: TokenUsage, model: LanguageModel, modelName?: string) => void;
 }
 
@@ -166,6 +167,7 @@ async function runSubagent(
       : `${SUBAGENT_PROMPT}${args.read_only ? `\n\n${READ_ONLY_PROMPT}` : ""}`,
     providerMetadata: deps.providerMetadata,
     temperature: deps.temperature,
+    maxTokens: deps.maxTokens,
     streamIdleTimeoutSec: deps.streamIdleTimeoutSec,
     streamFirstChunkTimeoutSec: deps.streamFirstChunkTimeoutSec,
     vision: deps.vision,

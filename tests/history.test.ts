@@ -42,10 +42,10 @@ describe("loadHistory", () => {
 });
 
 describe("appendHistory", () => {
-  it("appends entries and creates the file", () => {
+  it("appends JSONL entries and creates the file", () => {
     appendHistory("hello");
     appendHistory("world");
-    expect(fs.readFileSync(historyFile, "utf8")).toBe("hello\nworld\n");
+    expect(fs.readFileSync(historyFile, "utf8")).toBe('"hello"\n"world"\n');
   });
 
   it("ignores empty and whitespace-only entries", () => {
@@ -54,9 +54,17 @@ describe("appendHistory", () => {
     expect(fs.existsSync(historyFile)).toBe(false);
   });
 
-  it("sanitizes embedded newlines into spaces", () => {
-    appendHistory("line one\nline two\r\nline three");
-    expect(loadHistory()).toEqual(["line one line two line three"]);
+  it("preserves embedded newlines, quotes and backslashes", () => {
+    const entry = 'line one\nline two\r\n"line three" \\ end';
+    appendHistory(entry);
+    expect(loadHistory()).toEqual([entry]);
+    expect(fs.readFileSync(historyFile, "utf8").trim().split("\n")).toHaveLength(1);
+  });
+
+  it("reads legacy plain text and appends without losing it", () => {
+    fs.writeFileSync(historyFile, "old first\nold second\n");
+    appendHistory("new\nentry");
+    expect(loadHistory()).toEqual(["old first", "old second", "new\nentry"]);
   });
 
   it("skips consecutive duplicates", () => {
@@ -89,7 +97,7 @@ describe("appendHistory", () => {
   it("drops single-character junk lines on load and rewrites the file", () => {
     fs.writeFileSync(historyFile, `ok\n${"x".repeat(500)}\nreal command\n`);
     expect(loadHistory()).toEqual(["ok", "real command"]);
-    expect(fs.readFileSync(historyFile, "utf8")).toBe("ok\nreal command\n");
+    expect(fs.readFileSync(historyFile, "utf8")).toBe('"ok"\n"real command"\n');
   });
 
   it("keeps short repeated-character entries", () => {
@@ -113,7 +121,7 @@ describe("appendHistory", () => {
   it("drops stored slash-command lines on load and rewrites the file", () => {
     fs.writeFileSync(historyFile, "/q\nok\n/help\n");
     expect(loadHistory()).toEqual(["ok"]);
-    expect(fs.readFileSync(historyFile, "utf8")).toBe("ok\n");
+    expect(fs.readFileSync(historyFile, "utf8")).toBe('"ok"\n');
   });
 
   it("never throws when the history directory is not writable", () => {

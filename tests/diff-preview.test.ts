@@ -3,7 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { createElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { buildDiffLines, generateDiffPreview } from "../src/cli/diff-preview";
+import {
+  MAX_DIFF_PREVIEW_CHARS,
+  buildDiffLines,
+  generateDiffPreview,
+} from "../src/cli/diff-preview";
 import { renderApp, stripAnsi } from "./ink-harness";
 
 // FORCE_COLOR is set by ./ink-harness before ink is loaded.
@@ -78,6 +82,15 @@ describe("buildDiffLines", () => {
     const lines = buildDiffLines(oldLines.join("\n"), newLines.join("\n"));
     expect(lines.length).toBe(13);
     expect(lines[lines.length - 1]?.text).toMatch(/^\.\.\. \(\d+ more lines\)$/);
+  });
+
+  it("degrades to a summary when the input exceeds the work budget", () => {
+    const oldText = "x".repeat(MAX_DIFF_PREVIEW_CHARS);
+    const lines = buildDiffLines(oldText, `${oldText}y`);
+    expect(lines).toEqual([
+      { kind: "marker", text: "... (large diff omitted; preview work budget exceeded)" },
+    ]);
+    expect(buildDiffLines(oldText, oldText)).toEqual([]);
   });
 });
 

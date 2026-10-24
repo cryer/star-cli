@@ -186,16 +186,16 @@ describe("read_file", () => {
     expect(res.content).toBe("(offset 99 beyond end of file; file has 3 lines)");
   });
 
-  it("reads only the first 1MB of very large files and notes the cap", async () => {
+  it("reads very large files without a 1MB header cap", async () => {
     const big = `${"x".repeat(100)}\n`.repeat(11000);
     await writeFile(path.join(dir, "huge.txt"), big);
     const res = await run("read_file", { path: "huge.txt" });
     expect(res.isError).toBeUndefined();
     expect(res.content).toContain("truncated");
-    expect(res.content).toContain("at least");
+    expect(res.content).toContain("of 11001");
     const pastCap = await run("read_file", { path: "huge.txt", offset: 10_000_000 });
     expect(pastCap.content).toContain("offset 10000000 beyond end of file");
-    expect(pastCap.content).toContain("at least");
+    expect(pastCap.content).toContain("file has 11001 lines");
   });
 });
 

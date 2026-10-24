@@ -106,6 +106,27 @@ describe("web_search", () => {
     expect(res.content).not.toContain("3. No Snippet Result");
   });
 
+  it("stops reading an unbounded response after the byte limit", async () => {
+    let pulls = 0;
+    let cancelled = false;
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(pulls === 1 ? encoder.encode(DDG_HTML) : new Uint8Array(512 * 1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    vi.stubGlobal("fetch", async () => new Response(body, { status: 200 }));
+    const res = await webSearchTool.execute({ query: "q" }, { cwd: process.cwd() });
+    expect(res.isError).toBeUndefined();
+    expect(res.content).toContain("1. Example & Page");
+    expect(cancelled).toBe(true);
+    expect(pulls).toBeLessThanOrEqual(7);
+  });
+
   it("returns isError on timeout", async () => {
     vi.stubGlobal("fetch", async () => {
       throw new DOMException("The operation timed out.", "TimeoutError");

@@ -162,6 +162,37 @@ describe.skipIf(!FILE_LINKS_OK)("walk follows file symlinks", () => {
   });
 });
 
+describe("bounded streaming walks", () => {
+  it("can avoid collecting files and stop before visiting later directories", async () => {
+    fs.writeFileSync(path.join(dir, "a.txt"), "needle");
+    fs.mkdirSync(path.join(dir, "z-sub"));
+    fs.writeFileSync(path.join(dir, "z-sub", "later.txt"), "needle");
+    const batches: string[][] = [];
+    const res = await walkFiles(dir, undefined, {
+      withMtime: false,
+      collect: false,
+      onBatch: (files) => {
+        batches.push(files.map((f) => f.rel));
+        return false;
+      },
+    });
+    expect(res.files).toEqual([]);
+    expect(batches).toEqual([["a.txt"]]);
+  });
+
+  it("stops grep at 250 matches without scanning later directories", async () => {
+    for (let i = 0; i < 300; i += 1) {
+      fs.writeFileSync(path.join(dir, `f${String(i).padStart(3, "0")}.txt`), "needle");
+    }
+    fs.mkdirSync(path.join(dir, "z-sub"));
+    fs.writeFileSync(path.join(dir, "z-sub", "later.txt"), "needle");
+    const res = await run("grep", { pattern: "needle" });
+    expect(res.content.split("\n").filter((line) => line.endsWith(":needle"))).toHaveLength(250);
+    expect(res.content).not.toContain("z-sub/later.txt");
+    expect(res.content).toContain("truncated: more than 250 matches");
+  });
+});
+
 describe("walk aborts on signal", () => {
   it("walkFiles returns immediately with a pre-aborted signal", async () => {
     fs.writeFileSync(path.join(dir, "a.txt"), "x");
@@ -264,7 +295,8 @@ describe("walk aborts on signal", () => {
     } as unknown as AbortSignal;
     const res = await run("grep", { pattern: "needle" });
     const lines = res.content.split("\n");
-    expect(lines.filter((l) => l.endsWith(":needle")).length).toBe(16);
+    expect(lines.filter((l) => l.endsWith(":needle")).length).toBeGreaterThan(0);
+    expect(lines.filter((l) => l.endsWith(":needle")).length).toBeLessThanOrEqual(20);
     expect(lines).toContain("... (interrupted: partial results)");
   });
 

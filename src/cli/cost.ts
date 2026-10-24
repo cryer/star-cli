@@ -1,4 +1,7 @@
 import type { ModelConfig } from "../config/schema";
+import { computeCostUsd } from "../core/cost";
+
+export { computeCostUsd } from "../core/cost";
 
 export interface TokenUsage {
   promptTokens: number;
@@ -38,24 +41,6 @@ export function formatTokensCompact(n: number): string {
   const thousands = n < 1_000_000;
   const scaled = thousands ? n / 1000 : n / 1_000_000;
   return `${scaled.toFixed(1).replace(/\.0$/, "")}${thousands ? "K" : "M"}`;
-}
-
-// Numeric session cost in USD; null when the model has no pricing configured.
-// Cache pricing: OpenAI-style cached tokens are a subset of promptTokens, so
-// the uncached rest bills at promptPrice and the cached share at
-// cacheReadPrice (full promptPrice when no cache price is configured);
-// Anthropic-style cache reads come on top of promptTokens and bill at
-// cacheReadPrice only (unconfigured = unbilled, as before).
-export function computeCostUsd(usage: TokenUsage, model: ModelConfig | undefined): number | null {
-  if (model?.promptPrice === undefined || model.completionPrice === undefined) {
-    return null;
-  }
-  const cached = Math.min(Math.max(usage.cachedPromptTokens ?? 0, 0), usage.promptTokens);
-  const promptUsd =
-    (usage.promptTokens - cached) * model.promptPrice +
-    cached * (model.cacheReadPrice ?? model.promptPrice) +
-    (usage.cacheReadInputTokens ?? 0) * (model.cacheReadPrice ?? 0);
-  return (promptUsd + usage.completionTokens * model.completionPrice) / 1_000_000;
 }
 
 export function estimateCost(

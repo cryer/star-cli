@@ -1948,7 +1948,7 @@ describe("AgentLoop", () => {
   });
 });
 
-describe("pending subagent usage reset", () => {
+describe("wholesale history reset", () => {
   let cwd: string;
   let home: string;
 
@@ -1962,54 +1962,6 @@ describe("pending subagent usage reset", () => {
     vi.unstubAllEnvs();
     await rmWithRetry(cwd);
     await rmWithRetry(home);
-  });
-
-  // Seeds the loop's pending-fold buffer directly: a settled child's usage
-  // that no finish event has carried yet.
-  function seedPending(loop: AgentLoop): void {
-    (loop as unknown as { subagentUsage: unknown }).subagentUsage = {
-      promptTokens: 900,
-      completionTokens: 900,
-      totalTokens: 1800,
-    };
-  }
-
-  function lastFinish(events: StreamEvent[]): Extract<StreamEvent, { type: "finish" }> | undefined {
-    return [...events]
-      .reverse()
-      .find((e): e is Extract<StreamEvent, { type: "finish" }> => e.type === "finish");
-  }
-
-  it("setSessionStore drops usage the old session has not folded yet", async () => {
-    const loop = new AgentLoop({
-      model: mockModel([textRound("fresh turn")]),
-      registry: createDefaultRegistry(),
-      config: makeConfig(),
-      cwd,
-    });
-    seedPending(loop);
-
-    loop.setSessionStore(null);
-    const events = await collect(loop.stream("hi", new AbortController().signal));
-
-    // A stale buffer would ride this finish (905/903); cleared, only the
-    // turn's own 5/3 is billed.
-    expect(lastFinish(events)?.usage).toMatchObject({ promptTokens: 5, completionTokens: 3 });
-  });
-
-  it("loadMessages drops usage the replaced history has not folded yet", async () => {
-    const loop = new AgentLoop({
-      model: mockModel([textRound("fresh turn")]),
-      registry: createDefaultRegistry(),
-      config: makeConfig(),
-      cwd,
-    });
-    seedPending(loop);
-
-    await loop.loadMessages([]);
-    const events = await collect(loop.stream("hi", new AbortController().signal));
-
-    expect(lastFinish(events)?.usage).toMatchObject({ promptTokens: 5, completionTokens: 3 });
   });
 
   it("loadMessages drops the replaced history's server-calibration delta", async () => {

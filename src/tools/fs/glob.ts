@@ -59,16 +59,20 @@ export const globTool: Tool<typeof schema> = {
     const prefixSegments = literalDirPrefix(args.pattern);
     const walkRoot = prefixSegments.length > 0 ? path.join(root, ...prefixSegments) : root;
     const prefix = prefixSegments.length > 0 ? `${prefixSegments.join("/")}/` : "";
-    const { files, aborted } = await walkFiles(walkRoot, undefined, {
+    let matched: Array<{ rel: string; mtimeMs: number }> = [];
+    const { aborted } = await walkFiles(walkRoot, undefined, {
       ignore: createIgnorePredicate(ctx.cwd),
       signal: ctx.abortSignal,
       symlinkBoundary: ctx.cwd,
       nestedIgnore: true,
+      collect: false,
+      onBatch: (files) => {
+        matched = matched
+          .concat(files.filter((f) => matchesGlob(args.pattern, `${prefix}${f.rel}`)))
+          .sort((a, b) => b.mtimeMs - a.mtimeMs || (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))
+          .slice(0, MAX_RESULTS);
+      },
     });
-    const matched = files
-      .filter((f) => matchesGlob(args.pattern, `${prefix}${f.rel}`))
-      .sort((a, b) => b.mtimeMs - a.mtimeMs)
-      .slice(0, MAX_RESULTS);
     if (matched.length === 0) {
       return {
         content: aborted

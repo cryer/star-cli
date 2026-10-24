@@ -266,6 +266,7 @@ describe("subagent tool", () => {
       const todoRead = createTodoTools().find((tool) => tool.name === "todo_read");
       const result = await todoRead?.execute({}, { cwd });
       expect(result?.content).toBe("No todos.");
+      expect(existsSync(path.join(cwd, ".star", "todos.json"))).toBe(false);
     } finally {
       resetTodos();
     }
@@ -380,7 +381,7 @@ describe("subagent tool", () => {
     }
   });
 
-  it("folds a synchronous subagent's usage into the parent's finish events", async () => {
+  it("records a synchronous subagent's usage immediately without changing parent finishes", async () => {
     const { loop } = makeLoop(
       mockModel([
         toolCallRound("call-1", "subagent", { prompt: "investigate the repo" }),
@@ -388,20 +389,17 @@ describe("subagent tool", () => {
         textRound("parent done"),
       ]),
     );
+    const recorded: TokenUsage[] = [];
+    loop.onUsage = (usage) => recorded.push(usage);
 
     const events = await collect(loop.stream("survey", new AbortController().signal));
 
     const finishes = events.filter((e) => e.type === "finish");
     expect(finishes).toHaveLength(2);
-    // The parent's own first step reports only its own usage…
     expect(finishes[0]).toMatchObject({ usage: { promptTokens: 5, completionTokens: 3 } });
-    // …and the step after the subagent ran carries the child's 5/3 on top.
-    expect(finishes[1]).toMatchObject({ usage: { promptTokens: 10, completionTokens: 6 } });
-    const promptTotal = finishes.reduce(
-      (sum, e) => sum + (e.type === "finish" ? (e.usage?.promptTokens ?? 0) : 0),
-      0,
-    );
-    expect(promptTotal).toBe(15);
+    expect(finishes[1]).toMatchObject({ usage: { promptTokens: 5, completionTokens: 3 } });
+    expect(recorded).toHaveLength(3);
+    expect(recorded.reduce((sum, usage) => sum + usage.promptTokens, 0)).toBe(15);
   });
 
   it("bills a background subagent that finishes after the parent turn ended", async () => {
@@ -414,6 +412,8 @@ describe("subagent tool", () => {
       ]),
     );
 
+    const recorded: TokenUsage[] = [];
+    loop.onUsage = (usage) => recorded.push(usage);
     const events1 = await collect(loop.stream("turn one", new AbortController().signal));
     for (let i = 0; i < 100 && defaultAgentTasks.runningCount() > 0; i++) {
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -421,17 +421,13 @@ describe("subagent tool", () => {
     expect(defaultAgentTasks.runningCount()).toBe(0);
     const events2 = await collect(loop.stream("turn two", new AbortController().signal));
 
-    // The child's 5/3 landed after turn one's finishes had a chance to fold
-    // it, so it rides on turn two's first finish. Wherever it folded, the
-    // session total bills parent (3 steps) + child (1 step).
     const finishes = [...events1, ...events2].filter((e) => e.type === "finish");
     const promptTotal = finishes.reduce(
       (sum, e) => sum + (e.type === "finish" ? (e.usage?.promptTokens ?? 0) : 0),
       0,
     );
-    expect(promptTotal).toBe(20);
-    const folded = finishes.filter((e) => e.type === "finish" && e.usage?.promptTokens === 10);
-    expect(folded).toHaveLength(1);
+    expect(promptTotal).toBe(15);
+    expect(recorded.reduce((sum, usage) => sum + usage.promptTokens, 0)).toBe(20);
   });
 
   it("reports an aborted synchronous subagent as an interrupted tool result", async () => {
@@ -643,15 +639,13 @@ describe("subagent usage folding normalization", () => {
       cwd,
     });
 
-    const events = await collect(loop.stream("survey", new AbortController().signal));
+    const recorded: TokenUsage[] = [];
+    loop.onUsage = (usage) => recorded.push(usage);
+    await collect(loop.stream("survey", new AbortController().signal));
 
-    const finishes = events.filter(
-      (e): e is Extract<StreamEvent, { type: "finish" }> => e.type === "finish",
-    );
-    expect(finishes).toHaveLength(2);
-    // The step after the child ran folds parent (5/3) + child (5/3); the
-    // total sums the billed classes (8+8), not the reported 18+18.
-    expect(finishes[1]?.usage).toEqual({ promptTokens: 10, completionTokens: 6, totalTokens: 16 });
+    expect(recorded).toHaveLength(3);
+    expect(recorded.every((usage) => usage.totalTokens === 8)).toBe(true);
+    expect(recorded.reduce((sum, usage) => sum + usage.totalTokens, 0)).toBe(24);
   });
 });
 

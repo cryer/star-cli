@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { sessionsDir } from "../config/paths";
 import { pruneTreeReposExcept, removeTreeRepo } from "../snapshot/git-tree";
+import { SessionLockedError, acquireSessionLock } from "./lock";
 import { SessionStore } from "./store";
 
 // Deletes stored sessions and returns how many were removed. With a cwd only
@@ -18,9 +19,21 @@ import { SessionStore } from "./store";
 // Deletes a single stored session (the /resume picker's Ctrl+X). Snapshot
 // cleanup matches clearSessions: once the session's project has no sessions
 // left, its git-tree repo is unreachable and removed too.
+async function removeIfUnlocked(id: string): Promise<boolean> {
+  const dir = path.join(sessionsDir(), id);
+  const lock = await acquireSessionLock(dir, id).catch((error: unknown) => {
+    if (error instanceof SessionLockedError) return null;
+    throw error;
+  });
+  if (!lock) return false;
+  await lock.release();
+  await fs.rm(dir, { recursive: true, force: true });
+  return true;
+}
+
 export async function deleteSession(id: string): Promise<void> {
   const meta = (await SessionStore.list()).find((m) => m.id === id);
-  await fs.rm(path.join(sessionsDir(), id), { recursive: true, force: true });
+  if (!(await removeIfUnlocked(id))) return;
   if (meta && (await SessionStore.list(meta.cwd)).length === 0) {
     await removeTreeRepo(meta.cwd);
   }
@@ -32,8 +45,7 @@ export async function clearSessions(cwd?: string, excludeId?: string): Promise<n
     let removed = 0;
     for (const meta of metas) {
       if (meta.id === excludeId) continue;
-      await fs.rm(path.join(sessionsDir(), meta.id), { recursive: true, force: true });
-      removed += 1;
+      if (await removeIfUnlocked(meta.id)) removed += 1;
     }
     if ((await SessionStore.list(cwd)).length === 0) {
       await removeTreeRepo(cwd);
@@ -49,8 +61,7 @@ export async function clearSessions(cwd?: string, excludeId?: string): Promise<n
   let removed = 0;
   for (const entry of entries) {
     if (entry === excludeId) continue;
-    await fs.rm(path.join(sessionsDir(), entry), { recursive: true, force: true });
-    removed += 1;
+    if (await removeIfUnlocked(entry)) removed += 1;
   }
   const survivors = await SessionStore.list();
   await pruneTreeReposExcept(survivors.map((meta) => meta.cwd));

@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 
 const GIT_TIMEOUT_MS = 2000;
 const GIT_MAX_BUFFER = 8 * 1024 * 1024;
@@ -64,6 +64,50 @@ export function getGitSummaryCached(cwd: string): GitSummary | null {
 // Test hook: drop all cached summaries so the next call shells out to git.
 export function resetGitSummaryCache(): void {
   gitSummaryCache.clear();
+}
+
+function runGitAsync(args: string[], cwd: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile(
+      "git",
+      args,
+      {
+        cwd,
+        timeout: GIT_TIMEOUT_MS,
+        encoding: "utf8",
+        maxBuffer: GIT_MAX_BUFFER,
+      },
+      (error, stdout) => resolve(error ? null : stdout.replace(/\n$/, "")),
+    );
+  });
+}
+
+const gitSummaryPending = new Map<string, Promise<GitSummary | null>>();
+
+export function getGitSummaryCachedAsync(cwd: string): Promise<GitSummary | null> {
+  const now = Date.now();
+  const hit = gitSummaryCache.get(cwd);
+  if (hit && now - hit.at < GIT_SUMMARY_CACHE_TTL_MS) return Promise.resolve(hit.summary);
+  const pending = gitSummaryPending.get(cwd);
+  if (pending) return pending;
+  const task = (async () => {
+    const branch = await runGitAsync(["rev-parse", "--abbrev-ref", "HEAD"], cwd);
+    if (branch === null) {
+      gitSummaryCache.set(cwd, { at: Date.now(), summary: null });
+      return null;
+    }
+    const status = (await runGitAsync(["status", "--porcelain"], cwd)) ?? "";
+    const log = (await runGitAsync(["log", "--oneline", "-3"], cwd)) ?? "";
+    const summary = {
+      branch,
+      dirtyCount: status === "" ? 0 : status.split("\n").length,
+      recentCommits: log === "" ? [] : log.split("\n"),
+    };
+    gitSummaryCache.set(cwd, { at: Date.now(), summary });
+    return summary;
+  })().finally(() => gitSummaryPending.delete(cwd));
+  gitSummaryPending.set(cwd, task);
+  return task;
 }
 
 export function formatGitSummary(summary: GitSummary): string {

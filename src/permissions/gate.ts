@@ -3,7 +3,7 @@ import path from "node:path";
 import { isSecretEnvName, isSensitivePath } from "../core/sensitive";
 import { isAllowedByRules, isAskedByRules, isDeniedByRules } from "./allow";
 import { type LexCache, lexCached } from "./lex-cache";
-import { type ShellToken, segmentWords, splitShellSegments } from "./shell";
+import { DYNAMIC_SHELL_WORD, type ShellToken, segmentWords, splitShellSegments } from "./shell";
 import type {
   PermissionContext,
   PermissionDecision,
@@ -74,7 +74,16 @@ function baseName(word: string): string {
 // Windows env names are. Home variables with a path suffix ($HOME/projects)
 // are treated exactly like the ~/ spelling, and ~user forms count as another
 // user's home root.
+function isDynamicTarget(target: string): boolean {
+  return (
+    target.includes(DYNAMIC_SHELL_WORD) ||
+    /\$[A-Za-z_]/.test(target) ||
+    /%[A-Za-z_][A-Za-z0-9_]*%/.test(target)
+  );
+}
+
 function isDangerousDeleteTarget(target: string): boolean {
+  if (isDynamicTarget(target)) return true;
   if (/^\/+$/.test(target)) return true;
   const norm = target.replace(/\\/g, "/").replace(/\/+$/, "");
   if (norm === "/*" || norm === "*") return true;
@@ -409,7 +418,7 @@ function decodePowerShellEncoded(encoded: string): string | null {
 
 function segmentIsDangerous(segment: ShellToken[], depth: number, lex?: LexCache): boolean {
   const { words, redirectTargets } = segmentWords(segment);
-  if (redirectTargets.some((target) => BLOCK_DEVICE.test(target))) {
+  if (redirectTargets.some((target) => isDynamicTarget(target) || BLOCK_DEVICE.test(target))) {
     return true;
   }
   const invocation = commandInvocation(words);
@@ -451,11 +460,13 @@ function segmentIsDangerous(segment: ShellToken[], depth: number, lex?: LexCache
       return recursive && targets.some(isDangerousDeleteTarget);
     }
     case "format":
-      return rest.some((arg) => /^[a-z]:$/i.test(arg));
+      return rest.some((arg) => isDynamicTarget(arg) || /^[a-z]:$/i.test(arg));
     case "dd":
       return rest.some(
         (arg) =>
-          arg.startsWith("if=") || (arg.startsWith("of=") && BLOCK_DEVICE.test(arg.slice(3))),
+          arg.startsWith("if=") ||
+          (arg.startsWith("of=") &&
+            (isDynamicTarget(arg.slice(3)) || BLOCK_DEVICE.test(arg.slice(3)))),
       );
     case "find":
       return findIsDangerous(rest, depth, lex);

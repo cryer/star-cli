@@ -13,11 +13,36 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 ### Added
 
 - **stale-content elision thresholds are now configurable**: three new top-level keys — `elisionThresholdFraction` (fraction of the compaction threshold at which elision activates, default 0.5; 1 = only at the compaction point, effectively off), `elisionKeepRecentMessages` (newest messages never elided, default 24) and `elisionMinTokens` (minimum size of a tool result / tool-call argument payload worth eliding, default 250) — tune the previously hardcoded elision knobs; documented in both READMEs. Global config only (not settable from a project's `.star/config.toml`)
+- **per-model usage and cost ledger**: main requests, summaries, titles, completion checks and settled subagents record tokens and actual cost immediately under the model that produced them. Switching models no longer reprices history, `/usage` attributes mixed-model sessions correctly, and unpriced requests are marked explicitly; older sessions retain the legacy estimate fallback
+- **crash-safe exclusive sessions**: writable session stores take a lifecycle lock with stale-process recovery, serialize message/meta/checkpoint writes and flush on close. Failed appends trigger a full-history recovery rewrite instead of silently leaving memory and disk divergent; active sessions cannot be deleted or reopened by another process
+- **last-resort context reduction**: normal elision/compaction is followed by emergency in-place reduction when recent messages still exceed the window, with output-token headroom and a clear error rather than sending a known over-limit request. `[[models]].maxTokens` now reaches main and subagent requests
+- **reduced-motion mode**: `STAR_NO_MOTION=1` disables spinner and terminal-title animation. Multi-line input history survives restarts, and cursor movement/deletion handles emoji and combined graphemes correctly
+
+### Changed
+
+- **serialized REPL operations**: model turns lock before asynchronous `@` expansion, while shell commands and destructive slash commands share full-lifecycle operation guards and queue draining. Plan approval pauses the queue, late steer choices become normal prompts, shell commands support Ctrl+C, and Esc restores undelivered steering text to the draft instead of auto-running it
+- **production print pipeline**: `cli/print-mode.ts` owns retry buffering, output, usage and shutdown. Failed-attempt text is not duplicated, final partial replies are persisted, SIGINT returns 130, empty `-p ""` stays in print mode, and EPIPE cleanup stops background work and flushes the session
 
 ### Fixed
 
+- **history and snapshot consistency**: all wholesale rewrites reset server token calibration and volatile caches; `/resume` and `/compact` redraw old Ink Static output; stores close on `/new`, `/resume`, `/fork` and exit; write failures surface honestly, and mixed-EOL edits preserve untouched lines
+- **stream compatibility**: plain-object relay errors retain retry metadata, `EHOSTUNREACH`/`ENETUNREACH` retry correctly, and standard multi-line SSE `data:` events remain valid alongside malformed-relay recovery. Auxiliary calls use explicit retry policy and completion checks see real tool failures
+- **tool lifecycle edges**: hooks close stdin for small payloads, config writes are owner-only before rename and serialized per path, subagent todos are memory-only, `read_file` pages beyond the first 1MB, and search response bodies have a 2MB cap
+
 - **status bar no longer wraps when background tasks have CJK labels**: the `bg: N (…)` segment truncated labels by character count, so two Chinese task descriptions (double-width in the terminal) overflowed the bar, wrapped it to a second line, and squeezed the model name against the remaining fields. Truncation is now display-width aware (CJK/emoji count as two cells), each label is capped individually, the segment only gets the columns the other fields actually leave, and labels are dropped entirely (plain `bg: N`) when there is no room
 - **publish workflow's GitHub Packages leg no longer fails with ENEEDAUTH**: `setup-node` points npm at `$NPM_CONFIG_USERCONFIG`, so appending the `GITHUB_TOKEN` to `~/.npmrc` was silently ignored. The leg now uses a second `setup-node` pass with `registry-url: https://npm.pkg.github.com` (the documented two-registry pattern) instead of hand-editing any `.npmrc`. Both publish legs skip versions that are already published so a partially-failed run can be retried safely, and the GitHub Packages leg builds `dist/` itself when the skipped npmjs leg never ran `prepublishOnly` (a re-run would otherwise publish a tarball without the bundled code)
+
+### Security
+
+- **dangerous-shell targets fail closed**: recursive deletion and similarly destructive commands no longer lose command/process substitutions or unknown-variable operands during analysis; `rm -rf "$(printf /)"` and indirect root targets are refused rather than allowed
+- **SSRF checks cover the real connection**: every web-fetch hop pins its Node HTTP/HTTPS lookup to an address validated for that hop while preserving Host/SNI, closing DNS-rebinding gaps. Reserved filtering now includes CGNAT, benchmark, multicast, documentation and IPv4-mapped/NAT64 forms
+- **sensitive snapshots use one rule source**: custom `permissions.sensitive` globs now govern capture, old-index scrubbing, preview, checkout and clean, so secrets cannot be silently copied or deleted during undo. Snapshot attributes disable text/eol/filter/encoding conversion for byte-exact restores
+- **unrecoverable overwrites are refused**: `write_file` no longer treats unreadable old files as new or overwrites oversized old content without a restorable snapshot; checkpoint cleanup failures cannot turn successful writes into retries that damage files
+
+### Performance
+
+- **non-blocking Git status and incremental context totals**: the status bar uses shared asynchronous cached Git probes, while the loop maintains append-only token totals and resets them only on history rewrites
+- **bounded filesystem and UI work**: grep can stop walking at its result cap, glob keeps only the newest 100 entries, path suggestions debounce/cache stale requests, diff previews have a work budget, and long reasoning updates incrementally instead of rescanning all text
 
 ## [0.3.13] - 2026-10-15
 

@@ -149,15 +149,19 @@ describe("eventToJsonLine", () => {
     });
   });
 
-  it("serializes error events with a plain message object", () => {
-    const line = eventToJsonLine({
-      type: "error",
-      error: { name: "Error", message: "model exploded" },
-    });
-    expect(JSON.parse(line as string)).toEqual({
-      type: "error",
-      error: { message: "model exploded" },
-    });
+  it("serializes every StreamErrorInfo field", () => {
+    const error = {
+      name: "APIError",
+      message: "model exploded",
+      statusCode: 429,
+      isRetryable: true,
+      code: "EAIAGAIN",
+      causeCode: "ECONNRESET",
+      responseHeaders: { "retry-after": "2" },
+      responseBody: '{"error":"busy"}',
+    };
+    const line = eventToJsonLine({ type: "error", error });
+    expect(JSON.parse(line as string)).toEqual({ type: "error", error });
   });
 
   it("serializes reasoning events", () => {
@@ -186,6 +190,23 @@ describe("UsageTracker", () => {
       promptTokens: 15,
       completionTokens: 10,
       totalTokens: 25,
+    });
+  });
+
+  it("adds optional cache totals only when reported", () => {
+    const tracker = new UsageTracker();
+    tracker.add({ promptTokens: 5, completionTokens: 3, totalTokens: 8 });
+    tracker.add({
+      promptTokens: 10,
+      completionTokens: 7,
+      totalTokens: 17,
+      cachedPromptTokens: 4,
+      cacheReadInputTokens: 6,
+    });
+    expect(tracker.totals).toMatchObject({ cachedPromptTokens: 4, cacheReadInputTokens: 6 });
+    expect(JSON.parse(tracker.toJsonLine() as string)).toMatchObject({
+      cachedPromptTokens: 4,
+      cacheReadInputTokens: 6,
     });
   });
 });

@@ -371,12 +371,12 @@ describe("hook input transport", () => {
     expect(warnings).toEqual([]);
   });
 
-  it("keeps small tool input on STAR_TOOL_INPUT without the stdin marker", async () => {
+  it("keeps small tool input in the environment and closes stdin", async () => {
     const warnings: string[] = [];
     const command =
-      "node -e \"require('fs').writeFileSync('small-meta.json',JSON.stringify({" +
+      "node -e \"process.stdin.on('end',()=>require('fs').writeFileSync('small-meta.json',JSON.stringify({" +
       "stdinFlag:process.env.STAR_TOOL_INPUT_STDIN||null," +
-      'envInput:process.env.STAR_TOOL_INPUT||null}))"';
+      'envInput:process.env.STAR_TOOL_INPUT||null}))).resume()"';
     const loop = makeLoop(
       mockModel([writeFileCall("c1", "small-target.txt", "tiny"), textRound("done")]),
       [makeHook({ command })],

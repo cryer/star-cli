@@ -31,6 +31,41 @@ function normalizeEol(text: string): string {
   return text.replace(/\r\n/g, "\n");
 }
 
+function normalizedOffsets(text: string): number[] {
+  const offsets = [0];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "\r" && text[i + 1] === "\n") i++;
+    offsets.push(i + 1);
+  }
+  return offsets;
+}
+
+function replacePreservingEol(
+  raw: string,
+  normalized: string,
+  offsets: number[],
+  oldString: string,
+  newString: string,
+  replaceAll: boolean,
+  useCrlf: boolean,
+): string {
+  const replacement = useCrlf ? newString.replace(/\n/g, "\r\n") : newString;
+  let normalizedFrom = 0;
+  let rawFrom = 0;
+  let updated = "";
+  while (true) {
+    const match = normalized.indexOf(oldString, normalizedFrom);
+    if (match < 0) break;
+    const rawStart = offsets[match] ?? raw.length;
+    const rawEnd = offsets[match + oldString.length] ?? raw.length;
+    updated += raw.slice(rawFrom, rawStart) + replacement;
+    rawFrom = rawEnd;
+    normalizedFrom = match + oldString.length;
+    if (!replaceAll) break;
+  }
+  return updated + raw.slice(rawFrom);
+}
+
 const schema = z.object({
   path: z.string().describe("File path, absolute or relative to the working directory"),
   old_string: z.string().min(1).describe("Exact text to replace"),
@@ -81,12 +116,13 @@ export const editFileTool: Tool<typeof schema> = {
     // LF-normalized space — read_file strips \r for display, so on a CRLF
     // file the model can only phrase a multi-line old_string with \n, which
     // never matches the raw bytes. Uniqueness/replace_all counts are judged
-    // in the normalized space; after replacing there, the text is converted
-    // back to the original file's dominant line ending before writing.
+    // in the normalized space. Fallback replacements use normalized-to-raw
+    // offsets so line endings outside the edited ranges stay byte-identical.
     let working = content;
     let oldString = args.old_string;
     let newString = args.new_string;
-    let restoreEol: ((text: string) => string) | null = null;
+    let offsets: number[] | null = null;
+    let useCrlf = false;
     let count = countOccurrences(working, oldString);
     if (count === 0) {
       const normalizedContent = normalizeEol(content);
@@ -95,8 +131,8 @@ export const editFileTool: Tool<typeof schema> = {
       if (normalizedCount > 0) {
         const crlfCount = countOccurrences(content, "\r\n");
         const loneLfCount = countOccurrences(content.replace(/\r\n/g, ""), "\n");
-        restoreEol =
-          crlfCount > 0 && crlfCount >= loneLfCount ? (text) => text.replace(/\n/g, "\r\n") : null;
+        useCrlf = crlfCount > 0 && crlfCount >= loneLfCount;
+        offsets = normalizedOffsets(content);
         working = normalizedContent;
         oldString = normalizedOld;
         newString = normalizeEol(newString);
@@ -112,12 +148,19 @@ export const editFileTool: Tool<typeof schema> = {
         isError: true,
       };
     }
-    let updated = args.replace_all
-      ? working.split(oldString).join(newString)
-      : working.replace(oldString, () => newString);
-    if (restoreEol) {
-      updated = restoreEol(updated);
-    }
+    const updated = offsets
+      ? replacePreservingEol(
+          content,
+          working,
+          offsets,
+          oldString,
+          newString,
+          args.replace_all === true,
+          useCrlf,
+        )
+      : args.replace_all
+        ? working.split(oldString).join(newString)
+        : working.replace(oldString, () => newString);
     try {
       // Guard against a silent overwrite when the file changed on disk
       // between our read and our write.

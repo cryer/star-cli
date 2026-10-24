@@ -69,4 +69,34 @@ describe("read_file unchanged-since-last-read dedup", () => {
     const res = await child.execute({ path: "a.txt" }, ctx);
     expect(res.content).toContain("1\talpha");
   });
+
+  it("reads line offsets beyond the first 1MB with exact line numbers", async () => {
+    const lineCount = 140_000;
+    writeFileSync(
+      path.join(dir, "large.txt"),
+      Array.from({ length: lineCount }, (_, i) => `line-${i + 1}`).join("\n"),
+    );
+    const tool = createReadFileTool();
+    const res = await tool.execute({ path: "large.txt", offset: 130_000, limit: 2 }, ctx);
+    expect(res.content).toContain("130000\tline-130000");
+    expect(res.content).toContain("130001\tline-130001");
+    expect(res.content).toContain(`showing lines 130000-130001 of ${lineCount}`);
+    expect(res.content).not.toContain("at least");
+  });
+
+  it("keeps binary detection and the output cap for large files", async () => {
+    writeFileSync(
+      path.join(dir, "binary.dat"),
+      Buffer.concat([Buffer.from([0]), Buffer.alloc(1_100_000, 1)]),
+    );
+    const tool = createReadFileTool();
+    const binary = await tool.execute({ path: "binary.dat" }, ctx);
+    expect(binary.isError).toBe(true);
+
+    writeFileSync(path.join(dir, "long-line.txt"), `${"x".repeat(1_100_000)}\ntail`);
+    const capped = await tool.execute({ path: "long-line.txt" }, ctx);
+    expect(capped.content.length).toBeLessThan(102 * 1024);
+    expect(capped.content).toContain("output exceeds 100KB");
+    expect(capped.content).toContain("of 2");
+  });
 });

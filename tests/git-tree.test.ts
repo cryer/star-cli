@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { gitTreesDir } from "../src/config/paths";
+import { registerSensitivePatterns } from "../src/core/sensitive";
 import {
   diffTreeNames,
   isGitAvailable,
@@ -46,9 +47,11 @@ beforeEach(() => {
   home = mkdtempSync(path.join(os.tmpdir(), "star-gt-home-"));
   dir = mkdtempSync(path.join(os.tmpdir(), "star-gt-"));
   vi.stubEnv("STAR_HOME", home);
+  registerSensitivePatterns([]);
 });
 
 afterEach(() => {
+  registerSensitivePatterns([]);
   vi.unstubAllEnvs();
   rmSync(home, { recursive: true, force: true });
   rmSync(dir, { recursive: true, force: true });
@@ -80,12 +83,19 @@ describe("trackTree / restoreTree", () => {
     expect(readFileSync(path.join(dir, "gone.txt"), "utf8")).toBe("to delete");
   });
 
-  it("recaptures an unchanged tree identically", async () => {
+  it("recaptures an unchanged tree identically without adding another pin", async () => {
     writeFileSync(path.join(dir, "a.txt"), "same");
     const first = await trackTree(dir);
     const second = await trackTree(dir);
     expect(first).not.toBeNull();
     expect(second).toBe(first);
+    const refs = git([
+      `--git-dir=${treeRepoDir(dir)}`,
+      "for-each-ref",
+      "--format=%(refname)",
+      "refs/star/",
+    ]);
+    expect(refs.split("\n").filter(Boolean)).toHaveLength(1);
   });
 
   it("keeps .gitignore'd files out of the tree and untouched by a restore", async () => {
@@ -153,6 +163,45 @@ describe("line-ending integrity", () => {
     writeFileSync(path.join(dir, "lines.txt"), "changed\r\nchanged\r\n");
     expect(await restoreTree(dir, tree)).toBe(true);
     expect(readFileSync(path.join(dir, "lines.txt"), "utf8")).toBe(content);
+  });
+
+  it("ignores .gitattributes text and eol conversion in both directions", async () => {
+    writeFileSync(path.join(dir, ".gitattributes"), "*.txt text eol=lf\n");
+    const content = Buffer.from("first\r\nsecond\r\n", "utf8");
+    writeFileSync(path.join(dir, "lines.txt"), content);
+    const tree = await trackTree(dir);
+    expect(tree).not.toBeNull();
+    if (!tree) return;
+
+    writeFileSync(path.join(dir, "lines.txt"), "changed\n");
+    expect(await restoreTree(dir, tree)).toBe(true);
+    expect(readFileSync(path.join(dir, "lines.txt"))).toEqual(content);
+  });
+
+  it("ignores clean/smudge filters and working-tree-encoding", async () => {
+    writeFileSync(
+      path.join(dir, ".gitattributes"),
+      "*.txt filter=mustNotRun\n*.utf16 working-tree-encoding=UTF-16LE\n",
+    );
+    const text = Buffer.from("raw\r\nbytes\r\n", "utf8");
+    const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from("hello\r\n", "utf16le")]);
+    writeFileSync(path.join(dir, "raw.txt"), text);
+    writeFileSync(path.join(dir, "raw.utf16"), utf16);
+    const repo = treeRepoDir(dir);
+    mkdirSync(repo, { recursive: true });
+    git(["init", "--bare", repo]);
+    git([`--git-dir=${repo}`, "config", "filter.mustNotRun.clean", "false"]);
+    git([`--git-dir=${repo}`, "config", "filter.mustNotRun.smudge", "false"]);
+    git([`--git-dir=${repo}`, "config", "filter.mustNotRun.required", "true"]);
+    const tree = await trackTree(dir);
+    expect(tree).not.toBeNull();
+    if (!tree) return;
+
+    writeFileSync(path.join(dir, "raw.txt"), "changed");
+    writeFileSync(path.join(dir, "raw.utf16"), "changed");
+    expect(await restoreTree(dir, tree)).toBe(true);
+    expect(readFileSync(path.join(dir, "raw.txt"))).toEqual(text);
+    expect(readFileSync(path.join(dir, "raw.utf16"))).toEqual(utf16);
   });
 });
 
@@ -263,6 +312,35 @@ describe("sensitive file exclusion", () => {
     expect(readFileSync(path.join(dir, ".env"), "utf8")).toBe("SECRET=rotated");
     expect(readFileSync(path.join(dir, ".env.production"), "utf8")).toBe("NEW=1");
     expect(readFileSync(path.join(dir, "tracked.txt"), "utf8")).toBe("v1");
+  });
+
+  it("applies custom sensitive globs to old indexes, previews, restores and clean", async () => {
+    writeFileSync(path.join(dir, "old.secret"), "old secret");
+    writeFileSync(path.join(dir, "tracked.txt"), "v1");
+    const oldTree = await trackTree(dir);
+    expect(oldTree).not.toBeNull();
+    if (!oldTree) return;
+    expect(repoFiles(treeRepoDir(dir), dir)).toContain("old.secret");
+
+    registerSensitivePatterns(["*.secret"]);
+    expect(await trackTree(dir)).not.toBeNull();
+    expect(repoFiles(treeRepoDir(dir), dir)).toEqual(["tracked.txt"]);
+
+    writeFileSync(path.join(dir, "old.secret"), "rotated secret");
+    writeFileSync(path.join(dir, "fresh.secret"), "fresh secret");
+    writeFileSync(path.join(dir, "tracked.txt"), "v2");
+    const names = await diffTreeNames(dir, oldTree);
+    expect(names).toEqual(["tracked.txt"]);
+
+    expect(await restoreTree(dir, oldTree)).toBe(true);
+    expect(readFileSync(path.join(dir, "old.secret"), "utf8")).toBe("rotated secret");
+    expect(readFileSync(path.join(dir, "fresh.secret"), "utf8")).toBe("fresh secret");
+    expect(readFileSync(path.join(dir, "tracked.txt"), "utf8")).toBe("v1");
+
+    registerSensitivePatterns([]);
+    const unprotected = await diffTreeNames(dir, oldTree);
+    expect(unprotected).toContain("old.secret");
+    expect(unprotected).toContain("fresh.secret");
   });
 
   it("creates the git-trees root directory owner-only", async () => {

@@ -224,16 +224,14 @@ describe("snapshot content spill", () => {
 });
 
 describe("oversized snapshots", () => {
-  it("records metadata only past the 5MB cap and skips the file on revert", async () => {
-    writeFileSync(path.join(dir, "big.txt"), "x".repeat(MAX_SNAPSHOT_CONTENT_BYTES + 1));
+  it("refuses to overwrite an existing file whose contents cannot be captured", async () => {
+    const original = "x".repeat(MAX_SNAPSHOT_CONTENT_BYTES + 1);
+    writeFileSync(path.join(dir, "big.txt"), original);
     const res = await writeFileTool.execute({ path: "big.txt", content: "small" }, ctx());
-    expect(res.isError).toBeUndefined();
-    const [snapshot] = listSnapshots();
-    expect(snapshot?.content).toBeNull();
-    expect(snapshot?.contentTooLarge).toBe(true);
-    const message = await undoLastSnapshot();
-    expect(message).toContain("content too large, not restored");
-    expect(readFileSync(path.join(dir, "big.txt"), "utf8")).toBe("small");
+    expect(res.isError).toBe(true);
+    expect(res.content).toContain("no restorable snapshot");
+    expect(snapshotCount()).toBe(0);
+    expect(readFileSync(path.join(dir, "big.txt"), "utf8")).toBe(original);
   });
 });
 

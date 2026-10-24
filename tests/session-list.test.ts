@@ -175,6 +175,35 @@ describe("listSessionEntries", () => {
       openSpy.mockRestore();
     }
   });
+
+  it("bounds concurrent meta.json reads", async () => {
+    for (let i = 0; i < 24; i++) {
+      const store = await SessionStore.create(`/work/${i}`, "m");
+      await store.append({ role: "user", content: `hi ${i}` });
+    }
+
+    let active = 0;
+    let maxActive = 0;
+    const realReadFile = fsp.readFile;
+    const readSpy = vi.spyOn(fsp, "readFile").mockImplementation(async (...args) => {
+      if (!String(args[0]).endsWith("meta.json")) return realReadFile(...args);
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        return await realReadFile(...args);
+      } finally {
+        active -= 1;
+      }
+    });
+    try {
+      expect(await SessionStore.list()).toHaveLength(24);
+      expect(maxActive).toBeGreaterThan(1);
+      expect(maxActive).toBeLessThanOrEqual(8);
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
 });
 
 describe("findLatestSession", () => {

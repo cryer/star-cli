@@ -58,51 +58,13 @@ export const grepTool: Tool<typeof schema> = {
       return { content: `Invalid regular expression: ${(err as Error).message}`, isError: true };
     }
     const root = path.resolve(ctx.cwd, args.path ?? ".");
-    let files: WalkedFile[];
     let interrupted = false;
-    try {
-      const st = await stat(root);
-      if (st.isFile()) {
-        // Symlink targets are checked too: a link named notes.txt can point
-        // at a sensitive file whose resolved basename is on the blocklist.
-        const resolved = await realpath(root).catch(() => null);
-        if (isSensitivePath(root) || (resolved !== null && isSensitivePath(resolved))) {
-          return {
-            content: `Refused to grep sensitive file: ${args.path ?? "."}`,
-            isError: true,
-          };
-        }
-        files = [{ abs: root, rel: path.basename(root), mtimeMs: st.mtimeMs }];
-      } else {
-        const walked = await walkFiles(root, undefined, {
-          ignore: createIgnorePredicate(ctx.cwd),
-          withMtime: false,
-          signal: ctx.abortSignal,
-          symlinkBoundary: ctx.cwd,
-          nestedIgnore: true,
-        });
-        interrupted = walked.aborted;
-        // A link named notes.txt can resolve to a sensitive target inside the
-        // cwd; check the resolved path as well as the link path.
-        files = walked.files.filter(
-          (f) =>
-            !isSensitivePath(f.abs) && (f.resolved === undefined || !isSensitivePath(f.resolved)),
-        );
-      }
-    } catch {
-      return { content: `Path not found: ${args.path ?? "."}`, isError: true };
-    }
-    if (args.glob) {
-      const glob = args.glob;
-      files = files.filter((f) => matchesGlob(glob, f.rel));
-    }
-    // Files are scanned in concurrent chunks; matches are appended in file
-    // order so output stays deterministic and the 250-match cut is stable.
+    const out: string[] = [];
+    let truncated = false;
+    let skippedLarge = 0;
     const scanFile = async (file: WalkedFile): Promise<string[] | null> => {
       const st = await stat(file.abs).catch(() => null);
-      if (!st) {
-        return null;
-      }
+      if (!st) return null;
       if (st.size > MAX_FILE_BYTES) {
         skippedLarge += 1;
         return null;
@@ -113,12 +75,10 @@ export const grepTool: Tool<typeof schema> = {
       } catch {
         return null;
       }
-      if (buf.includes(0)) {
-        return null;
-      }
+      if (buf.includes(0)) return null;
       const hits: string[] = [];
       const lines = buf.toString("utf8").split("\n");
-      for (let i = 0; i < lines.length; i++) {
+      for (let i = 0; i < lines.length && hits.length < MAX_MATCHES; i += 1) {
         const line = lines[i] ?? "";
         if (re.test(line)) {
           const shown = line.length > MAX_LINE_CHARS ? `${line.slice(0, MAX_LINE_CHARS)}…` : line;
@@ -127,29 +87,58 @@ export const grepTool: Tool<typeof schema> = {
       }
       return hits;
     };
-    const out: string[] = [];
-    let truncated = false;
-    let skippedLarge = 0;
-    outer: for (let i = 0; i < files.length; i += WALK_CONCURRENCY) {
-      if (ctx.abortSignal?.aborted) {
-        interrupted = true;
-        break;
-      }
-      const chunk = await Promise.all(
-        files.slice(i, i + WALK_CONCURRENCY).map((file) => scanFile(file)),
+    const scanBatch = async (batch: WalkedFile[]): Promise<boolean> => {
+      const files = batch.filter(
+        (f) =>
+          !isSensitivePath(f.abs) &&
+          (f.resolved === undefined || !isSensitivePath(f.resolved)) &&
+          (!args.glob || matchesGlob(args.glob, f.rel)),
       );
-      for (const hits of chunk) {
-        if (!hits) {
-          continue;
+      outer: for (let i = 0; i < files.length; i += WALK_CONCURRENCY) {
+        if (ctx.abortSignal?.aborted) {
+          interrupted = true;
+          return false;
         }
-        for (const hit of hits) {
-          out.push(hit);
-          if (out.length >= MAX_MATCHES) {
-            truncated = true;
-            break outer;
+        const chunk = await Promise.all(
+          files.slice(i, i + WALK_CONCURRENCY).map((file) => scanFile(file)),
+        );
+        for (const hits of chunk) {
+          for (const hit of hits ?? []) {
+            out.push(hit);
+            if (out.length >= MAX_MATCHES) {
+              truncated = true;
+              break outer;
+            }
           }
         }
       }
+      return !truncated && !ctx.abortSignal?.aborted;
+    };
+    try {
+      const st = await stat(root);
+      if (st.isFile()) {
+        const resolved = await realpath(root).catch(() => null);
+        if (isSensitivePath(root) || (resolved !== null && isSensitivePath(resolved))) {
+          return {
+            content: `Refused to grep sensitive file: ${args.path ?? "."}`,
+            isError: true,
+          };
+        }
+        await scanBatch([{ abs: root, rel: path.basename(root), mtimeMs: st.mtimeMs }]);
+      } else {
+        const walked = await walkFiles(root, undefined, {
+          ignore: createIgnorePredicate(ctx.cwd),
+          withMtime: false,
+          signal: ctx.abortSignal,
+          symlinkBoundary: ctx.cwd,
+          nestedIgnore: true,
+          collect: false,
+          onBatch: scanBatch,
+        });
+        interrupted = walked.aborted;
+      }
+    } catch {
+      return { content: `Path not found: ${args.path ?? "."}`, isError: true };
     }
     const skippedNote =
       skippedLarge > 0 ? `(skipped ${skippedLarge} file(s) larger than 5MB)` : null;

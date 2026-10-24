@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TICK_MS, nextFlush, startTicker } from "../src/cli/ticker";
+import { TICK_MS, isMotionDisabled, nextFlush, startTicker } from "../src/cli/ticker";
+
+describe("isMotionDisabled", () => {
+  it("only enables reduced motion for STAR_NO_MOTION=1", () => {
+    expect(isMotionDisabled({ STAR_NO_MOTION: "1" })).toBe(true);
+    expect(isMotionDisabled({ STAR_NO_MOTION: "0" })).toBe(false);
+    expect(isMotionDisabled({})).toBe(false);
+  });
+});
 
 describe("nextFlush", () => {
   it("returns null when nothing changed", () => {

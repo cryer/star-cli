@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { FileSnapshot } from "../tools/fs/snapshots";
@@ -49,14 +50,12 @@ function enqueueIndexWrite<T>(sessionDir: string, op: () => Promise<T>): Promise
   return run;
 }
 
-let indexTmpSeq = 0;
-
 // index.json rewrites land atomically (tmp + rename) with the same
 // transient-lock retries as the store's meta writes: a crash mid-writeFile
 // would otherwise corrupt the whole /rewind index.
 async function writeIndex(sessionDir: string, records: CheckpointRecord[]): Promise<void> {
   const target = indexPath(sessionDir);
-  const tmp = `${target}.tmp-${process.pid}-${indexTmpSeq++}`;
+  const tmp = `${target}.tmp-${process.pid}-${randomUUID()}`;
   try {
     await withTransientFsRetry(async () => {
       await fs.writeFile(tmp, JSON.stringify(records, null, 2));
@@ -103,9 +102,17 @@ export async function appendCheckpointRecord(
   await enqueueIndexWrite(sessionDir, async () => {
     await fs.mkdir(checkpointsDir(sessionDir), { recursive: true, mode: 0o700 });
     if (record.existed && content !== null) {
-      // writeFile ignores the encoding for Buffer data, so binary snapshots
-      // persist byte-exact; string content stays utf8 as before.
-      await fs.writeFile(checkpointContentPath(sessionDir, record.id), content, "utf8");
+      const target = checkpointContentPath(sessionDir, record.id);
+      const tmp = `${target}.tmp-${process.pid}-${randomUUID()}`;
+      try {
+        await withTransientFsRetry(async () => {
+          await fs.writeFile(tmp, content, "utf8");
+          await fs.rename(tmp, target);
+        });
+      } catch (error) {
+        await fs.unlink(tmp).catch(() => {});
+        throw error;
+      }
     }
     const records = await listCheckpointRecords(sessionDir);
     records.push(record);

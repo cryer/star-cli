@@ -11,15 +11,24 @@ import {
   listCheckpointRecords,
   removeCheckpointRecords,
 } from "./checkpoints";
+import { type SessionLock, SessionLockedError, acquireSessionLock } from "./lock";
+
+export { SessionLockedError } from "./lock";
 
 export interface SessionUsage {
   requests: number;
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
-  // Prompt-cache totals; present only after a provider reports cache fields.
   cachedPromptTokens?: number;
   cacheReadInputTokens?: number;
+  costUsd?: number;
+  costUnknown?: boolean;
+}
+
+export interface UsageAttribution {
+  modelName: string;
+  costUsd: number | null;
 }
 
 export interface DayUsageBucket {
@@ -40,6 +49,7 @@ export interface SessionMeta {
   // `usage` from the day this field was introduced; older sessions only have
   // the grand totals in `usage`.
   usageByDay?: Record<string, DayUsageBucket>;
+  usageByModel?: Record<string, SessionUsage>;
 }
 
 function generateId(now: Date): string {
@@ -180,9 +190,14 @@ export class SessionStore {
 
   private pendingMeta: { cwd: string; model: string; createdAt: number } | null = null;
   private initialized = false;
+  private initialization: Promise<void> | null = null;
   private cachedMeta: SessionMeta | null = null;
-  private metaTmpSeq = 0;
-  private messagesTmpSeq = 0;
+  private lock: SessionLock | null = null;
+  private closing = false;
+  private closed = false;
+  private messageHistory: StarMessage[] | null = null;
+  private degraded = false;
+  private messageWriteQueue: Promise<void> = Promise.resolve();
   private metaWriteQueue: Promise<void> = Promise.resolve();
   private metaLastFlushAt = 0;
   private metaFlushTimer: NodeJS.Timeout | null = null;
@@ -202,9 +217,19 @@ export class SessionStore {
   }
 
   static async create(cwd: string, model: string): Promise<SessionStore> {
-    const store = new SessionStore(generateUniqueId());
-    store.pendingMeta = { cwd, model, createdAt: Date.now() };
-    return store;
+    for (let attempt = 0; attempt < ID_COLLISION_MAX_ATTEMPTS; attempt++) {
+      const store = new SessionStore(generateUniqueId());
+      try {
+        store.lock = await acquireSessionLock(store.dir, store.id);
+      } catch (error) {
+        if (error instanceof SessionLockedError) continue;
+        throw error;
+      }
+      store.pendingMeta = { cwd, model, createdAt: Date.now() };
+      store.messageHistory = [];
+      return store;
+    }
+    throw new Error("Could not allocate an exclusive session id");
   }
 
   static async open(id: string): Promise<SessionStore | null> {
@@ -219,13 +244,17 @@ export class SessionStore {
       const meta = JSON.parse(raw) as SessionMeta;
       if (meta.id !== id) return null;
     } catch {
-      // meta.json is corrupt (e.g. truncated write); open anyway and let
-      // meta() fall back to defaults so messages stay resumable.
       debugWarn(`session ${id}: corrupt meta.json, using defaults`);
     }
-    await store.sweepTmpFiles();
-    store.initialized = true;
-    return store;
+    store.lock = await acquireSessionLock(store.dir, id);
+    try {
+      await store.sweepTmpFiles();
+      store.initialized = true;
+      return store;
+    } catch (error) {
+      await store.lock.release();
+      throw error;
+    }
   }
 
   static async list(cwd?: string): Promise<SessionMeta[]> {
@@ -236,8 +265,14 @@ export class SessionStore {
       return [];
     }
     const wanted = cwd === undefined ? undefined : normalizeCwdForCompare(cwd);
-    const metas = await Promise.all(
-      entries.map(async (entry) => {
+    const metas: (SessionMeta | null)[] = [];
+    let next = 0;
+    const worker = async () => {
+      while (next < entries.length) {
+        const index = next;
+        next += 1;
+        const entry = entries[index];
+        if (!entry) continue;
         try {
           const raw = await fs.readFile(path.join(sessionsDir(), entry, "meta.json"), "utf8");
           const meta = JSON.parse(raw) as SessionMeta;
@@ -245,16 +280,16 @@ export class SessionStore {
             meta.id === entry &&
             (wanted === undefined || normalizeCwdForCompare(meta.cwd) === wanted)
           ) {
-            return meta;
+            metas[index] = meta;
           }
         } catch {
-          // 跳过损坏的会话目录
+          // Skip unreadable and corrupt session directories.
         }
-        return null;
-      }),
-    );
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(8, entries.length) }, () => worker()));
     return metas
-      .filter((meta): meta is SessionMeta => meta !== null)
+      .filter((meta): meta is SessionMeta => meta !== null && meta !== undefined)
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
@@ -269,7 +304,7 @@ export class SessionStore {
   // agent turn over a stale updatedAt would be the wrong trade.
   private writeMeta(meta: SessionMeta): Promise<void> {
     if (isFallbackMeta(meta)) return Promise.resolve();
-    const tmp = `${this.metaPath()}.tmp-${process.pid}-${this.metaTmpSeq++}`;
+    const tmp = `${this.metaPath()}.tmp-${process.pid}-${randomUUID()}`;
     const run = this.metaWriteQueue.then(async () => {
       try {
         await withTransientFsRetry(async () => {
@@ -287,10 +322,6 @@ export class SessionStore {
     return run;
   }
 
-  // Debounced flush for append-driven updatedAt bumps. The trailing timer is
-  // unref'd so a pending flush never keeps the process alive; close() flushes
-  // synchronously on a clean exit, and a hard exit simply drops the trailing
-  // bump — meta is bookkeeping.
   private markMetaDirty(): void {
     this.metaDirty = true;
     if (this.metaFlushTimer) return;
@@ -311,9 +342,6 @@ export class SessionStore {
     await this.flushMetaNow();
   }
 
-  // Immediate flush for substantive meta changes; cancels a pending debounced
-  // flush, which the write makes redundant either way (it serializes the live
-  // cached meta).
   private async flushMetaNow(): Promise<void> {
     if (this.metaFlushTimer) {
       clearTimeout(this.metaFlushTimer);
@@ -324,42 +352,61 @@ export class SessionStore {
     if (this.cachedMeta) await this.writeMeta(this.cachedMeta);
   }
 
-  // Flushes a pending debounced meta write and waits for in-flight writes to
-  // settle; call when the store is dropped so a clean exit keeps the trailing
-  // updatedAt bump.
   async close(): Promise<void> {
-    await this.flushMetaIfDirty();
-    await this.metaWriteQueue;
+    if (this.closed || this.closing) return;
+    this.closing = true;
+    try {
+      await this.messageWriteQueue;
+      await this.flushMetaIfDirty();
+      await this.metaWriteQueue;
+    } finally {
+      if (this.metaFlushTimer) clearTimeout(this.metaFlushTimer);
+      this.metaFlushTimer = null;
+      this.closed = true;
+      this.closing = false;
+      const lock = this.lock;
+      this.lock = null;
+      await lock?.release();
+    }
+  }
+
+  private assertCanWrite(): void {
+    if (this.closed || this.closing || !this.lock) {
+      throw new Error(`Session store is closed: ${this.id}`);
+    }
   }
 
   private async ensureInitialized(): Promise<void> {
     if (this.initialized) return;
-    const pending = this.pendingMeta;
-    if (!pending) {
+    if (this.initialization) return this.initialization;
+    this.initialization = (async () => {
+      const pending = this.pendingMeta;
+      if (!pending) {
+        this.initialized = true;
+        return;
+      }
+      await this.sweepTmpFiles();
+      const meta: SessionMeta = {
+        id: this.id,
+        title: "",
+        model: pending.model,
+        cwd: pending.cwd,
+        createdAt: pending.createdAt,
+        updatedAt: pending.createdAt,
+      };
+      await this.writeMeta(meta);
+      this.cachedMeta = meta;
+      this.metaLastFlushAt = Date.now();
       this.initialized = true;
-      return;
+    })();
+    try {
+      await this.initialization;
+    } catch (error) {
+      this.initialization = null;
+      throw error;
     }
-    // Session directories hold file contents (checkpoints); keep them private
-    // on shared machines. The mode is a no-op on Windows.
-    await fs.mkdir(this.dir, { recursive: true, mode: 0o700 });
-    await this.sweepTmpFiles();
-    const meta: SessionMeta = {
-      id: this.id,
-      title: "",
-      model: pending.model,
-      cwd: pending.cwd,
-      createdAt: pending.createdAt,
-      updatedAt: pending.createdAt,
-    };
-    await this.writeMeta(meta);
-    this.cachedMeta = meta;
-    this.metaLastFlushAt = Date.now();
-    this.initialized = true;
   }
 
-  // Removes tmp orphans left behind by crashed atomic writes (both meta.json
-  // and messages.jsonl write tmp file + rename); best-effort, the directory
-  // may not even exist yet.
   private async sweepTmpFiles(): Promise<void> {
     let entries: string[];
     try {
@@ -368,45 +415,44 @@ export class SessionStore {
       return;
     }
     await Promise.all(
-      entries
-        .filter(
-          (entry) => entry.startsWith("meta.json.tmp-") || entry.startsWith("messages.jsonl.tmp-"),
-        )
-        .map((entry) => fs.unlink(path.join(this.dir, entry)).catch(() => {})),
+      entries.map(async (entry) => {
+        const match = /^(?:meta\.json|messages\.jsonl)\.tmp-(\d+)-/.exec(entry);
+        if (!match) return;
+        const pid = Number(match[1]);
+        try {
+          process.kill(pid, 0);
+          return;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "EPERM") return;
+        }
+        await fs.unlink(path.join(this.dir, entry)).catch(() => {});
+      }),
     );
   }
 
-  async append(message: CoreMessage, meta?: MessageMeta): Promise<void> {
-    await this.ensureInitialized();
-    // Appends get the same transient-failure retries as meta writes, and a
-    // failure that outlasts them degrades to a warning instead of throwing:
-    // the agent loop awaits append without a catch, so one AV-locked file
-    // must not kill the whole turn. The message still lives in the loop's
-    // in-memory history and later appends keep working; only this line is
-    // missing from messages.jsonl after a resume.
-    try {
-      await withTransientFsRetry(() =>
-        fs.appendFile(this.messagesPath(), `${serializeMessage({ message, meta })}\n`),
-      );
-    } catch (error) {
-      warn(
-        `session ${this.id}: message append failed (${(error as NodeJS.ErrnoException).code ?? String(error)}), message kept in memory only`,
-      );
-    }
-    const sessionMeta = await this.meta();
-    sessionMeta.updatedAt = Date.now();
-    this.markMetaDirty();
+  private enqueueMessageWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.messageWriteQueue.then(operation);
+    this.messageWriteQueue = run.then(
+      () => {},
+      () => {},
+    );
+    return run;
   }
 
-  async replaceMessages(messages: readonly StarMessage[]): Promise<void> {
+  get persistenceDegraded(): boolean {
+    return this.degraded;
+  }
+
+  private async ensureMessageHistory(): Promise<StarMessage[]> {
+    if (!this.messageHistory) this.messageHistory = await this.readStarMessages(true);
+    return this.messageHistory;
+  }
+
+  private async rewriteMessages(messages: readonly StarMessage[]): Promise<boolean> {
     await this.ensureInitialized();
+    this.messageHistory = [...messages];
     const content = messages.map(serializeMessage).join("\n");
-    // tmp + rename like writeMeta: messages.jsonl is the session's only
-    // durable record, and a crash mid-writeFile must not leave it truncated.
-    // A rewrite that fails past its retries is dropped with a warning rather
-    // than thrown — the previous history stays intact on disk, which is the
-    // safer side to land on.
-    const tmp = `${this.messagesPath()}.tmp-${process.pid}-${this.messagesTmpSeq++}`;
+    const tmp = `${this.messagesPath()}.tmp-${process.pid}-${randomUUID()}`;
     try {
       await withTransientFsRetry(async () => {
         await fs.writeFile(tmp, content ? `${content}\n` : "");
@@ -414,13 +460,57 @@ export class SessionStore {
       });
     } catch (error) {
       await fs.unlink(tmp).catch(() => {});
+      this.degraded = true;
       warn(
         `session ${this.id}: history rewrite failed (${(error as NodeJS.ErrnoException).code ?? String(error)}), kept the previous messages.jsonl`,
       );
+      return false;
     }
+    this.degraded = false;
     const meta = await this.meta();
     meta.updatedAt = Date.now();
     await this.flushMetaNow();
+    return true;
+  }
+
+  async append(message: CoreMessage, meta?: MessageMeta): Promise<boolean> {
+    this.assertCanWrite();
+    return this.enqueueMessageWrite(async () => {
+      await this.ensureInitialized();
+      const history = await this.ensureMessageHistory();
+      const star = { message, meta };
+      if (this.degraded) return this.rewriteMessages([...history, star]);
+      try {
+        await withTransientFsRetry(() =>
+          fs.appendFile(this.messagesPath(), `${serializeMessage(star)}\n`),
+        );
+      } catch (error) {
+        this.messageHistory = [...history, star];
+        this.degraded = true;
+        warn(
+          `session ${this.id}: message append failed (${(error as NodeJS.ErrnoException).code ?? String(error)}), full history rewrite required`,
+        );
+        return false;
+      }
+      history.push(star);
+      const sessionMeta = await this.meta();
+      sessionMeta.updatedAt = Date.now();
+      this.markMetaDirty();
+      return true;
+    });
+  }
+
+  async replaceMessages(messages: readonly StarMessage[]): Promise<boolean> {
+    this.assertCanWrite();
+    return this.enqueueMessageWrite(() => this.rewriteMessages(messages));
+  }
+
+  async recoverMessages(): Promise<boolean> {
+    this.assertCanWrite();
+    return this.enqueueMessageWrite(async () => {
+      if (!this.degraded) return true;
+      return this.rewriteMessages(await this.ensureMessageHistory());
+    });
   }
 
   async messages(): Promise<CoreMessage[]> {
@@ -428,6 +518,10 @@ export class SessionStore {
   }
 
   async starMessages(): Promise<StarMessage[]> {
+    return this.readStarMessages(false);
+  }
+
+  private async readStarMessages(strict: boolean): Promise<StarMessage[]> {
     // Read in fixed-size chunks through a StringDecoder instead of buffering
     // the whole file: a resume used to hold the raw string, the split line
     // array and the parsed objects at once (3-4x the file size at peak). The
@@ -460,7 +554,8 @@ export class SessionStore {
       }
       pushLine(tail + decoder.end());
       return messages;
-    } catch {
+    } catch (error) {
+      if (strict && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       return [];
     } finally {
       await handle?.close().catch(() => {});
@@ -498,27 +593,36 @@ export class SessionStore {
   }
 
   async setTitle(title: string): Promise<void> {
-    await this.ensureInitialized();
-    const meta = await this.meta();
-    meta.title = title;
-    meta.updatedAt = Date.now();
-    await this.flushMetaNow();
+    this.assertCanWrite();
+    return this.enqueueMessageWrite(async () => {
+      await this.ensureInitialized();
+      const meta = await this.meta();
+      meta.title = title;
+      meta.updatedAt = Date.now();
+      await this.flushMetaNow();
+    });
   }
 
   // /model swaps the live loop mid-session; keep the recorded model in sync
   // or the session list and /usage attribute the whole session to whichever
   // model happened to be active at creation.
   async setModel(model: string): Promise<void> {
-    await this.ensureInitialized();
-    const meta = await this.meta();
-    meta.model = model;
-    meta.updatedAt = Date.now();
-    await this.flushMetaNow();
+    this.assertCanWrite();
+    return this.enqueueMessageWrite(async () => {
+      await this.ensureInitialized();
+      const meta = await this.meta();
+      meta.model = model;
+      meta.updatedAt = Date.now();
+      await this.flushMetaNow();
+    });
   }
 
   async appendCheckpoint(record: CheckpointRecord, content: string | Buffer | null): Promise<void> {
-    await this.ensureInitialized();
-    await appendCheckpointRecord(this.dir, record, content);
+    this.assertCanWrite();
+    return this.enqueueMessageWrite(async () => {
+      await this.ensureInitialized();
+      await appendCheckpointRecord(this.dir, record, content);
+    });
   }
 
   async listCheckpoints(): Promise<CheckpointRecord[]> {
@@ -526,43 +630,70 @@ export class SessionStore {
   }
 
   async removeCheckpoints(ids: number[]): Promise<void> {
-    await removeCheckpointRecords(this.dir, ids);
+    this.assertCanWrite();
+    return this.enqueueMessageWrite(() => removeCheckpointRecords(this.dir, ids));
   }
 
-  async addUsage(delta: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-    cachedPromptTokens?: number;
-    cacheReadInputTokens?: number;
-  }): Promise<void> {
-    await this.ensureInitialized();
-    const meta = await this.meta();
-    const usage = meta.usage ?? {
-      requests: 0,
-      promptTokens: 0,
-      completionTokens: 0,
-      totalTokens: 0,
-    };
-    usage.requests += 1;
-    usage.promptTokens += delta.promptTokens;
-    usage.completionTokens += delta.completionTokens;
-    usage.totalTokens += delta.totalTokens;
-    if (delta.cachedPromptTokens) {
-      usage.cachedPromptTokens = (usage.cachedPromptTokens ?? 0) + delta.cachedPromptTokens;
-    }
-    if (delta.cacheReadInputTokens) {
-      usage.cacheReadInputTokens = (usage.cacheReadInputTokens ?? 0) + delta.cacheReadInputTokens;
-    }
-    meta.usage = usage;
-    const day = dayKey(new Date());
-    const byDay = meta.usageByDay ?? {};
-    const bucket = byDay[day] ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
-    bucket.promptTokens += delta.promptTokens;
-    bucket.completionTokens += delta.completionTokens;
-    bucket.totalTokens += delta.totalTokens;
-    byDay[day] = bucket;
-    meta.usageByDay = byDay;
-    await this.flushMetaNow();
+  async addUsage(
+    delta: {
+      promptTokens: number;
+      completionTokens: number;
+      totalTokens: number;
+      cachedPromptTokens?: number;
+      cacheReadInputTokens?: number;
+    },
+    attribution?: UsageAttribution,
+  ): Promise<void> {
+    this.assertCanWrite();
+    return this.enqueueMessageWrite(async () => {
+      await this.ensureInitialized();
+      const meta = await this.meta();
+      const apply = (usage: SessionUsage) => {
+        usage.requests += 1;
+        usage.promptTokens += delta.promptTokens;
+        usage.completionTokens += delta.completionTokens;
+        usage.totalTokens += delta.totalTokens;
+        if (delta.cachedPromptTokens) {
+          usage.cachedPromptTokens = (usage.cachedPromptTokens ?? 0) + delta.cachedPromptTokens;
+        }
+        if (delta.cacheReadInputTokens) {
+          usage.cacheReadInputTokens =
+            (usage.cacheReadInputTokens ?? 0) + delta.cacheReadInputTokens;
+        }
+        if (attribution) {
+          if (attribution.costUsd === null) usage.costUnknown = true;
+          else usage.costUsd = (usage.costUsd ?? 0) + attribution.costUsd;
+        }
+      };
+      const usage = meta.usage ?? {
+        requests: 0,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+      };
+      apply(usage);
+      meta.usage = usage;
+      if (attribution) {
+        const byModel = meta.usageByModel ?? {};
+        const modelUsage = byModel[attribution.modelName] ?? {
+          requests: 0,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+        };
+        apply(modelUsage);
+        byModel[attribution.modelName] = modelUsage;
+        meta.usageByModel = byModel;
+      }
+      const day = dayKey(new Date());
+      const byDay = meta.usageByDay ?? {};
+      const bucket = byDay[day] ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+      bucket.promptTokens += delta.promptTokens;
+      bucket.completionTokens += delta.completionTokens;
+      bucket.totalTokens += delta.totalTokens;
+      byDay[day] = bucket;
+      meta.usageByDay = byDay;
+      await this.flushMetaNow();
+    });
   }
 }

@@ -1,40 +1,83 @@
 import { Box, Text } from "ink";
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 
 import { formatTokens } from "../cost";
 import { formatElapsedSeconds } from "../format";
 import { thinkingIcon } from "../icons";
-import { startTicker } from "../ticker";
+import { isMotionDisabled, startTicker } from "../ticker";
 
 export const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 export const REASONING_TAIL_LENGTH = 200;
 export const THOUGHT_SUMMARY_LENGTH = 100;
 
-export function truncateTail(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, " ").trim();
-  if (flat.length <= max) return flat;
-  return `…${flat.slice(flat.length - max)}`;
+export interface ReasoningDisplayCache {
+  max: number;
+  text: string;
+  weight: number;
+  flatLength: number;
+  flatTail: string;
+  hasContent: boolean;
+  pendingSpace: boolean;
 }
 
-// Rough CJK-aware chars→tokens estimate for the live thinking counter: the
-// real BPE encoder is too heavy to run on a growing reasoning string every
-// 100ms tick, so this mirrors the fallback rule in context/tokens.ts (CJK
-// char ≈ 1 token, Latin ≈ 4 chars/token). Display-only; the provider's
-// reported usage owns billing.
-function roughReasoningTokens(text: string): number {
-  let weight = 0;
-  for (let i = 0; i < text.length; i++) {
-    const code = text.charCodeAt(i);
-    weight +=
-      (code >= 0x3000 && code <= 0x30ff) ||
-      (code >= 0x3400 && code <= 0x4dbf) ||
-      (code >= 0x4e00 && code <= 0x9fff) ||
-      (code >= 0xf900 && code <= 0xfaff) ||
-      (code >= 0xff00 && code <= 0xffef)
-        ? 4
-        : 1;
+export function createReasoningDisplayCache(max = REASONING_TAIL_LENGTH): ReasoningDisplayCache {
+  return {
+    max,
+    text: "",
+    weight: 0,
+    flatLength: 0,
+    flatTail: "",
+    hasContent: false,
+    pendingSpace: false,
+  };
+}
+
+function appendFlat(cache: ReasoningDisplayCache, text: string): void {
+  cache.flatLength += 1;
+  cache.flatTail = `${cache.flatTail}${text}`.slice(-cache.max);
+}
+
+export function updateReasoningDisplay(cache: ReasoningDisplayCache, text: string) {
+  if (text !== cache.text) {
+    if (!text.startsWith(cache.text)) {
+      cache.text = "";
+      cache.weight = 0;
+      cache.flatLength = 0;
+      cache.flatTail = "";
+      cache.hasContent = false;
+      cache.pendingSpace = false;
+    }
+    const appended = text.slice(cache.text.length);
+    for (let i = 0; i < appended.length; i++) {
+      const ch = appended[i] ?? "";
+      const code = ch.charCodeAt(0);
+      cache.weight +=
+        (code >= 0x3000 && code <= 0x30ff) ||
+        (code >= 0x3400 && code <= 0x4dbf) ||
+        (code >= 0x4e00 && code <= 0x9fff) ||
+        (code >= 0xf900 && code <= 0xfaff) ||
+        (code >= 0xff00 && code <= 0xffef)
+          ? 4
+          : 1;
+      if (/\s/.test(ch)) {
+        cache.pendingSpace = cache.hasContent;
+      } else {
+        if (cache.pendingSpace) appendFlat(cache, " ");
+        appendFlat(cache, ch);
+        cache.hasContent = true;
+        cache.pendingSpace = false;
+      }
+    }
+    cache.text = text;
   }
-  return Math.ceil(weight / 4);
+  return {
+    tail: cache.flatLength <= cache.max ? cache.flatTail : `…${cache.flatTail}`,
+    thoughtTokens: Math.ceil(cache.weight / 4),
+  };
+}
+
+export function truncateTail(text: string, max: number): string {
+  return updateReasoningDisplay(createReasoningDisplayCache(max), text).tail;
 }
 
 // The spinner animates from the component's own ticker (see cli/ticker.ts):
@@ -51,8 +94,13 @@ export const ThinkingIndicator = memo(function ThinkingIndicator({
   startedAt,
 }: { reasoning?: string; frame?: number; activity?: string; startedAt?: number }) {
   const [tick, setTick] = useState(0);
-  useEffect(() => startTicker((t) => setTick(t)), []);
-  const tail = reasoning ? truncateTail(reasoning, REASONING_TAIL_LENGTH) : "";
+  const noMotion = isMotionDisabled();
+  useEffect(() => {
+    if (noMotion) return;
+    return startTicker((t) => setTick(t));
+  }, [noMotion]);
+  const cacheRef = useRef(createReasoningDisplayCache());
+  const display = updateReasoningDisplay(cacheRef.current, reasoning ?? "");
   const spinner = SPINNER_FRAMES[(frame ?? tick) % SPINNER_FRAMES.length];
   // Tool-running activities carry their own per-tool icon in the label
   // (see repl.tsx), so the 💭 prefix only applies while thinking.
@@ -64,8 +112,7 @@ export const ThinkingIndicator = memo(function ThinkingIndicator({
     startedAt === undefined ? undefined : Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
   const stats: string[] = [];
   if (elapsedSec !== undefined && elapsedSec >= 3) stats.push(formatElapsedSeconds(elapsedSec));
-  const thoughtTokens = reasoning ? roughReasoningTokens(reasoning) : 0;
-  if (thoughtTokens > 0) stats.push(`~${formatTokens(thoughtTokens)} thought`);
+  if (display.thoughtTokens > 0) stats.push(`~${formatTokens(display.thoughtTokens)} thought`);
   const status = stats.length > 0 ? ` (${stats.join(" · ")})` : "";
   return (
     <Box flexDirection="column">
@@ -73,10 +120,10 @@ export const ThinkingIndicator = memo(function ThinkingIndicator({
         {spinner} {label}
         {status}
       </Text>
-      {tail !== "" && (
+      {display.tail !== "" && (
         <Text dimColor>
           {"   "}
-          {tail}
+          {display.tail}
         </Text>
       )}
     </Box>

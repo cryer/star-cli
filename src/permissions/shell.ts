@@ -274,9 +274,12 @@ export function splitShellSegments(tokens: ShellToken[]): ShellToken[][] {
   return segments;
 }
 
+export const DYNAMIC_SHELL_WORD = "\0star-dynamic-word\0";
+
 // Extracts the plain words of a segment, dropping redirection operators and
-// their targets (collected in `redirectTargets`). Substitution tokens are
-// skipped — callers analyze them separately.
+// their targets (collected in `redirectTargets`). Substitutions retain an
+// unforgeable placeholder so target-sensitive checks can fail closed instead
+// of accidentally dropping the operand altogether.
 export function segmentWords(segment: ShellToken[]): {
   words: string[];
   redirectTargets: string[];
@@ -290,11 +293,16 @@ export function segmentWords(segment: ShellToken[]): {
       if (target?.kind === "word") {
         redirectTargets.push(target.text);
         k += 1;
+      } else if (target?.kind === "subst") {
+        redirectTargets.push(DYNAMIC_SHELL_WORD);
+        k += 1;
       }
       continue;
     }
     if (token.kind === "word") {
       words.push(token.text);
+    } else if (token.kind === "subst") {
+      words.push(DYNAMIC_SHELL_WORD);
     }
   }
   return { words, redirectTargets };

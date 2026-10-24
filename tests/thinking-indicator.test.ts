@@ -6,9 +6,13 @@ import { renderApp, stripAnsi, tick } from "./ink-harness";
 vi.stubEnv("STAR_ICONS", "plain");
 
 // Dynamic import so ./ink-harness sets FORCE_COLOR before ink is loaded.
-const { ThinkingIndicator, SPINNER_FRAMES, truncateTail } = await import(
-  "../src/cli/components/ThinkingIndicator"
-);
+const {
+  ThinkingIndicator,
+  SPINNER_FRAMES,
+  createReasoningDisplayCache,
+  truncateTail,
+  updateReasoningDisplay,
+} = await import("../src/cli/components/ThinkingIndicator");
 
 describe("truncateTail", () => {
   it("keeps short text unchanged", () => {
@@ -29,6 +33,20 @@ describe("truncateTail", () => {
 
   it("returns an empty string for empty input", () => {
     expect(truncateTail("", 200)).toBe("");
+  });
+
+  it("incrementally preserves tail and token semantics for append-only reasoning", () => {
+    const cache = createReasoningDisplayCache(20);
+    let text = "";
+    for (const chunk of ["  first", "\n\nsecond  ", " third", " 想", " last   "]) {
+      text += chunk;
+      const incremental = updateReasoningDisplay(cache, text);
+      expect(incremental.tail).toBe(truncateTail(text, 20));
+      expect(incremental.thoughtTokens).toBe(
+        updateReasoningDisplay(createReasoningDisplayCache(20), text).thoughtTokens,
+      );
+      expect(updateReasoningDisplay(cache, text)).toEqual(incremental);
+    }
   });
 });
 
@@ -99,5 +117,16 @@ describe("ThinkingIndicator", () => {
     expect(frame).toContain("5s");
     expect(frame).toContain("~100 thought");
     app.unmount();
+  });
+
+  it("keeps the spinner static when STAR_NO_MOTION=1", async () => {
+    vi.stubEnv("STAR_NO_MOTION", "1");
+    const app = renderApp(createElement(ThinkingIndicator, {}));
+    await tick();
+    const first = app.lastFrame();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(app.lastFrame()).toBe(first);
+    app.unmount();
+    vi.stubEnv("STAR_NO_MOTION", "");
   });
 });

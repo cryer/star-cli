@@ -28,9 +28,8 @@ export const writeFileTool: Tool<typeof schema> = {
       return { content: `Refused to write sensitive file: ${args.path}`, isError: true };
     }
     // write_file writes UTF-8 text: NUL bytes mean the model is pushing
-    // binary content that would land corrupted, and past the snapshot cap
-    // /undo keeps only metadata, so the overwritten file would be
-    // unrecoverable — same limits as edit_file.
+    // binary content that would land corrupted. The size limit matches
+    // edit_file and keeps snapshots bounded.
     if (args.content.includes("\0")) {
       return {
         content: `Refused to write ${args.path}: content contains NUL bytes (write_file is text-only)`,
@@ -45,6 +44,15 @@ export const writeFileTool: Tool<typeof schema> = {
       };
     }
     const snapshot = await captureSnapshot(filePath, "write_file", ctx.snapshotContext);
+    if (snapshot.existed && snapshot.content === null) {
+      const reason = snapshot.contentTooLarge
+        ? "existing content is over the 5MB snapshot limit"
+        : "existing content could not be read";
+      return {
+        content: `Refused to overwrite ${args.path}: ${reason}, and no restorable snapshot is available`,
+        isError: true,
+      };
+    }
     try {
       await mkdir(path.dirname(filePath), { recursive: true });
       await writeFile(filePath, args.content, "utf8");

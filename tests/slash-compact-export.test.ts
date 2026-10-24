@@ -110,7 +110,9 @@ describe("slash /compact and /export", () => {
       expect(result.compacted).toBe(false);
       expect(result.message).toContain("Nothing to compact");
       expect(loop.getMessages()).toHaveLength(2);
-      expect(fs.existsSync(store.dir)).toBe(false);
+      expect(fs.existsSync(store.dir)).toBe(true);
+      expect(fs.existsSync(path.join(store.dir, "meta.json"))).toBe(false);
+      expect(fs.existsSync(path.join(store.dir, "messages.jsonl"))).toBe(false);
     });
 
     it("compacts even when history is below the token threshold", async () => {

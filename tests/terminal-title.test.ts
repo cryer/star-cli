@@ -61,6 +61,21 @@ describe("TerminalTitle", () => {
     expect(writes[writes.length - 1]).toBe("\x1b]0;star-cli — proj\x07");
   });
 
+  it("keeps a static title when STAR_NO_MOTION=1", () => {
+    vi.useFakeTimers();
+    const { writes, write } = collector();
+    const title = TerminalTitle.forCwd("/work/proj", {
+      write,
+      isTTY: true,
+      env: { STAR_NO_MOTION: "1" },
+    });
+    title.start();
+    expect(writes).toEqual(["\x1b]0;⠋ star-cli — proj\x07"]);
+    vi.advanceTimersByTime(1000);
+    expect(writes).toHaveLength(1);
+    title.stop("idle");
+  });
+
   it("does not start a second interval when already running", () => {
     vi.useFakeTimers();
     const { writes, write } = collector();

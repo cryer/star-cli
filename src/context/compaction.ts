@@ -1,6 +1,8 @@
 import { type LanguageModelV1, generateText } from "ai";
+import type { TokenUsage } from "../core/events";
 import { type CoreMessage, type StarMessage, isSyntheticUserMessage } from "../core/messages";
-import { estimateMessageTokens } from "./tokens";
+import { emergencyElideContent } from "./elision";
+import { estimateMessageTokens, estimateTokens } from "./tokens";
 
 export interface CompactionResult {
   messages: StarMessage[];
@@ -117,13 +119,15 @@ export async function summarizeMessages(
   // The calling model's configured sampling temperature, forwarded so
   // endpoints that mandate one explicit value don't reject the summary call.
   temperature?: number,
+  onUsage?: (usage: TokenUsage) => void,
 ): Promise<string> {
   const transcript = serializeSummaryInput(messages);
-  const { text } = await generateText({
+  const { text, usage } = await generateText({
     model,
     system: SUMMARY_SYSTEM_PROMPT,
     prompt: `Summarize this conversation so far:\n\n${transcript}`,
     temperature,
+    maxRetries: 0,
     // A hung relay must not stall the whole turn on the summary: cap it at
     // 60s and let the caller's abort (Esc) cut it short as well; the caller
     // falls back to the truncation placeholder on any failure.
@@ -131,6 +135,7 @@ export async function summarizeMessages(
       ? AbortSignal.any([signal, AbortSignal.timeout(60_000)])
       : AbortSignal.timeout(60_000),
   });
+  onUsage?.(usage);
   return text.trim();
 }
 
@@ -230,4 +235,34 @@ export function compactMessages(
     compacted: true,
     droppedCount,
   };
+}
+
+export interface EmergencyCompactionResult extends CompactionResult {
+  elidedCount: number;
+  estimatedTokens: number;
+  withinBudget: boolean;
+}
+
+// Convenience composition for callers that want normal whole-turn compaction
+// followed by in-place emergency reduction when the retained recent messages
+// still exceed the budget. Forced compaction keeps its existing semantics.
+export function emergencyCompactMessages(
+  messages: readonly StarMessage[],
+  maxTokens: number,
+  opts: CompactOptions = {},
+): EmergencyCompactionResult {
+  const compacted = compactMessages(messages, maxTokens, opts);
+  const overhead = opts.overheadTokens ?? 0;
+  if (opts.force) {
+    const estimatedTokens =
+      overhead + estimateTokens(compacted.messages.map((star) => star.message));
+    return {
+      ...compacted,
+      elidedCount: 0,
+      estimatedTokens,
+      withinBudget: estimatedTokens <= maxTokens,
+    };
+  }
+  const emergency = emergencyElideContent(compacted.messages, maxTokens, overhead);
+  return { ...compacted, ...emergency };
 }

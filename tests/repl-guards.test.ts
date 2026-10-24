@@ -248,6 +248,7 @@ describe("REPL turn guards", () => {
     const oldStore = await SessionStore.create(cwd, "test");
     const targetStore = await SessionStore.create(cwd, "test");
     await targetStore.append({ role: "user", content: "from target session" });
+    await targetStore.close();
     const model = new MockLanguageModelV1({
       doStream: async () => ({
         stream: convertArrayToReadableStream([

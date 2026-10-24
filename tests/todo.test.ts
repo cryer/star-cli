@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -261,6 +261,49 @@ describe("per-store todo tools", () => {
     const tool = registry.get("todo_write");
     await tool?.execute({ todos: sample }, ctx);
     expect(store.list()).toEqual(sample);
+  });
+});
+
+describe("TodoStore persistence", () => {
+  it("supports memory-only stores without reading or writing project todos", async () => {
+    const memoryDir = await mkdtemp(path.join(tmpdir(), "star-todo-memory-"));
+    try {
+      await mkdir(path.join(memoryDir, ".star"), { recursive: true });
+      const file = path.join(memoryDir, ".star", "todos.json");
+      const onDisk = [{ id: 99, title: "on disk", status: "pending" as const }];
+      await writeFile(file, `${JSON.stringify({ sessionId: null, items: onDisk })}\n`);
+      const memory = new TodoStore({ persistence: "memory" });
+      await memory.load(memoryDir);
+      expect(memory.list()).toEqual([]);
+
+      memory.replace(sample);
+      await memory.save(memoryDir);
+      expect(memory.list()).toEqual(sample);
+      expect(JSON.parse(await readFile(file, "utf8")).items).toEqual(onDisk);
+      expect(await readdir(path.join(memoryDir, ".star"))).toEqual(["todos.json"]);
+    } finally {
+      await rm(memoryDir, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes concurrent root saves and leaves no temporary files", async () => {
+    const concurrentDir = await mkdtemp(path.join(tmpdir(), "star-todo-concurrent-"));
+    try {
+      const concurrent = new TodoStore();
+      const saves: Promise<void>[] = [];
+      for (let i = 0; i < 20; i++) {
+        concurrent.replace([{ id: 1, title: `version ${i}`, status: "pending" }]);
+        saves.push(concurrent.save(concurrentDir));
+      }
+      await Promise.all(saves);
+
+      const starDir = path.join(concurrentDir, ".star");
+      expect(await readdir(starDir)).toEqual(["todos.json"]);
+      const persisted = JSON.parse(await readFile(path.join(starDir, "todos.json"), "utf8"));
+      expect(persisted.items).toEqual([{ id: 1, title: "version 19", status: "pending" }]);
+    } finally {
+      await rm(concurrentDir, { recursive: true, force: true });
+    }
   });
 });
 

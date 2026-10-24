@@ -7,7 +7,7 @@ const { DiffLines } = await import("../src/cli/components/DiffLines");
 const { MessageList } = await import("../src/cli/components/MessageList");
 const { PermissionPrompt } = await import("../src/cli/components/PermissionPrompt");
 const { RewindConfirmPrompt } = await import("../src/cli/components/RewindConfirmPrompt");
-const { StatusBar } = await import("../src/cli/components/StatusBar");
+const { StatusBar, fitStatusSegments } = await import("../src/cli/components/StatusBar");
 const { StreamingMessage } = await import("../src/cli/components/StreamingMessage");
 const { ThinkingIndicator } = await import("../src/cli/components/ThinkingIndicator");
 
@@ -125,6 +125,17 @@ describe("StatusBar background tasks", () => {
     expect(frame).not.toContain("渲染管线");
     expect(frame.trim().split("\n").length).toBe(1);
     app.unmount();
+  });
+
+  it("shares a narrow width budget across every segment", () => {
+    const fitted = fitStatusSegments(
+      [`cwd-${"x".repeat(40)}`, `model-${"y".repeat(40)}`, `mode-${"z".repeat(40)}`],
+      30,
+    );
+    expect(fitted).toHaveLength(3);
+    expect(fitted.every((segment: string) => segment.endsWith("…"))).toBe(true);
+    expect(fitted.join(" ").length).toBeLessThanOrEqual(30);
+    expect(fitStatusSegments(["a\rb", "c\td"], 20)).toEqual(["ab", "c  d"]);
   });
 });
 

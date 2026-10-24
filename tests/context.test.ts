@@ -3,9 +3,12 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
   compactMessages,
+  emergencyCompactMessages,
   serializeSummaryInput,
   truncateSummaryInput,
 } from "../src/context/compaction";
+import { ELIDED_TOOL_RESULT_TEXT } from "../src/context/elision";
+import { IncrementalTokenSummary } from "../src/context/token-summary";
 import {
   estimateMessageTokens,
   estimateTokens,
@@ -89,6 +92,38 @@ describe("estimateTokens", () => {
     // tokens, cl100k says 13 — code and JSON systematically under-read.
     const json = '{"path":"/a","line":1,"ok":true}';
     expect(estimateMessageTokens(user(json)) - 4).toBeGreaterThan(Math.ceil(json.length / 4));
+  });
+});
+
+describe("IncrementalTokenSummary", () => {
+  it("matches a full estimate as messages are appended", () => {
+    const messages = [system("sys"), user("hello"), toolResult("c1", pad(400))];
+    const summary = new IncrementalTokenSummary();
+    for (const message of messages) summary.append(message);
+    expect(summary.messageCount).toBe(messages.length);
+    expect(summary.messageTokens).toBe(estimateTokens(messages));
+    expect(summary.totalTokens).toBe(estimateTokens(messages));
+  });
+
+  it("tracks fixed overhead without recounting messages", () => {
+    const messages = [user("hello"), assistant("hi")];
+    const summary = new IncrementalTokenSummary(messages, 50);
+    expect(summary.totalTokens).toBe(estimateTokens(messages) + 50);
+    expect(summary.overheadTokens).toBe(50);
+    summary.setOverheadTokens(100);
+    expect(summary.messageTokens).toBe(estimateTokens(messages));
+    expect(summary.totalTokens).toBe(estimateTokens(messages) + 100);
+  });
+
+  it("resets after a wholesale history rewrite and can start empty", () => {
+    const summary = new IncrementalTokenSummary([user(pad(400)), assistant(pad(400))], 10);
+    const replacement = [user("short")];
+    summary.reset(replacement);
+    expect(summary.messageCount).toBe(1);
+    expect(summary.totalTokens).toBe(estimateTokens(replacement) + 10);
+    summary.reset([], 0);
+    expect(summary.messageCount).toBe(0);
+    expect(summary.totalTokens).toBe(0);
   });
 });
 
@@ -317,6 +352,57 @@ describe("compactMessages", () => {
     expect(result.compacted).toBe(true);
     expect(result.droppedCount).toBe(2);
     expect(core(result.messages.slice(-4))).toEqual(messages.slice(-4));
+  });
+});
+
+describe("emergencyCompactMessages", () => {
+  it("continues with in-place reduction when normal compaction must retain recent messages", () => {
+    const messages = star([
+      system("sys"),
+      user("keep this request"),
+      toolCallAssistant("c1", { path: "a.ts" }),
+      toolResult("c1", pad(4000)),
+      assistant("working"),
+    ]);
+    const normal = compactMessages(messages, 120);
+    expect(normal.droppedCount).toBe(0);
+    const result = emergencyCompactMessages(messages, 120);
+    expect(result.withinBudget).toBe(true);
+    expect(result.elidedCount).toBeGreaterThan(0);
+    expect(result.messages).toHaveLength(messages.length);
+    expect(result.messages[1]?.message).toEqual(user("keep this request"));
+    const tool = result.messages[3]?.message;
+    if (tool?.role === "tool") {
+      expect(tool.content[0]?.toolCallId).toBe("c1");
+      expect(tool.content[0]?.result).toBe(ELIDED_TOOL_RESULT_TEXT);
+    } else {
+      throw new Error("expected retained tool result");
+    }
+  });
+
+  it("does not invoke emergency elision when ordinary compaction is enough", () => {
+    const messages = star([system("sys"), user("hello"), assistant("hi")]);
+    const result = emergencyCompactMessages(messages, 1000);
+    expect(result).toMatchObject({
+      compacted: false,
+      droppedCount: 0,
+      elidedCount: 0,
+      withinBudget: true,
+    });
+    expect(core(result.messages)).toEqual(core(messages));
+  });
+
+  it("preserves force compaction semantics without erasing retained content", () => {
+    const messages = star([
+      user("old"),
+      assistant("old answer"),
+      user("new"),
+      assistant("new answer"),
+    ]);
+    const result = emergencyCompactMessages(messages, 1, { force: true });
+    expect(result.droppedCount).toBe(2);
+    expect(result.elidedCount).toBe(0);
+    expect(core(result.messages.slice(-2))).toEqual([user("new"), assistant("new answer")]);
   });
 });
 

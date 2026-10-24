@@ -176,7 +176,7 @@ describe("AgentLoop compaction summary", () => {
     return new AgentLoop({
       model,
       registry: createDefaultRegistry(),
-      config: makeConfig({ contextMaxTokens: 90, ...configOverrides }),
+      config: makeConfig({ compactThresholdTokens: 90, ...configOverrides }),
       cwd,
     });
   }
@@ -231,7 +231,7 @@ describe("AgentLoop compaction summary", () => {
         doGenerate: generateRound("SUMMARY TEXT"),
         doStream: textStream("ok"),
       }),
-      { contextMaxTokens: 100_000 },
+      { contextMaxTokens: 100_000, compactThresholdTokens: undefined },
     );
     await loadLongHistory(loop);
 

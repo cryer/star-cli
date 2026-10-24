@@ -1,8 +1,13 @@
 import { type LanguageModel, tool as aiTool, generateText } from "ai";
 import { type StarConfig, resolveCompactThreshold } from "../config/schema";
 import { type CompactionResult, compactMessages, summarizeMessages } from "../context/compaction";
-import { elideStaleContent } from "../context/elision";
-import { estimateTokens, estimateToolSchemaTokens, roughTextTokens } from "../context/tokens";
+import { elideStaleContent, emergencyElideContent } from "../context/elision";
+import {
+  estimateMessageTokens,
+  estimateToolSchemaTokens,
+  roughTextTokens,
+} from "../context/tokens";
+import { computeCostUsd } from "../core/cost";
 import {
   type StreamErrorInfo,
   type StreamEvent,
@@ -54,7 +59,7 @@ import type { ToolResult } from "../tools/types";
 import { defaultAgentTasks } from "./agent-tasks";
 import { readProjectMemory } from "./project-memory";
 import { createSkillTool, discoverSkills, formatSkillsBlock } from "./skills";
-import { MAX_SUBAGENT_DEPTH, convertUsagePricing, createSubagentTool } from "./subagent";
+import { MAX_SUBAGENT_DEPTH, createSubagentTool } from "./subagent";
 import { createRememberTool, readUserMemory } from "./user-memory";
 
 export interface AgentLoopOptions {
@@ -67,6 +72,7 @@ export interface AgentLoopOptions {
   // Effective context window for compaction (per-model override resolved by
   // the caller); falls back to config.contextMaxTokens when omitted.
   contextMaxTokens?: number;
+  maxTokens?: number;
   // Per-call provider metadata (e.g. the model's reasoningEffort), resolved
   // by the caller via llm/provider.ts reasoningEffortMetadata.
   providerMetadata?: Record<string, Record<string, unknown>>;
@@ -219,17 +225,20 @@ async function checkTaskComplete(
   model: LanguageModel,
   request: string,
   finalReply: string,
+  toolSummary: string,
   signal: AbortSignal,
-  temperature?: number,
+  temperature: number | undefined,
+  onUsage: (usage: TokenUsage) => void,
 ): Promise<boolean | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), COMPLETION_CHECK_TIMEOUT_MS);
   const onAbort = () => controller.abort();
   signal.addEventListener("abort", onAbort, { once: true });
   try {
-    const { text } = await generateText({
+    const { text, usage } = await generateText({
       model,
       maxTokens: 8,
+      maxRetries: 0,
       temperature,
       abortSignal: controller.signal,
       prompt: [
@@ -237,9 +246,12 @@ async function checkTaskComplete(
         `<task>\n${request.slice(0, 2000)}\n</task>`,
         "The agent has stopped calling tools and ended with this reply:",
         `<reply>\n${finalReply.slice(0, 2000)}\n</reply>`,
-        "Has the agent fully completed the task — every requested action actually performed, and the result verified by running a check (tests, build, or inspecting the produced output) rather than assumed? For a task that changed code, completion also requires tests covering the change when the project has a test setup, and a test run that actually passed — a reply that claims success without an observed green check is not complete. Or is it only describing, planning, or reporting progress with work still left? Answer with exactly one word: DONE or NOT_DONE.",
+        "These are the actual tool outcomes, including failures:",
+        `<tool-outcomes>\n${toolSummary.slice(0, 6000)}\n</tool-outcomes>`,
+        "Has the agent fully completed the task — every requested action actually performed, and the result verified by running a check (tests, build, or inspecting the produced output) rather than assumed? Failed tools and missing verification mean the work is not complete even when the reply claims success. For a task that changed code, completion also requires tests covering the change when the project has a test setup, and a test run that actually passed. Or is it only describing, planning, or reporting progress with work still left? Answer with exactly one word: DONE or NOT_DONE.",
       ].join("\n"),
     });
+    onUsage(usage);
     const verdict = text.trim().toUpperCase();
     if (verdict.startsWith("NOT_DONE")) return false;
     if (verdict.startsWith("DONE")) return true;
@@ -319,15 +331,6 @@ export class AgentLoop {
   // each new user turn restarts the streak.
   private lastToolSignature: string | null = null;
   private repeatedToolCalls = 0;
-  // Token usage subagents consumed, waiting to fold into this loop's next
-  // finish event with usage: sync children report when their tool call
-  // settles, background ones whenever they finish (drained or not).
-  // Consumers meter only root-loop finish events, so folding here bills
-  // subagent spend with zero consumer changes — /cost, /usage and
-  // sessionBudgetUsd all cover it. A background child still running when the
-  // session's last finish has passed never reports (best effort, noted in
-  // agent-tasks cleanup paths).
-  private subagentUsage: TokenUsage | null = null;
   // Turn context of the in-flight stream() turn, stamped onto every tool
   // execution so file snapshots attribute root changes to a turn and mark
   // subagent changes as excluded from turn-level retraction.
@@ -350,6 +353,11 @@ export class AgentLoop {
     length: number;
     context: string | null;
     result: CoreMessage[];
+  } | null = null;
+  private historyTokenSnapshot: {
+    source: readonly StarMessage[];
+    length: number;
+    total: number;
   } | null = null;
   // Memoized per (registry, plan flag): tools register on the registry only
   // at loop construction, and the plan filter re-reads the live permission
@@ -398,6 +406,7 @@ export class AgentLoop {
   // their stderr surfaces through this callback (REPL system message / stderr
   // in print mode).
   onHookWarning?: (message: string) => void;
+  onUsage?: (usage: TokenUsage, modelName: string, costUsd: number | null) => void;
 
   constructor(opts: AgentLoopOptions) {
     this.opts = opts;
@@ -406,10 +415,10 @@ export class AgentLoop {
       // Subagent todo isolation: the default registry wires the todo tools to
       // a process-wide store, so a child's todo_write would clobber the root
       // session's list (and the REPL panel mirroring it). The child gets a
-      // fresh registry backed by its own store — the registry a caller hands
+      // fresh registry backed by its own memory-only store — the registry a caller hands
       // to a subagent loop is always a freshly created default one (see
       // runSubagent), so replacing it loses nothing.
-      opts.registry = new ToolRegistry(new TodoStore());
+      opts.registry = new ToolRegistry(new TodoStore({ persistence: "memory" }));
     } else {
       // Root only: todo persistence follows the permission mode, so
       // readonly/plan sessions never touch .star/todos.json. The mode can
@@ -433,6 +442,7 @@ export class AgentLoop {
     // applies in ask mode; available at every subagent depth.
     opts.registry?.register(createRememberTool());
     if (opts.registry && depth < MAX_SUBAGENT_DEPTH) {
+      const subagentSessionStore = opts.sessionStore;
       opts.registry.register(
         createSubagentTool({
           model: opts.model,
@@ -441,14 +451,15 @@ export class AgentLoop {
           system: opts.system,
           providerMetadata: opts.providerMetadata,
           temperature: opts.temperature,
+          maxTokens: opts.maxTokens,
           streamIdleTimeoutSec: opts.streamIdleTimeoutSec,
           streamFirstChunkTimeoutSec: opts.streamFirstChunkTimeoutSec,
           vision: opts.vision,
           depth,
           modelName: opts.modelName,
           getConfirmHandler: () => this.confirmHandler,
-          onUsage: (usage, childModel, childModelName) =>
-            this.addSubagentUsage(usage, childModel, childModelName),
+          onUsage: (usage, _childModel, childModelName) =>
+            this.recordUsage(usage, childModelName, subagentSessionStore),
         }),
       );
     }
@@ -527,9 +538,27 @@ export class AgentLoop {
   // budgets deliberately use only the first three (history + schemas +
   // calibration), since in-flight reasoning is never resent and must not
   // trigger a compaction the next request won't need.
+  private historyTokens(): number {
+    const cached = this.historyTokenSnapshot;
+    if (cached?.source === this.messages && cached.length === this.messages.length) {
+      return cached.total;
+    }
+    let total = 0;
+    let start = 0;
+    if (cached?.source === this.messages && cached.length < this.messages.length) {
+      total = cached.total;
+      start = cached.length;
+    }
+    for (let i = start; i < this.messages.length; i++) {
+      total += estimateMessageTokens(this.messages[i]?.message ?? { role: "user", content: "" });
+    }
+    this.historyTokenSnapshot = { source: this.messages, length: this.messages.length, total };
+    return total;
+  }
+
   estimateContextTokens(): number {
     return (
-      estimateTokens(this.getMessages()) +
+      this.historyTokens() +
       this.getToolSchemaTokens() +
       this.calibrationDelta() +
       (this.inflightStreamText.length > 0 ? roughTextTokens(this.inflightStreamText) : 0)
@@ -565,6 +594,29 @@ export class AgentLoop {
     return this.auxModelValue ? this.auxTemperatureValue : this.opts.temperature;
   }
 
+  private getAuxModelName(): string {
+    this.resolveAuxModel();
+    return this.auxModelValue && this.opts.config.smallModel
+      ? this.opts.config.smallModel
+      : (this.opts.modelName ?? this.opts.model.modelId);
+  }
+
+  private recordUsage(
+    usage: TokenUsage,
+    modelName = this.opts.modelName ?? this.opts.model.modelId,
+    store = this.opts.sessionStore,
+  ): void {
+    const normalized = { ...usage, totalTokens: usageTotalTokens(usage) };
+    const model = this.opts.config.models.find((entry) => entry.name === modelName);
+    const costUsd = computeCostUsd(normalized, model);
+    this.onUsage?.(normalized, modelName, costUsd);
+    void store
+      ?.addUsage(normalized, { modelName, costUsd })
+      .catch((error: unknown) =>
+        this.onHookWarning?.(`failed to record token usage: ${String(error)}`),
+      );
+  }
+
   // Rebinds the per-call provider metadata (e.g. after the reasoning effort
   // for the current model changed via /model) without recreating the loop.
   setProviderMetadata(metadata: Record<string, Record<string, unknown>> | undefined): void {
@@ -572,18 +624,11 @@ export class AgentLoop {
   }
 
   // Swaps the persistence target (/new starts a fresh session mid-REPL).
-  // Title generation is re-armed so the new session gets one after its first
-  // turn, and snapshot checkpoints now flow to the new store. The redo stack
-  // dies with the old session context: its trees describe working-tree states
-  // that no longer line up with the new session's conversation. Subagent
-  // usage still waiting to fold belongs to the old conversation too — it
-  // must not bill the new session's first finish.
   setSessionStore(store: SessionStore | null): void {
     this.opts.sessionStore = store;
     this.titleScheduled = false;
     this.titleInput = undefined;
     this.redoStack = [];
-    this.subagentUsage = null;
     if (store) this.bindSnapshotHooks(store);
   }
 
@@ -608,19 +653,18 @@ export class AgentLoop {
     });
   }
 
+  private resetWholesaleHistoryState(): void {
+    this.serverTokenBaseline = null;
+    this.requestMessagesCache = null;
+    this.historyTokenSnapshot = null;
+    this.opts.registry?.resetVolatileState();
+  }
+
   async loadMessages(messages: readonly (CoreMessage | StarMessage)[]): Promise<void> {
     this.messages = reconcileStarMessages(messages.map(toStarMessage));
     this.turnMarkers = [];
     this.redoStack = [];
-    // A wholesale-loaded history starts a new billing context: subagent
-    // usage accumulated for the previous conversation must not fold into
-    // this one's first finish.
-    this.subagentUsage = null;
-    // The calibration baseline pairs the replaced history's local estimate
-    // with its server-reported size; kept, its delta would inflate the new
-    // conversation's ctx gauge and compaction budget with dead tokens.
-    this.serverTokenBaseline = null;
-    this.opts.registry?.resetVolatileState();
+    this.resetWholesaleHistoryState();
   }
 
   // Read-only counterpart of retractLastTurn: how many messages /undo would
@@ -656,8 +700,8 @@ export class AgentLoop {
       REDO_LABEL_MAX,
     );
     this.messages = result.messages;
-    await this.opts.sessionStore?.replaceMessages([...this.messages]);
-    this.opts.registry?.resetVolatileState();
+    await this.replacePersisted([...this.messages]);
+    this.resetWholesaleHistoryState();
     const last = this.turnMarkers[this.turnMarkers.length - 1];
     let turn: number | undefined;
     let tree: string | undefined;
@@ -753,8 +797,8 @@ export class AgentLoop {
     const removed = this.messages.length - cut;
     if (removed === 0) return 0;
     this.messages = this.messages.slice(0, cut);
-    await this.opts.sessionStore?.replaceMessages([...this.messages]);
-    this.opts.registry?.resetVolatileState();
+    await this.replacePersisted([...this.messages]);
+    this.resetWholesaleHistoryState();
     this.turnMarkers = this.turnMarkers.filter((m) => m.userIndex < cut);
     this.redoStack = [];
     return removed;
@@ -767,7 +811,19 @@ export class AgentLoop {
   }
 
   private async persist(message: CoreMessage, meta?: MessageMeta): Promise<void> {
-    await this.opts.sessionStore?.append(message, meta);
+    const store = this.opts.sessionStore;
+    if (!store) return;
+    if (!(await store.append(message, meta)) && !(await store.recoverMessages())) {
+      throw new Error(`Session ${store.id} could not persist the message history`);
+    }
+  }
+
+  private async replacePersisted(messages: readonly StarMessage[]): Promise<void> {
+    const store = this.opts.sessionStore;
+    if (!store) return;
+    if (!(await store.replaceMessages(messages)) && !(await store.recoverMessages())) {
+      throw new Error(`Session ${store.id} could not persist the rewritten history`);
+    }
   }
 
   // Replaces oversized image parts in the in-memory history with text
@@ -780,7 +836,8 @@ export class AgentLoop {
       message: messages[i] ?? star.message,
       meta: star.meta,
     }));
-    await this.opts.sessionStore?.replaceMessages(this.messages);
+    await this.replacePersisted(this.messages);
+    this.resetWholesaleHistoryState();
     return removed;
   }
 
@@ -794,7 +851,8 @@ export class AgentLoop {
       message: messages[i] ?? star.message,
       meta: star.meta,
     }));
-    await this.opts.sessionStore?.replaceMessages(this.messages);
+    await this.replacePersisted(this.messages);
+    this.resetWholesaleHistoryState();
     return removed;
   }
 
@@ -811,7 +869,9 @@ export class AgentLoop {
     const input = this.titleInput;
     if (!input) return;
     this.titleScheduled = true;
-    scheduleSessionTitle(store, input, this.getAuxModel());
+    scheduleSessionTitle(store, input, this.getAuxModel(), (usage) =>
+      this.recordUsage(usage, this.getAuxModelName(), store),
+    );
   }
 
   // A user interrupt (Esc) ends the turn mid-stream, before the normal
@@ -853,7 +913,7 @@ export class AgentLoop {
         ],
       };
       this.messages.push({ message: synthetic });
-      await this.persist(synthetic).catch(() => {});
+      await this.persist(synthetic);
       yield { type: "tool-result", id: call.id, name: call.name, content, isError: true };
     }
   }
@@ -951,6 +1011,7 @@ export class AgentLoop {
     let autoContinues = 0;
     let lastWasNudge = false;
     let usedToolsThisTurn = false;
+    const toolOutcomes: string[] = [];
     // Continuations after a watchdog-truncated reply — a separate budget from
     // autoContinues, since each cut is transport trouble (a stalling relay),
     // not an unproductive reply.
@@ -1054,7 +1115,9 @@ export class AgentLoop {
         }
       }
       const maxTokens = this.opts.contextMaxTokens ?? config.contextMaxTokens;
-      const threshold = resolveCompactThreshold(config, maxTokens);
+      const outputReserve = Math.min(this.opts.maxTokens ?? 4096, Math.floor(maxTokens / 20));
+      const requestBudget = Math.max(1, maxTokens - outputReserve);
+      const threshold = Math.min(resolveCompactThreshold(config, maxTokens), requestBudget);
       // The server-calibration delta rides into both budgets as extra
       // overhead: elision and compaction must trigger on what the provider
       // will actually count, not on the local tokenizer's guess.
@@ -1074,8 +1137,8 @@ export class AgentLoop {
         // Persist the rewrite like compaction does (memory and disk must
         // not diverge) and drop volatile tool state: the read_file dedup
         // cache must not claim elided content is still in context.
-        await this.opts.sessionStore?.replaceMessages([...this.messages]);
-        this.opts.registry?.resetVolatileState();
+        await this.replacePersisted([...this.messages]);
+        this.resetWholesaleHistoryState();
       }
       // Auto-compaction fires at compactThresholdTokens when configured
       // (clamped to the window), otherwise only once the window is full. The
@@ -1093,19 +1156,47 @@ export class AgentLoop {
         // retractFromIndex replaceMessages would otherwise silently swap
         // the full on-disk transcript for the compacted one as a side
         // effect of what the user confirmed as a plain retraction.
-        await this.opts.sessionStore?.replaceMessages([...this.messages]);
+        await this.replacePersisted([...this.messages]);
         // Compaction rewrote the history wholesale, so recorded turn indices
         // no longer line up — drop the markers like loadMessages() does.
         // /undo then only retracts messages until new turns accumulate,
         // instead of reverting files against a stale snapshot turn.
         this.turnMarkers = [];
-        this.opts.registry?.resetVolatileState();
+        this.resetWholesaleHistoryState();
+      }
+
+      if (this.historyTokens() + toolSchemaTokens + calibration > requestBudget) {
+        const emergency = emergencyElideContent(
+          this.messages,
+          requestBudget,
+          toolSchemaTokens + calibration,
+        );
+        if (emergency.elidedCount > 0) {
+          this.messages = emergency.messages;
+          await this.replacePersisted([...this.messages]);
+          this.resetWholesaleHistoryState();
+          yield {
+            type: "notice",
+            message: `Emergency context reduction elided ${emergency.elidedCount} oversized message(s).`,
+          };
+        }
+        if (!emergency.withinBudget) {
+          yield {
+            type: "error",
+            error: {
+              name: "ContextLimitError",
+              message: `The request still exceeds the context window after compaction and emergency elision (${emergency.estimatedTokens}/${requestBudget} estimated tokens). Start a new session or use a model with a larger context window.`,
+            },
+          };
+          await this.runStopHooks("error");
+          return;
+        }
       }
 
       // Local estimate of the exact request about to be sent (history +
       // tool schemas, post elision/compaction). Paired with the provider's
       // reported promptTokens at finish to refresh the calibration baseline.
-      const requestLocalTokens = estimateTokens(this.getMessages()) + toolSchemaTokens;
+      const requestLocalTokens = this.historyTokens() + toolSchemaTokens;
 
       // One model step, with retries: a transient stream failure (network
       // error, 429/5xx, idle watchdog cutoff) or an empty response must not
@@ -1190,8 +1281,6 @@ export class AgentLoop {
             } else if (event.type === "finish") {
               lastFinishReason = event.finishReason;
               if (event.truncated) wasTruncated = true;
-              // The raw usage drives the empty-reply heuristic; the folded
-              // copy (own + settled subagent usage) is what consumers meter.
               lastUsage = event.usage;
               // Calibrate the context estimate against the provider's own
               // count: promptTokens is the server-side size of the request
@@ -1204,7 +1293,8 @@ export class AgentLoop {
                   serverTokens: event.usage.promptTokens,
                 };
               }
-              yield this.foldSubagentUsage(event);
+              if (event.usage) this.recordUsage(event.usage);
+              yield event;
             } else if (event.type === "error") {
               // Held back until retries are exhausted, so the UI shows retry
               // notices instead of an error for a turn that then recovers.
@@ -1301,6 +1391,7 @@ export class AgentLoop {
       }
 
       if (failure) {
+        yield* this.persistInterrupted(text, toolCalls);
         yield { type: "error", error: failure };
         await this.runStopHooks("error");
         return;
@@ -1436,8 +1527,10 @@ export class AgentLoop {
             this.getAuxModel(),
             inputText,
             text,
+            toolOutcomes.join("\n"),
             signal,
             this.getAuxTemperature(),
+            (usage) => this.recordUsage(usage, this.getAuxModelName()),
           );
           if (complete === false) {
             reason = "completion check reports the task unfinished";
@@ -1571,6 +1664,10 @@ export class AgentLoop {
           if (call.name === "todo_write" && !result.isError) {
             openTodos = pendingTodoTitles(call.args);
           }
+          toolOutcomes.push(
+            `${call.name} (${result.isError ? "failed" : "succeeded"}): ${result.content.slice(0, 500)}`,
+          );
+          if (toolOutcomes.length > 20) toolOutcomes.shift();
           yield {
             type: "tool-result",
             id: call.id,
@@ -1601,7 +1698,7 @@ export class AgentLoop {
             ],
           };
           this.messages.push({ message: synthetic });
-          await this.persist(synthetic).catch(() => {});
+          await this.persist(synthetic);
           yield { type: "tool-result", id: call.id, name: call.name, content, isError: true };
         }
         // Only now — every tool message of the batch closed, including
@@ -1675,6 +1772,7 @@ export class AgentLoop {
         this.getAuxModel(),
         signal,
         this.getAuxTemperature(),
+        (usage) => this.recordUsage(usage, this.getAuxModelName()),
       );
       // An empty summary must not replace real history with an empty shell:
       // fall back to the truncation placeholder like a summary failure does.
@@ -1712,6 +1810,7 @@ export class AgentLoop {
         1000 *
         timeoutScale,
       temperature: this.opts.temperature,
+      maxTokens: this.opts.maxTokens,
     })) {
       // The idle watchdog can end a stream gracefully after content already
       // arrived; surface the cut-off instead of letting a half sentence pass
@@ -1817,64 +1916,6 @@ export class AgentLoop {
       // Hooks are best-effort by design: a broken hook must never crash a turn.
       return empty;
     }
-  }
-
-  // Accumulates a settled subagent's usage. When the child provably ran on a
-  // different, fully priced model, the counts are first converted into
-  // this-model-priced equivalents (convertUsagePricing): session cost is
-  // token totals × the active model's price, so the conversion keeps the $
-  // estimate accurate where raw sums would misprice. Price lookup goes by
-  // the [[models]] entry names both loops were resolved from, not model id.
-  private addSubagentUsage(
-    usage: TokenUsage,
-    childModel: LanguageModel,
-    childModelName?: string,
-  ): void {
-    const converted = convertUsagePricing(usage, childModel, this.opts.model, this.opts.config, {
-      fromName: childModelName,
-      toName: this.opts.modelName,
-    });
-    const pending = this.subagentUsage ?? {
-      promptTokens: 0,
-      completionTokens: 0,
-      totalTokens: 0,
-    };
-    pending.promptTokens += converted.promptTokens;
-    pending.completionTokens += converted.completionTokens;
-    pending.totalTokens += usageTotalTokens(converted);
-    if (converted.cachedPromptTokens) {
-      pending.cachedPromptTokens = (pending.cachedPromptTokens ?? 0) + converted.cachedPromptTokens;
-    }
-    if (converted.cacheReadInputTokens) {
-      pending.cacheReadInputTokens =
-        (pending.cacheReadInputTokens ?? 0) + converted.cacheReadInputTokens;
-    }
-    this.subagentUsage = pending;
-  }
-
-  // Folds pending subagent usage into an outgoing finish event (and clears
-  // it). A finish without usage reports nothing to consumers, so the pending
-  // amount is kept for the next finish that carries usage instead. Totals
-  // sum the billed classes (usageTotalTokens), not whatever extra classes a
-  // provider folded into its reported totalTokens.
-  private foldSubagentUsage(
-    event: Extract<StreamEvent, { type: "finish" }>,
-  ): Extract<StreamEvent, { type: "finish" }> {
-    const pending = this.subagentUsage;
-    if (!pending || !event.usage) return event;
-    this.subagentUsage = null;
-    const usage: TokenUsage = {
-      promptTokens: event.usage.promptTokens + pending.promptTokens,
-      completionTokens: event.usage.completionTokens + pending.completionTokens,
-      totalTokens: usageTotalTokens(event.usage) + usageTotalTokens(pending),
-    };
-    const cachedPromptTokens =
-      (event.usage.cachedPromptTokens ?? 0) + (pending.cachedPromptTokens ?? 0);
-    const cacheReadInputTokens =
-      (event.usage.cacheReadInputTokens ?? 0) + (pending.cacheReadInputTokens ?? 0);
-    if (cachedPromptTokens > 0) usage.cachedPromptTokens = cachedPromptTokens;
-    if (cacheReadInputTokens > 0) usage.cacheReadInputTokens = cacheReadInputTokens;
-    return { ...event, usage };
   }
 
   // opencode's doom_loop guard: returns a refusal once the identical tool

@@ -29,9 +29,12 @@ export function interactiveRequiresTtyError(streams: StartupStreams): string | n
 // A downstream pipe that closes early (star -p "..." | head -1) turns the next
 // stdout write into an EPIPE "error" event; exit quietly instead of dumping a
 // raw stack.
-export function installStdoutEpipeGuard(stdout: NodeJS.WriteStream = process.stdout): void {
+export function installStdoutEpipeGuard(
+  stdout: NodeJS.WriteStream = process.stdout,
+  onEpipe: () => void = () => process.exit(0),
+): void {
   stdout.on("error", (error: NodeJS.ErrnoException) => {
-    if (error?.code === "EPIPE") process.exit(0);
+    if (error?.code === "EPIPE") onEpipe();
     else throw error;
   });
 }

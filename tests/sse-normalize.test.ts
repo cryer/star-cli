@@ -36,6 +36,23 @@ describe("SseNormalizeTransform", () => {
     expect(await runTransform([input])).toBe('data: {"a":1}\n\ndata: {"b":2}\n\n');
   });
 
+  it("joins standard multiline data fields with newlines", async () => {
+    const input = 'data: {"a":\ndata: 1,\ndata: "b":"}still text"}\n\n';
+    expect(await runTransform([input])).toBe('data: {"a":\n1,\n"b":"}still text"}\n\n');
+  });
+
+  it("keeps multiline JSON intact across arbitrary chunks", async () => {
+    const input = 'data: {"response":\ndata: {"delta":\ndata: "hello"}}\n\n';
+    expect(await runTransform([input.slice(0, 20), input.slice(20, 43), input.slice(43)])).toBe(
+      'data: {"response":\n{"delta":\n"hello"}}\n\n',
+    );
+  });
+
+  it("joins standard multiline non-JSON data", async () => {
+    const input = "data: first\ndata: second\n\n";
+    expect(await runTransform([input])).toBe("data: first\nsecond\n\n");
+  });
+
   it("handles events split across chunks mid-line", async () => {
     const chunks = ['data: {"a', '":1}\n{"b', '":2}\n\nda', "ta: [DONE]\n\n"];
     expect(await runTransform(chunks)).toBe('data: {"a":1}\n\ndata: {"b":2}\n\ndata: [DONE]\n\n');

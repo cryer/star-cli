@@ -10,17 +10,26 @@ function historyPath(): string {
   return path.join(starHome(), "history");
 }
 
-function readLines(file: string): string[] {
+function readEntries(file: string): string[] {
   const raw = fs.readFileSync(file, "utf8");
   return raw
     .split("\n")
     .map((line) => line.replace(/\r$/, ""))
-    .filter((line) => line.trim().length > 0);
+    .filter((line) => line.trim().length > 0)
+    .map((line) => {
+      if (!line.startsWith('"')) return line;
+      try {
+        const parsed: unknown = JSON.parse(line);
+        return typeof parsed === "string" ? parsed : line;
+      } catch {
+        return line;
+      }
+    });
 }
 
-function writeHistory(file: string, lines: string[]): void {
+function writeHistory(file: string, entries: string[]): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${lines.join("\n")}\n`);
+  fs.writeFileSync(file, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
 }
 
 export function isJunkHistoryEntry(line: string): boolean {
@@ -35,7 +44,7 @@ function isSkippableEntry(line: string): boolean {
 export function loadHistory(limit = HISTORY_LIMIT): string[] {
   try {
     const file = historyPath();
-    const lines = readLines(file);
+    const lines = readEntries(file);
     const clean = lines.filter((line) => !isSkippableEntry(line));
     if (clean.length !== lines.length || clean.length > HISTORY_LIMIT) {
       // Self-heal: drop junk and enforce the cap so old polluted files recover.
@@ -48,13 +57,13 @@ export function loadHistory(limit = HISTORY_LIMIT): string[] {
 }
 
 export function appendHistory(entry: string): void {
-  const line = entry.replace(/[\r\n]+/g, " ").trim();
+  const line = entry.trim();
   if (line.length === 0 || isSkippableEntry(line)) return;
   try {
     const file = historyPath();
     let existing: string[] = [];
     try {
-      existing = readLines(file);
+      existing = readEntries(file);
     } catch {
       // Missing or unreadable history file starts fresh.
     }
@@ -64,7 +73,7 @@ export function appendHistory(entry: string): void {
       return;
     }
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.appendFileSync(file, `${line}\n`);
+    fs.appendFileSync(file, `${JSON.stringify(line)}\n`);
   } catch {
     // History is best-effort and must never crash the REPL.
   }

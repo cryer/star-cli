@@ -322,6 +322,21 @@ describe("addAllowRule persistence", () => {
     expect(config.permissions.allow).toEqual(["bash(npm test)", "read_file"]);
   });
 
+  it("serializes concurrent saves without losing updates or temp files", async () => {
+    await Promise.all([
+      ...Array.from({ length: 10 }, (_, i) => addAllowRule(`bash(allow-${i})`)),
+      ...Array.from({ length: 10 }, (_, i) => addDenyRule(`bash(deny-${i})`)),
+      savePermissionMode("ask"),
+    ]);
+    const config = await loadConfig(cwd);
+    expect(config.permissions.allow).toHaveLength(10);
+    expect(config.permissions.deny).toHaveLength(10);
+    expect(config.permissionMode).toBe("ask");
+    expect(new Set(config.permissions.allow).size).toBe(10);
+    expect(new Set(config.permissions.deny).size).toBe(10);
+    expect(fs.readdirSync(home)).toEqual(["config.toml"]);
+  });
+
   it("a persisted rule takes effect in checkPermission after reload", async () => {
     await addAllowRule("bash(git status *)");
     const config = await loadConfig(cwd);

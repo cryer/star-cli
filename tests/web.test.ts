@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   createWebFetchTool,
   decodeEntities,
+  isPrivateAddress,
   setWebFetchAllowPrivateHosts,
 } from "../src/tools/web/fetch";
 
@@ -158,14 +159,28 @@ describe("web_fetch SSRF guard", () => {
       "http://127.0.0.1:8080/admin",
       "http://10.0.0.5/",
       "http://172.16.0.1/",
+      "http://100.64.0.1/",
+      "http://198.18.0.1/",
+      "http://192.0.2.1/",
+      "http://198.51.100.1/",
+      "http://203.0.113.1/",
+      "http://224.0.0.1/",
+      "http://240.0.0.1/",
       "http://[::1]:8080/",
+      "http://[::ffff:127.0.0.1]/",
+      "http://[::ffff:7f00:1]/",
       "http://[fd00::1]/",
       "http://[fe80::1]/",
+      "http://[2001:db8::1]/",
+      "http://[ff02::1]/",
     ]) {
       const res = await guarded.execute({ url }, { cwd: process.cwd() });
       expect(res.isError, url).toBe(true);
       expect(res.content, url).toContain("private/reserved");
     }
+    expect(isPrivateAddress("0:0:0:0:0:ffff:7f00:1")).toBe(true);
+    expect(isPrivateAddress("0:0:0:0:0:ffff:192.168.0.1")).toBe(true);
+    expect(isPrivateAddress("93.184.216.34")).toBe(false);
   });
 
   it("refuses localhost and .localhost/.local/.internal names without resolving", async () => {
@@ -200,6 +215,26 @@ describe("web_fetch SSRF guard", () => {
     expect(res.content).toBe("hello public internet");
   });
 
+  it("resolves once per hop instead of racing validation against a second DNS answer", async () => {
+    let resolutions = 0;
+    let fetches = 0;
+    const guarded = createWebFetchTool({
+      resolver: async () => {
+        resolutions += 1;
+        return [resolutions === 1 ? "93.184.216.34" : "169.254.169.254"];
+      },
+      fetchImpl: async () => {
+        fetches += 1;
+        return okResponse("pinned");
+      },
+    });
+    const res = await guarded.execute({ url: "http://rebind.example/" }, { cwd: process.cwd() });
+    expect(res.isError).toBeUndefined();
+    expect(res.content).toBe("pinned");
+    expect(resolutions).toBe(1);
+    expect(fetches).toBe(1);
+  });
+
   it("fails closed when the hostname cannot be resolved", async () => {
     const guarded = createWebFetchTool({
       resolver: async () => {
@@ -215,7 +250,7 @@ describe("web_fetch SSRF guard", () => {
   it("re-validates every redirect hop and refuses a bounce to the metadata address", async () => {
     let metadataFetches = 0;
     const guarded = createWebFetchTool({
-      resolver: async (hostname) => [hostname],
+      resolver: async (hostname) => [hostname === "169.254.169.254" ? hostname : "93.184.216.34"],
       fetchImpl: async (input) => {
         const url = String(input);
         if (url.includes("169.254.169.254")) {

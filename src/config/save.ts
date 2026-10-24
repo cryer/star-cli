@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { parse, stringify } from "smol-toml";
@@ -17,14 +18,34 @@ function tomlString(value: string): string {
 }
 
 async function writeFileAtomic(filePath: string, content: string): Promise<void> {
-  const tmpPath = `${filePath}.${process.pid}.tmp`;
-  await fs.promises.writeFile(tmpPath, content, "utf8");
-  await fs.promises.rename(tmpPath, filePath);
+  const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    // config.toml may hold plaintext apiKeys — keep it owner-only (0600).
-    // Best-effort: chmod is effectively a no-op on Windows.
-    await fs.promises.chmod(filePath, 0o600);
-  } catch {}
+    const handle = await fs.promises.open(tmpPath, "wx", 0o600);
+    try {
+      await handle.writeFile(content, "utf8");
+      await handle.chmod(0o600);
+    } finally {
+      await handle.close();
+    }
+    await fs.promises.rename(tmpPath, filePath);
+  } catch (error) {
+    await fs.promises.unlink(tmpPath).catch(() => {});
+    throw error;
+  }
+}
+
+const configSaveQueues = new Map<string, Promise<unknown>>();
+
+function serializeConfigSave<T>(filePath: string, save: () => Promise<T>): Promise<T> {
+  const previous = configSaveQueues.get(filePath) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(save);
+  configSaveQueues.set(filePath, next);
+  void next
+    .finally(() => {
+      if (configSaveQueues.get(filePath) === next) configSaveQueues.delete(filePath);
+    })
+    .catch(() => {});
+  return next;
 }
 
 // Text-level upsert of a rule list into the [permissions] table so comments
@@ -75,31 +96,38 @@ function upsertPermissionRuleText(
 
 async function addPermissionRule(kind: "allow" | "deny", rule: string): Promise<boolean> {
   const filePath = globalConfigPath();
-  let content = "";
-  let raw: Record<string, unknown> = {};
-  try {
-    content = await fs.promises.readFile(filePath, "utf8");
-    raw = parse(content) as Record<string, unknown>;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  const permissions =
-    typeof raw.permissions === "object" && raw.permissions !== null
-      ? (raw.permissions as Record<string, unknown>)
-      : {};
-  const rules = Array.isArray(permissions[kind]) ? (permissions[kind] as string[]) : [];
-  if (rules.includes(rule)) return false;
-  const nextRules = [...rules, rule];
-  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-  const updated = upsertPermissionRuleText(content, kind, nextRules, raw.permissions !== undefined);
-  if (updated !== null) {
-    await writeFileAtomic(filePath, updated);
+  return serializeConfigSave(filePath, async () => {
+    let content = "";
+    let raw: Record<string, unknown> = {};
+    try {
+      content = await fs.promises.readFile(filePath, "utf8");
+      raw = parse(content) as Record<string, unknown>;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const permissions =
+      typeof raw.permissions === "object" && raw.permissions !== null
+        ? (raw.permissions as Record<string, unknown>)
+        : {};
+    const rules = Array.isArray(permissions[kind]) ? (permissions[kind] as string[]) : [];
+    if (rules.includes(rule)) return false;
+    const nextRules = [...rules, rule];
+    await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+    const updated = upsertPermissionRuleText(
+      content,
+      kind,
+      nextRules,
+      raw.permissions !== undefined,
+    );
+    if (updated !== null) {
+      await writeFileAtomic(filePath, updated);
+      return true;
+    }
+    permissions[kind] = nextRules;
+    raw.permissions = permissions;
+    await writeFileAtomic(filePath, stringify(raw));
     return true;
-  }
-  permissions[kind] = nextRules;
-  raw.permissions = permissions;
-  await writeFileAtomic(filePath, stringify(raw));
-  return true;
+  });
 }
 
 // Top-level keys live before the first [table] header: replace the key line
@@ -126,14 +154,16 @@ function upsertTopLevelKeyText(content: string, key: string, value: string): str
 
 export async function savePermissionMode(mode: string): Promise<void> {
   const filePath = globalConfigPath();
-  let content = "";
-  try {
-    content = await fs.promises.readFile(filePath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-  await writeFileAtomic(filePath, upsertTopLevelKeyText(content, "permissionMode", mode));
+  return serializeConfigSave(filePath, async () => {
+    let content = "";
+    try {
+      content = await fs.promises.readFile(filePath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+    await writeFileAtomic(filePath, upsertTopLevelKeyText(content, "permissionMode", mode));
+  });
 }
 
 // Unquotes a TOML basic ("...") or literal ('...') string; returns null for
@@ -213,15 +243,17 @@ export async function saveReasoningEffort(
   effort: string | undefined,
 ): Promise<boolean> {
   const filePath = globalConfigPath();
-  let content = "";
-  try {
-    content = await fs.promises.readFile(filePath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  const updated = setReasoningEffortInToml(content, modelName, effort);
-  if (updated === null) return false;
-  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-  await writeFileAtomic(filePath, updated);
-  return true;
+  return serializeConfigSave(filePath, async () => {
+    let content = "";
+    try {
+      content = await fs.promises.readFile(filePath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const updated = setReasoningEffortInToml(content, modelName, effort);
+    if (updated === null) return false;
+    await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+    await writeFileAtomic(filePath, updated);
+    return true;
+  });
 }
