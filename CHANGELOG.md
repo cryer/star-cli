@@ -10,6 +10,8 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ## [Unreleased]
 
+## [0.3.14] - 2026-10-24
+
 ### Added
 
 - **stale-content elision thresholds are now configurable**: three new top-level keys — `elisionThresholdFraction` (fraction of the compaction threshold at which elision activates, default 0.5; 1 = only at the compaction point, effectively off), `elisionKeepRecentMessages` (newest messages never elided, default 24) and `elisionMinTokens` (minimum size of a tool result / tool-call argument payload worth eliding, default 250) — tune the previously hardcoded elision knobs; documented in both READMEs. Global config only (not settable from a project's `.star/config.toml`)
