@@ -3,6 +3,11 @@ import { Readable } from "node:stream";
 import type { ReactElement } from "react";
 import { createInkStdout } from "../src/cli/ink-stdout";
 
+// Ink suppresses dynamic stdout frames when it detects CI. These tests drive
+// a terminal viewport, so set its explicit opt-out before loading Ink and use
+// the same rendering path as a local TTY on every runner.
+process.env.CI = "0";
+
 // Force chalk (used by ink) to emit ANSI styles in this non-TTY environment.
 // Must run before ink is imported, hence the dynamic import below.
 process.env.FORCE_COLOR = "3";
