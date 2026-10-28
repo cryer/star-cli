@@ -12,7 +12,7 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ### Fixed
 
-- **stable, smoother terminal streaming**: long answers now stay inside a bounded scrolling viewport with a fixed input/status footer, including during terminal resize. The live UI grows only as needed instead of filling the screen, so a newly submitted prompt remains visible above the footer. Streaming flushes are event-driven with low-latency coalescing, incomplete Markdown no longer reparses on every frame, and tool/history redraws no longer replay stale Ink Static output or leave old cards and borders flashing over new content
+- **stable, smoother terminal streaming**: the thinking indicator stays visible for the whole model turn, and long answers use a bounded viewport above an input/status footer that remains at a fixed terminal row as output arrives. Recent messages stay in that viewport until they scroll out, so full-height redraws cannot hide a newly submitted prompt; older messages still reach native terminal scrollback. Resize handling, low-latency stream coalescing and bounded Markdown rendering prevent stale cards, borders and history from flashing over new content
 
 ## [0.3.14] - 2026-10-24
 

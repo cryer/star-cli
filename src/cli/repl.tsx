@@ -2125,17 +2125,19 @@ export function Repl({
       : todoWindow.items.length +
         Number(todoWindow.hiddenBefore > 0) +
         Number(todoWindow.hiddenAfter > 0);
+  const activityVisible = isStreaming || activity !== null;
   const liveRows =
-    (thinking || activity !== null ? 2 : thoughtSummary !== null ? 1 : 0) +
+    (activityVisible ? (thinkingText === "" ? 1 : 2) : thoughtSummary !== null ? 1 : 0) +
     Math.min(queueItems.length, MAX_VISIBLE_QUEUED) +
     Number(queueItems.length > MAX_VISIBLE_QUEUED) +
     pendingImages.length +
     todoRows;
-  const streamingMaxLines = Math.max(1, rows - 8 - liveRows);
+  const contentRows = Math.max(1, rows - 7 - liveRows);
+  const historyRows = streamingText !== null ? Math.min(2, contentRows) : contentRows;
+  const streamingMaxLines = Math.max(1, contentRows - historyRows);
 
   return (
-    <Box flexDirection="column" overflow="hidden">
-      <MessageList key={`messages-${epoch}`} messages={messages} termWidth={columns} />
+    <Box flexDirection="column" height={Math.max(1, rows - 1)} overflow="hidden">
       <Box
         flexDirection="column"
         flexGrow={1}
@@ -2143,16 +2145,20 @@ export function Repl({
         overflowY="hidden"
         justifyContent="flex-end"
       >
-        {(thinking || activity !== null) && (
+        <MessageList
+          key={`messages-${epoch}`}
+          messages={messages}
+          termWidth={columns}
+          maxLines={historyRows}
+        />
+        {activityVisible && (
           <ThinkingIndicator
             reasoning={thinkingText}
             activity={activity ?? undefined}
             startedAt={turnStartedAtRef.current}
           />
         )}
-        {!thinking && activity === null && thoughtSummary !== null && (
-          <Text dimColor>{thoughtSummary}</Text>
-        )}
+        {!activityVisible && thoughtSummary !== null && <Text dimColor>{thoughtSummary}</Text>}
         {streamingText !== null && (streamingText !== "" || turnChunksRef.current === 0) && (
           <StreamingMessage
             text={streamingText}

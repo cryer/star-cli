@@ -107,7 +107,7 @@ describe("production REPL layout", () => {
     app.unmount();
   });
 
-  it("keeps a submitted prompt visible by using only the rows the live UI needs", async () => {
+  it("keeps a submitted prompt visible above a full-height fixed footer", async () => {
     let release = () => {};
     const finished = new Promise<void>((resolve) => {
       release = resolve;
@@ -120,18 +120,67 @@ describe("production REPL layout", () => {
     };
     const app = renderRepl(backend, cwd, 80, 24);
     await vi.waitFor(() => expect(app.lastFrame() ?? "").toContain("mode: auto"));
-    expect((app.lastFrame() ?? "").split("\n").length - 1).toBe(4);
+    expect((app.lastFrame() ?? "").split("\n").length - 1).toBe(23);
+    const idleFooterRow = stripAnsi(app.lastFrame() ?? "")
+      .split("\n")
+      .findIndex((line) => line.includes("mode: auto"));
 
-    const beforeSubmit = app.allOutput().length;
     await typeText(app.stdin, "hello", "\r");
     await vi.waitFor(() => {
-      expect(stripAnsi(app.allOutput().slice(beforeSubmit))).toContain("❯ hello");
+      expect(stripAnsi(app.lastFrame() ?? "")).toContain("❯ hello");
       expect(app.lastFrame() ?? "").toContain("thinking");
     });
-    expect((app.lastFrame() ?? "").split("\n").length - 1).toBeLessThanOrEqual(9);
+    expect((app.lastFrame() ?? "").split("\n").length - 1).toBe(23);
+    const streamingFooterRow = stripAnsi(app.lastFrame() ?? "")
+      .split("\n")
+      .findIndex((line) => line.includes("mode: auto"));
+    expect(streamingFooterRow).toBe(idleFooterRow);
 
     release();
     await vi.waitFor(() => expect(app.lastFrame() ?? "").not.toContain("thinking"));
+    app.unmount();
+  });
+
+  it("keeps thinking visible and the footer stationary across stream commits", async () => {
+    let sendSecond = () => {};
+    let release = () => {};
+    const second = new Promise<void>((resolve) => {
+      sendSecond = resolve;
+    });
+    const finished = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const backend: ChatBackend = {
+      async *stream(): AsyncGenerator<StreamEvent> {
+        yield { type: "text-delta", text: "first chunk\n" };
+        await second;
+        yield {
+          type: "text-delta",
+          text: Array.from({ length: 20 }, (_, index) => `output ${index + 1}`).join("\n"),
+        };
+        await finished;
+        yield { type: "finish", finishReason: "stop" };
+      },
+    };
+    const app = renderRepl(backend, cwd, 80, 20);
+    await typeText(app.stdin, "hello", "\r");
+    await vi.waitFor(() => expect(stripAnsi(app.lastFrame() ?? "")).toContain("first chunk"));
+    const firstFrame = stripAnsi(app.lastFrame() ?? "");
+    const footerRow = firstFrame.split("\n").findIndex((line) => line.includes("mode: auto"));
+    expect(firstFrame).toContain("star is thinking");
+
+    sendSecond();
+    await vi.waitFor(() => expect(stripAnsi(app.lastFrame() ?? "")).toContain("output 20"));
+    const streamingFrame = stripAnsi(app.lastFrame() ?? "");
+    expect(streamingFrame).toContain("star is thinking");
+    expect(streamingFrame.split("\n").findIndex((line) => line.includes("mode: auto"))).toBe(
+      footerRow,
+    );
+    expect(streamingFrame.split("\n").length - 1).toBe(19);
+
+    release();
+    await vi.waitFor(() => expect(app.lastFrame() ?? "").not.toContain("thinking"));
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("output 20");
     app.unmount();
   });
 

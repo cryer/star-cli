@@ -1,7 +1,7 @@
-import { useStdout } from "ink";
+import { Box, Text, useStdout } from "ink";
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { DiffLine } from "../diff-preview";
-import { renderMarkdown } from "../markdown";
+import { cellWidth, renderMarkdown } from "../markdown";
 import { toTerminalSafe } from "../terminal-text";
 
 export interface DisplayMessage {
@@ -109,12 +109,26 @@ export function collapseInitialMessages(
   return { hidden: messages.length - limit, visible: messages.slice(-limit) };
 }
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping generated SGR codes is the point
+const ANSI_SGR_RE = /\u001B\[[0-9;]*m/g;
+
+function formattedRows(text: string, termWidth: number): number {
+  const lines = text.replace(ANSI_SGR_RE, "").split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines.reduce(
+    (rows, line) => rows + Math.max(1, Math.ceil(cellWidth(line) / termWidth)),
+    0,
+  );
+}
+
 export const MessageList = memo(function MessageList({
   messages,
   termWidth = 80,
+  maxLines,
 }: {
   messages: DisplayMessage[];
   termWidth?: number;
+  maxLines?: number;
 }) {
   const { write } = useStdout();
   const [initial] = useState(() => ({
@@ -122,6 +136,7 @@ export const MessageList = memo(function MessageList({
     view: collapseInitialMessages(messages),
   }));
   const writtenRef = useRef(0);
+  const formattedRef = useRef(new Map<string, string>());
   const items = useMemo(() => {
     const placeholder: DisplayMessage[] =
       initial.view.hidden > 0
@@ -129,11 +144,44 @@ export const MessageList = memo(function MessageList({
         : [];
     return [...placeholder, ...initial.view.visible, ...messages.slice(initial.length)];
   }, [initial, messages]);
+  const formatted = items.map((message) => {
+    const key = `${message.id}:${termWidth}`;
+    const cached = formattedRef.current.get(key);
+    if (cached !== undefined) return cached;
+    const value = formatDisplayMessage(message, termWidth);
+    formattedRef.current.set(key, value);
+    return value;
+  });
+
+  let visibleStart = items.length;
+  if (maxLines !== undefined && maxLines > 0) {
+    let usedRows = 0;
+    for (let index = items.length - 1; index >= writtenRef.current; index--) {
+      const rows = formattedRows(formatted[index] ?? "", Math.max(1, termWidth));
+      if (visibleStart < items.length && usedRows + rows > maxLines) break;
+      usedRows += rows;
+      visibleStart = index;
+      if (usedRows >= maxLines) break;
+    }
+  }
+  const historyEnd = maxLines === undefined ? items.length : visibleStart;
   useLayoutEffect(() => {
-    const pending = items.slice(writtenRef.current);
+    const pending = formatted.slice(writtenRef.current, historyEnd);
     if (pending.length === 0) return;
-    writtenRef.current = items.length;
-    write(pending.map((message) => formatDisplayMessage(message, termWidth)).join(""));
-  }, [items, termWidth, write]);
-  return null;
+    write(pending.join(""));
+    writtenRef.current = historyEnd;
+  }, [formatted, historyEnd, write]);
+
+  if (maxLines === undefined || visibleStart === items.length) return null;
+  return (
+    <Box
+      flexDirection="column"
+      height={maxLines}
+      flexShrink={0}
+      overflowY="hidden"
+      justifyContent="flex-end"
+    >
+      <Text>{formatted.slice(visibleStart).join("")}</Text>
+    </Box>
+  );
 });
