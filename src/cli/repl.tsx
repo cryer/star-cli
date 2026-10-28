@@ -2132,8 +2132,9 @@ export function Repl({
     Number(queueItems.length > MAX_VISIBLE_QUEUED) +
     pendingImages.length +
     todoRows;
-  const contentRows = Math.max(1, rows - 7 - liveRows);
-  const historyRows = streamingText !== null ? Math.min(2, contentRows) : contentRows;
+  const hasStreamingText = streamingText !== null && streamingText !== "";
+  const contentRows = Math.max(1, rows - (hasStreamingText ? 7 : 5) - liveRows);
+  const historyRows = hasStreamingText ? Math.min(2, contentRows) : contentRows;
   const streamingMaxLines = Math.max(1, contentRows - historyRows);
 
   return (
@@ -2159,7 +2160,7 @@ export function Repl({
           />
         )}
         {!activityVisible && thoughtSummary !== null && <Text dimColor>{thoughtSummary}</Text>}
-        {streamingText !== null && (streamingText !== "" || turnChunksRef.current === 0) && (
+        {hasStreamingText && (
           <StreamingMessage
             text={streamingText}
             continuation={turnChunksRef.current > 0}

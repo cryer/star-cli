@@ -184,6 +184,47 @@ describe("production REPL layout", () => {
     app.unmount();
   });
 
+  it("uses the full viewport for recent tool results between model steps", async () => {
+    let release = () => {};
+    const finished = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const backend: ChatBackend = {
+      async *stream(): AsyncGenerator<StreamEvent> {
+        for (const [index, name] of ["one", "two", "three"].entries()) {
+          yield {
+            type: "tool-call",
+            id: `call-${index}`,
+            name: "read_file",
+            args: { path: `src/${name}.js` },
+          };
+          yield {
+            type: "tool-result",
+            id: `call-${index}`,
+            name: "read_file",
+            content: `${name} tool output`,
+          };
+        }
+        await finished;
+        yield { type: "finish", finishReason: "stop" };
+      },
+    };
+    const app = renderRepl(backend, cwd, 80, 24);
+    await typeText(app.stdin, "inspect", "\r");
+    await vi.waitFor(() => expect(stripAnsi(app.lastFrame() ?? "")).toContain("three tool output"));
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    for (const name of ["one", "two", "three"]) {
+      expect(frame).toContain(`src/${name}.js`);
+      expect(frame).toContain(`${name} tool output`);
+    }
+    expect(frame).toContain("star is thinking");
+    expect(frame.split("\n").findIndex((line) => line.includes("mode: auto"))).toBe(22);
+
+    release();
+    await vi.waitFor(() => expect(app.lastFrame() ?? "").not.toContain("thinking"));
+    app.unmount();
+  });
+
   it("lays out the footer after shrinking both terminal dimensions", async () => {
     const backend: ChatBackend = { async *stream(): AsyncGenerator<StreamEvent> {} };
     const app = renderRepl(backend, cwd, 100, 24);

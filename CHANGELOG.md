@@ -12,7 +12,7 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ### Fixed
 
-- **stable, smoother terminal streaming**: the thinking indicator stays visible for the whole model turn, and long answers use a bounded viewport above an input/status footer that remains at a fixed terminal row as output arrives. Recent messages stay in that viewport until they scroll out, so full-height redraws cannot hide a newly submitted prompt; older messages still reach native terminal scrollback. Resize handling, low-latency stream coalescing and bounded Markdown rendering prevent stale cards, borders and history from flashing over new content
+- **stable, smoother terminal streaming**: the thinking indicator stays visible for the whole model turn, and long answers use a bounded viewport above an input/status footer that remains at a fixed terminal row as output arrives. Recent messages stay in that viewport until they scroll out, so full-height redraws cannot hide a newly submitted prompt; tool phases give the full viewport to recent calls and results instead of reserving it for an empty streaming block, while older messages still reach native terminal scrollback. Resize handling, low-latency stream coalescing and bounded Markdown rendering prevent stale cards, borders and history from flashing over new content
 
 ## [0.3.14] - 2026-10-24
 
