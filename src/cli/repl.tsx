@@ -98,7 +98,7 @@ import {
   ThinkingIndicator,
   truncateTail,
 } from "./components/ThinkingIndicator";
-import { TodoPanel } from "./components/TodoPanel";
+import { TodoPanel, visibleTodoWindow } from "./components/TodoPanel";
 import { type ToolCardData, formatToolCard } from "./components/ToolCallCard";
 import { computeCostUsd, estimateCost, formatDollars, formatTokens } from "./cost";
 import { type DiffLine, type DiffPreview, generateDiffPreview } from "./diff-preview";
@@ -108,7 +108,6 @@ import {
   coreMessageText,
   formatByteCount,
   formatStreamError,
-  splitCommittableLines,
   summarizeArgs,
 } from "./format";
 import { appendHistory, loadHistory } from "./history";
@@ -1061,9 +1060,9 @@ export function Repl({
       setIsStreaming(true);
       terminalTitle().start();
       flushedRef.current = { streamed: "", reasoning: "" };
-      // Commit safe blocks into terminal history at tool boundaries and as
-      // complete lines accumulate. The bounded live viewport handles blocks
-      // that must stay whole, such as fences and tables.
+      // Static output makes Ink erase and repaint the whole live viewport.
+      // Keep a growing reply in that viewport until a tool boundary or the
+      // end of the turn instead of periodically archiving complete lines.
       const commitStreamed = (tight: boolean) => {
         const uncommitted = streamedRef.current.slice(lastCommittedLenRef.current);
         if (uncommitted.length > 0) {
@@ -1075,14 +1074,6 @@ export function Repl({
         setStreamingText("");
       };
       const scheduler = createFlushScheduler(() => {
-        const uncommitted = streamedRef.current.slice(lastCommittedLenRef.current);
-        const split = splitCommittableLines(uncommitted, 8);
-        if (split) {
-          pushAssistantChunk(split.committed, true);
-          // +1 for the newline splitCommittableLines consumed but did not
-          // include in either half.
-          lastCommittedLenRef.current += split.committed.length + 1;
-        }
         const next: FlushState = {
           streamed: streamedRef.current.slice(lastCommittedLenRef.current),
           reasoning: reasoningRef.current,
@@ -2031,6 +2022,11 @@ export function Repl({
                 description: "sent as a new prompt once the current turn finishes",
               },
             ]);
+            if (picked === null) {
+              refillSeqRef.current += 1;
+              setInputRefill({ text, seq: refillSeqRef.current });
+              return;
+            }
             if (operationIdRef.current !== requestedOperation || !abortRef.current) {
               if (!abortRef.current && !busyCommandRef.current) {
                 void runStream(text, images);
@@ -2118,9 +2114,29 @@ export function Repl({
   }, [cwd, config, isStreaming, epoch, modelName]);
 
   const sessionCost = sessionCostUsd();
-  const activityVisible = isStreaming || activity !== null;
+  const activityVisible = isStreaming || thinking || activity !== null;
   const hasStreamingText = streamingText !== null && streamingText !== "";
-  const contentRows = Math.max(1, rows - (hasStreamingText ? 7 : 5));
+  const todoWindow = visibleTodoWindow(todos);
+  const todoRows =
+    todos.length === 0 || todos.every((todo) => todo.status === "done")
+      ? 0
+      : todoWindow.items.length +
+        Number(todoWindow.hiddenBefore > 0) +
+        Number(todoWindow.hiddenAfter > 0);
+  const activityRows = activityVisible
+    ? thinkingText === ""
+      ? 1
+      : 2
+    : thoughtSummary !== null
+      ? 1
+      : 0;
+  const queueRows =
+    Math.min(queueItems.length, MAX_VISIBLE_QUEUED) +
+    Number(queueItems.length > MAX_VISIBLE_QUEUED);
+  const fixedRows = activityRows + queueRows + pendingImages.length + todoRows;
+  const pickerMaxVisible = Math.max(1, Math.min(9, rows - 12 - fixedRows));
+  const pickerRows = picker ? Math.min(picker.options.length, pickerMaxVisible) + 6 : 0;
+  const contentRows = Math.max(1, rows - 5 - fixedRows - pickerRows - (hasStreamingText ? 1 : 0));
   const historyRows = hasStreamingText ? Math.min(2, contentRows) : contentRows;
   const streamingMaxLines = Math.max(1, contentRows - historyRows);
 
@@ -2133,14 +2149,6 @@ export function Repl({
           termWidth={columns}
           maxLines={historyRows}
         />
-        {activityVisible && (
-          <ThinkingIndicator
-            reasoning={thinkingText}
-            activity={activity ?? undefined}
-            startedAt={turnStartedAtRef.current}
-          />
-        )}
-        {!activityVisible && thoughtSummary !== null && <Text dimColor>{thoughtSummary}</Text>}
         {hasStreamingText && (
           <StreamingMessage
             text={streamingText}
@@ -2166,26 +2174,16 @@ export function Repl({
             onDecision={handleRewindDecision}
           />
         )}
-        {picker && (
-          <SelectPrompt
-            title={picker.title}
-            options={picker.options}
-            onSelect={handlePickerSelect}
-            onCancel={handlePickerCancel}
-            onDelete={picker.onDelete}
+      </Box>
+      <Box flexDirection="column" flexShrink={0}>
+        {activityVisible && (
+          <ThinkingIndicator
+            reasoning={thinkingText}
+            activity={activity ?? undefined}
+            startedAt={turnStartedAtRef.current}
           />
         )}
-        {pendingConnect && (
-          <ConnectWizard
-            existingProviderNames={config.providers.map((p) => p.name)}
-            existingModelNames={config.models.map((m) => m.name)}
-            onSave={handleConnectSave}
-            onSetDefault={handleConnectSetDefault}
-            onOpenConfig={handleConnectOpenConfig}
-            onFinish={finishConnect}
-            onCancel={cancelConnect}
-          />
-        )}
+        {!activityVisible && thoughtSummary !== null && <Text dimColor>{thoughtSummary}</Text>}
         {queueItems.slice(0, MAX_VISIBLE_QUEUED).map((item) => (
           <Text key={item.id} dimColor>
             queued: {item.text.length > 80 ? `${item.text.slice(0, 80)}…` : item.text}
@@ -2200,8 +2198,6 @@ export function Repl({
           </Text>
         ))}
         <TodoPanel todos={todos} />
-      </Box>
-      <Box flexDirection="column" flexShrink={0}>
         <InputBox
           isStreaming={isStreaming || shellRunning}
           disabled={
@@ -2220,6 +2216,27 @@ export function Repl({
           onExit={handleExit}
           onPasteImage={handlePasteImage}
         />
+        {picker && (
+          <SelectPrompt
+            title={picker.title}
+            options={picker.options}
+            maxVisible={pickerMaxVisible}
+            onSelect={handlePickerSelect}
+            onCancel={handlePickerCancel}
+            onDelete={picker.onDelete}
+          />
+        )}
+        {pendingConnect && (
+          <ConnectWizard
+            existingProviderNames={config.providers.map((p) => p.name)}
+            existingModelNames={config.models.map((m) => m.name)}
+            onSave={handleConnectSave}
+            onSetDefault={handleConnectSetDefault}
+            onOpenConfig={handleConnectOpenConfig}
+            onFinish={finishConnect}
+            onCancel={cancelConnect}
+          />
+        )}
         <StatusBar
           cwd={cwd}
           model={modelName}

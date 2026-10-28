@@ -2,6 +2,7 @@ import { Box, Text } from "ink";
 import { useRef, useState } from "react";
 import { toTerminalSafe } from "../terminal-text";
 import { useInput } from "../use-input";
+import { useTerminalSize } from "../use-terminal-size";
 
 export interface SelectOption {
   value: string;
@@ -13,6 +14,7 @@ export interface SelectOption {
 interface SelectPromptProps {
   title: string;
   options: SelectOption[];
+  maxVisible?: number;
   onSelect(value: string): void;
   onCancel(): void;
   // Enables [Ctrl+X] deletion of the highlighted option (used by the /resume
@@ -24,7 +26,16 @@ interface SelectPromptProps {
 
 export const SELECT_PROMPT_MAX_VISIBLE = 9;
 
-export function SelectPrompt({ title, options, onSelect, onCancel, onDelete }: SelectPromptProps) {
+export function SelectPrompt({
+  title,
+  options,
+  maxVisible: maxVisibleProp,
+  onSelect,
+  onCancel,
+  onDelete,
+}: SelectPromptProps) {
+  const { rows } = useTerminalSize();
+  const maxVisible = Math.max(1, Math.min(SELECT_PROMPT_MAX_VISIBLE, maxVisibleProp ?? rows - 11));
   const [index, setIndex] = useState(0);
   const indexRef = useRef(0);
   const [confirming, setConfirming] = useState<SelectOption | null>(null);
@@ -80,9 +91,9 @@ export function SelectPrompt({ title, options, onSelect, onCancel, onDelete }: S
     }
   });
 
-  const maxStart = Math.max(0, options.length - SELECT_PROMPT_MAX_VISIBLE);
-  const start = Math.min(Math.max(0, index - Math.floor(SELECT_PROMPT_MAX_VISIBLE / 2)), maxStart);
-  const visible = options.slice(start, start + SELECT_PROMPT_MAX_VISIBLE);
+  const maxStart = Math.max(0, options.length - maxVisible);
+  const start = Math.min(Math.max(0, index - Math.floor(maxVisible / 2)), maxStart);
+  const visible = options.slice(start, start + maxVisible);
   const above = start;
   const below = options.length - start - visible.length;
 

@@ -131,6 +131,27 @@ describe("SelectPrompt", () => {
     expect(out).not.toContain("more below");
     app.unmount();
   });
+
+  it("scrolls through every option when the terminal fits only one row", async () => {
+    const options = Array.from({ length: 6 }, (_, i) => ({ value: `v${i}`, label: `option-${i}` }));
+    const app = renderApp(
+      createElement(SelectPrompt, {
+        title: "Small terminal",
+        options,
+        onSelect: vi.fn(),
+        onCancel: vi.fn(),
+      }),
+      { rows: 12 },
+    );
+    await tick();
+    expect(frame(app)).toContain("❯ option-0");
+    expect(frame(app)).not.toContain("option-1");
+    await typeText(app.stdin, ...Array(options.length - 1).fill(DOWN));
+    expect(frame(app)).toContain("❯ option-5");
+    expect(frame(app)).toContain("… 5 more above");
+    expect(frame(app)).not.toContain("more below");
+    app.unmount();
+  });
 });
 
 describe("SelectPrompt deletion (Ctrl+X)", () => {

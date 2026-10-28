@@ -19,6 +19,7 @@ export interface InkApp {
   // Every frame ever written, concatenated — for output that a later frame
   // (e.g. the unmount repaint after exit()) overwrites in lastFrame().
   allOutput(): string;
+  writes(): readonly string[];
   resize(columns: number, rows: number): void;
   rerender(node: ReactElement): void;
   unmount(): void;
@@ -35,6 +36,7 @@ export interface InkHarnessOptions {
 export function renderApp(node: ReactElement, options: InkHarnessOptions = {}): InkApp {
   let lastFrame: string | undefined;
   let output = "";
+  const writes: string[] = [];
   const stdout = new EventEmitter() as EventEmitter & {
     write(frame: string): void;
     columns: number;
@@ -43,6 +45,7 @@ export function renderApp(node: ReactElement, options: InkHarnessOptions = {}): 
   stdout.write = (frame: string) => {
     lastFrame = frame;
     output += frame;
+    writes.push(frame);
   };
   stdout.columns = options.columns ?? 100;
   stdout.rows = options.rows ?? 24;
@@ -66,6 +69,7 @@ export function renderApp(node: ReactElement, options: InkHarnessOptions = {}): 
     stdin: { write: (s: string) => stdin.push(s) },
     lastFrame: () => lastFrame,
     allOutput: () => output,
+    writes: () => writes,
     resize(columns: number, rows: number) {
       stdout.columns = columns;
       stdout.rows = rows;

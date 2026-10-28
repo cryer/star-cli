@@ -185,6 +185,150 @@ describe("production REPL layout", () => {
     app.unmount();
   });
 
+  it("does not archive a growing reply into Static output mid-stream", async () => {
+    let sendSecond = () => {};
+    let release = () => {};
+    const second = new Promise<void>((resolve) => {
+      sendSecond = resolve;
+    });
+    const finished = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const backend: ChatBackend = {
+      async *stream(): AsyncGenerator<StreamEvent> {
+        yield { type: "text-delta", text: "first chunk\n" };
+        await second;
+        yield {
+          type: "text-delta",
+          text: Array.from({ length: 20 }, (_, index) => `output ${index + 1}`).join("\n"),
+        };
+        await finished;
+        yield { type: "finish", finishReason: "stop" };
+      },
+    };
+    const app = renderRepl(backend, cwd, 80, 20);
+    await typeText(app.stdin, "hello", "\r");
+    await vi.waitFor(() => expect(stripAnsi(app.lastFrame() ?? "")).toContain("first chunk"));
+    const beforeSecond = app.writes().length;
+
+    sendSecond();
+    await vi.waitFor(() => expect(stripAnsi(app.lastFrame() ?? "")).toContain("output 20"));
+    const staticWrites = app
+      .writes()
+      .slice(beforeSecond)
+      .filter((write) => write.includes("output 1") && !write.includes("mode: auto"));
+    expect(staticWrites).toHaveLength(0);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("star is thinking");
+
+    release();
+    await vi.waitFor(() => expect(app.lastFrame() ?? "").not.toContain("thinking"));
+    expect(stripAnsi(app.allOutput())).toContain("output 1");
+    app.unmount();
+  });
+
+  it("keeps todos attached to the input while a picker opens and closes", async () => {
+    let release = () => {};
+    const finished = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const backend: ChatBackend = {
+      async *stream(): AsyncGenerator<StreamEvent> {
+        yield {
+          type: "tool-call",
+          id: "todo-call",
+          name: "todo_write",
+          args: {
+            todos: [
+              { id: 1, title: "first task", status: "in_progress" },
+              { id: 2, title: "second task", status: "pending" },
+            ],
+          },
+        };
+        yield {
+          type: "tool-result",
+          id: "todo-call",
+          name: "todo_write",
+          content: "Todo list updated.",
+        };
+        yield { type: "text-delta", text: "working" };
+        await finished;
+        yield { type: "finish", finishReason: "stop" };
+      },
+    };
+    const config = makeConfig();
+    config.providers.push({
+      name: "provider",
+      protocol: "openai-compatible",
+      baseURL: "https://example.invalid",
+      apiKey: "test-key",
+    });
+    config.models.push(
+      { name: "test", provider: "provider", model: "model-one" },
+      { name: "other", provider: "provider", model: "model-two" },
+    );
+    const app = renderApp(
+      createElement(Repl, {
+        backend,
+        model: "test",
+        permissionMode: "auto",
+        config,
+        cwd,
+        sessionStore: null,
+      }),
+      { debug: false, columns: 80, rows: 24 },
+    );
+    await typeText(app.stdin, "hello", "\r");
+    await vi.waitFor(() => {
+      const frame = stripAnsi(app.lastFrame() ?? "");
+      expect(frame).toContain("second task");
+      expect(frame).toContain("working");
+      expect(frame).toContain("star is thinking");
+    });
+    const activeRows = stripAnsi(app.lastFrame() ?? "").split("\n");
+    const thinkingRow = activeRows.findIndex((line) => line.includes("star is thinking"));
+    const firstTodoRow = activeRows.findIndex((line) => line.includes("first task"));
+    const activeInputRow = activeRows.findIndex((line) => line.includes("│ ❯"));
+    expect(thinkingRow).toBeGreaterThanOrEqual(0);
+    expect(firstTodoRow).toBeGreaterThan(thinkingRow);
+    expect(activeInputRow).toBeGreaterThan(firstTodoRow);
+
+    release();
+    await vi.waitFor(() => expect(app.lastFrame() ?? "").not.toContain("star is thinking"));
+    const rowsBefore = stripAnsi(app.lastFrame() ?? "").split("\n");
+    const positionsBefore = {
+      output: rowsBefore.findIndex((line) => line.includes("working")),
+      todo: rowsBefore.findIndex((line) => line.includes("second task")),
+      input: rowsBefore.findIndex((line) => line.includes("│ ❯")),
+      status: rowsBefore.findIndex((line) => line.includes("mode: auto")),
+    };
+    expect(positionsBefore.input - positionsBefore.todo).toBe(2);
+
+    await typeText(app.stdin, "/model", "\r");
+    await vi.waitFor(() => expect(stripAnsi(app.lastFrame() ?? "")).toContain("Select a model"));
+    const pickerRows = stripAnsi(app.lastFrame() ?? "").split("\n");
+    const pickerFrame = pickerRows.join("\n");
+    const pickerInput = pickerRows.findIndex((line) => line.includes("│ ❯"));
+    expect(pickerInput - pickerRows.findIndex((line) => line.includes("second task"))).toBe(2);
+    expect(pickerRows.findIndex((line) => line.includes("Select a model"))).toBeGreaterThan(
+      pickerInput,
+    );
+    expect(pickerFrame).toContain("◐ first task");
+    expect(pickerFrame).toContain("○ second task");
+
+    await typeText(app.stdin, "\u001B");
+    await vi.waitFor(() =>
+      expect(stripAnsi(app.lastFrame() ?? "")).not.toContain("Select a model"),
+    );
+    const rowsAfter = stripAnsi(app.lastFrame() ?? "").split("\n");
+    expect({
+      output: rowsAfter.findIndex((line) => line.includes("working")),
+      todo: rowsAfter.findIndex((line) => line.includes("second task")),
+      input: rowsAfter.findIndex((line) => line.includes("│ ❯")),
+      status: rowsAfter.findIndex((line) => line.includes("mode: auto")),
+    }).toEqual(positionsBefore);
+    app.unmount();
+  });
+
   it("uses the full viewport for recent tool results between model steps", async () => {
     let release = () => {};
     const finished = new Promise<void>((resolve) => {
@@ -280,7 +424,7 @@ describe("production REPL layout", () => {
     app.unmount();
   });
 
-  it("keeps every model picker control visible above the fixed footer", async () => {
+  it("keeps the scrolling model picker below the input and above the status bar", async () => {
     const config = makeConfig();
     config.providers.push({
       name: "provider",
@@ -290,7 +434,11 @@ describe("production REPL layout", () => {
     });
     config.models.push(
       { name: "test", provider: "provider", model: "model-one" },
-      { name: "other", provider: "provider", model: "model-two" },
+      ...Array.from({ length: 13 }, (_, index) => ({
+        name: `model-${String(index + 1).padStart(2, "0")}`,
+        provider: "provider",
+        model: `model-${index + 1}`,
+      })),
     );
     const backend: ChatBackend = { async *stream(): AsyncGenerator<StreamEvent> {} };
     const app = renderApp(
@@ -313,12 +461,27 @@ describe("production REPL layout", () => {
       const frame = stripAnsi(app.lastFrame() ?? "");
       expect(frame).toContain("Select a model");
       expect(frame).toContain("❯ test");
-      expect(frame).toContain("other");
+      expect(frame).toContain("more below");
       expect(frame).toContain("[Enter] select");
       expect(frame).toContain("mode: auto");
     });
-    const frame = stripAnsi(app.lastFrame() ?? "");
-    expect(frame.split("\n").findIndex((line) => line.includes("mode: auto"))).toBe(22);
+    const initialLines = stripAnsi(app.lastFrame() ?? "").split("\n");
+    const inputRow = initialLines.findIndex((line) => line.includes("│ ❯"));
+    const pickerRow = initialLines.findIndex((line) => line.includes("Select a model"));
+    const statusRow = initialLines.findIndex((line) => line.includes("mode: auto"));
+    expect(inputRow).toBeGreaterThanOrEqual(0);
+    expect(pickerRow).toBeGreaterThan(inputRow);
+    expect(statusRow).toBeGreaterThan(pickerRow);
+    expect(statusRow).toBe(22);
+
+    await typeText(app.stdin, ...Array(config.models.length - 1).fill("\u001B[B"));
+    await vi.waitFor(() => {
+      const scrolled = stripAnsi(app.lastFrame() ?? "");
+      expect(scrolled).toContain("❯ model-13");
+      expect(scrolled).toContain("more above");
+      expect(scrolled).not.toContain("more below");
+      expect(scrolled).toContain("[Enter] select");
+    });
     app.unmount();
   });
 

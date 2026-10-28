@@ -549,6 +549,83 @@ describe("REPL turn guards", () => {
     },
   );
 
+  it(
+    "Esc cancels the mid-turn send picker without queueing or interrupting",
+    { timeout: 30_000 },
+    async () => {
+      const model = new MockLanguageModelV1({
+        doStream: async (options) => ({
+          stream: new ReadableStream({
+            start(controller) {
+              controller.enqueue({ type: "text-delta", textDelta: "working" });
+              const cut = () => {
+                try {
+                  controller.enqueue({
+                    type: "error",
+                    error: new Error("This operation was aborted"),
+                  });
+                  controller.close();
+                } catch {
+                  // Already closed by a normal stream finish.
+                }
+              };
+              if (options.abortSignal?.aborted) cut();
+              else options.abortSignal?.addEventListener("abort", cut, { once: true });
+            },
+          }),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        }),
+      });
+      const loop = new AgentLoop({
+        model,
+        registry: createDefaultRegistry(),
+        config: makeConfig({ gitSnapshots: false }),
+        cwd,
+      });
+      const app = renderRepl(loop, cwd);
+      await typeText(app.stdin, "hello", "\r");
+      await vi.waitFor(() => expect(stripAnsi(app.lastFrame() ?? "")).toContain("working"));
+      await typeText(app.stdin, "follow up", "\r");
+      await vi.waitFor(() => {
+        const frame = stripAnsi(app.lastFrame() ?? "");
+        expect(frame).toContain("Turn is running — how should this be sent?");
+        expect(frame).toContain("insert into the running turn");
+        expect(frame).toContain("queue for after the turn");
+      });
+      const pickerLines = stripAnsi(app.lastFrame() ?? "").split("\n");
+      const inputRow = pickerLines.findIndex((line) => line.includes("│ ❯"));
+      const pickerRow = pickerLines.findIndex((line) => line.includes("Turn is running"));
+      const statusRow = pickerLines.findIndex((line) => line.includes("mode: auto"));
+      expect(inputRow).toBeGreaterThanOrEqual(0);
+      expect(pickerRow).toBeGreaterThan(inputRow);
+      expect(statusRow).toBeGreaterThan(pickerRow);
+
+      app.stdin.write(ESC);
+      await vi.waitFor(() => {
+        const frame = stripAnsi(app.lastFrame() ?? "");
+        expect(frame).toContain("❯ follow up");
+        expect(frame).not.toContain("Turn is running — how should this be sent?");
+      });
+      expect(stripAnsi(app.lastFrame() ?? "")).not.toContain("queued: follow up");
+      expect(stripAnsi(app.lastFrame() ?? "")).not.toContain("[interrupted]");
+      expect(loop.takeUndeliveredSteers()).toEqual([]);
+
+      await typeText(app.stdin, "\r");
+      await vi.waitFor(() =>
+        expect(stripAnsi(app.lastFrame() ?? "")).toContain(
+          "Turn is running — how should this be sent?",
+        ),
+      );
+      await typeText(app.stdin, "\u001B[B", "\r");
+      await vi.waitFor(() =>
+        expect(stripAnsi(app.lastFrame() ?? "")).toContain("queued: follow up"),
+      );
+      app.stdin.write(ESC);
+      await tick();
+      app.unmount();
+    },
+  );
+
   it("Esc closes a picker without interrupting the running turn", { timeout: 30_000 }, async () => {
     const backend = streamingBackend([{ type: "text-delta", text: "working" }]);
     const app = renderRepl(backend, cwd);
