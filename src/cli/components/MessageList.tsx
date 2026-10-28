@@ -1,4 +1,4 @@
-import { Box, Text, useStdout } from "ink";
+import { Box, Static, Text } from "ink";
 import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { DiffLine } from "../diff-preview";
 import { cellWidth, renderMarkdown } from "../markdown";
@@ -182,11 +182,12 @@ export const MessageList = memo(function MessageList({
   termWidth?: number;
   maxLines?: number;
 }) {
-  const { write } = useStdout();
   const [initial] = useState(() => ({
     length: messages.length,
     view: collapseInitialMessages(messages),
   }));
+  const [archived, setArchived] = useState<{ id: number; text: string }[]>([]);
+  const archiveIdRef = useRef(0);
   const writtenRef = useRef<TailStart>({ messageIndex: 0, lineIndex: 0 });
   const writtenWidthRef = useRef(termWidth);
   const formattedRef = useRef(new Map<string, string>());
@@ -223,23 +224,30 @@ export const MessageList = memo(function MessageList({
   useLayoutEffect(() => {
     const history = formattedRange(formatted, writtenRef.current, historyEnd);
     if (history === "") return;
-    write(history);
+    const entry = { id: archiveIdRef.current++, text: history };
     writtenRef.current = historyEnd;
     writtenWidthRef.current = termWidth;
-  }, [formatted, historyEnd, termWidth, write]);
+    setArchived((current) => [...current, entry]);
+  }, [formatted, historyEnd, termWidth]);
 
-  if (maxLines === undefined || visibleStart.messageIndex === items.length) return null;
+  const tail = formattedRange(formatted, visibleStart, {
+    messageIndex: items.length,
+    lineIndex: 0,
+  }).replace(/\n$/, "");
   return (
-    <Box
-      flexDirection="column"
-      height={maxLines}
-      flexShrink={0}
-      overflowY="hidden"
-      justifyContent="flex-end"
-    >
-      <Text>
-        {formattedRange(formatted, visibleStart, { messageIndex: items.length, lineIndex: 0 })}
-      </Text>
-    </Box>
+    <>
+      <Static items={archived}>{(entry) => <Text key={entry.id}>{entry.text}</Text>}</Static>
+      {maxLines !== undefined && tail !== "" && (
+        <Box
+          flexDirection="column"
+          flexShrink={1}
+          minHeight={0}
+          overflowY="hidden"
+          justifyContent="flex-end"
+        >
+          <Text>{tail}</Text>
+        </Box>
+      )}
+    </>
   );
 });

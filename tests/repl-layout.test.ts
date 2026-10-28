@@ -14,6 +14,7 @@ import { rmWithRetry } from "./test-fs";
 process.env.STAR_NO_UPDATE_CHECK = "1";
 const { Repl } = await import("../src/cli/repl");
 const { MessageList } = await import("../src/cli/components/MessageList");
+const { Box, Text } = await import("ink");
 
 function makeConfig(): StarConfig {
   return {
@@ -211,13 +212,18 @@ describe("production REPL layout", () => {
     };
     const app = renderRepl(backend, cwd, 80, 24);
     await typeText(app.stdin, "inspect", "\r");
-    await vi.waitFor(() => expect(stripAnsi(app.lastFrame() ?? "")).toContain("three tool output"));
+    await vi.waitFor(() => {
+      const frame = stripAnsi(app.lastFrame() ?? "");
+      expect(frame).toContain("three tool output");
+      expect(frame).toContain("star is thinking");
+    });
     const frame = stripAnsi(app.lastFrame() ?? "");
     for (const name of ["one", "two", "three"]) {
       expect(frame).toContain(`src/${name}.js`);
       expect(frame).toContain(`${name} tool output`);
     }
     expect(frame).toContain("star is thinking");
+    expect(frame.split("\n").findIndex((line) => line.includes("❯ inspect"))).toBe(0);
     expect(frame.split("\n").findIndex((line) => line.includes("mode: auto"))).toBe(22);
 
     release();
@@ -274,6 +280,48 @@ describe("production REPL layout", () => {
     app.unmount();
   });
 
+  it("keeps every model picker control visible above the fixed footer", async () => {
+    const config = makeConfig();
+    config.providers.push({
+      name: "provider",
+      protocol: "openai-compatible",
+      baseURL: "https://example.invalid",
+      apiKey: "test-key",
+    });
+    config.models.push(
+      { name: "test", provider: "provider", model: "model-one" },
+      { name: "other", provider: "provider", model: "model-two" },
+    );
+    const backend: ChatBackend = { async *stream(): AsyncGenerator<StreamEvent> {} };
+    const app = renderApp(
+      createElement(Repl, {
+        backend,
+        model: "test",
+        permissionMode: "auto",
+        config,
+        cwd,
+        sessionStore: null,
+        initialMessages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: "reply" },
+        ],
+      }),
+      { debug: false, columns: 80, rows: 24 },
+    );
+    await typeText(app.stdin, "/model", "\r");
+    await vi.waitFor(() => {
+      const frame = stripAnsi(app.lastFrame() ?? "");
+      expect(frame).toContain("Select a model");
+      expect(frame).toContain("❯ test");
+      expect(frame).toContain("other");
+      expect(frame).toContain("[Enter] select");
+      expect(frame).toContain("mode: auto");
+    });
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame.split("\n").findIndex((line) => line.includes("mode: auto"))).toBe(22);
+    app.unmount();
+  });
+
   it("lays out the footer after shrinking both terminal dimensions", async () => {
     const backend: ChatBackend = { async *stream(): AsyncGenerator<StreamEvent> {} };
     const app = renderRepl(backend, cwd, 100, 24);
@@ -292,6 +340,26 @@ describe("production REPL layout", () => {
 });
 
 describe("production message history", () => {
+  it("uses only the height of the visible tail instead of reserving a blank viewport", async () => {
+    const app = renderApp(
+      createElement(
+        Box,
+        { flexDirection: "column", height: 12 },
+        createElement(MessageList, {
+          messages: [{ id: 0, role: "user", text: "short" }],
+          termWidth: 80,
+          maxLines: 10,
+        }),
+        createElement(Text, null, "thinking"),
+      ),
+      { debug: false, rows: 12 },
+    );
+    await vi.waitFor(() => expect(stripAnsi(app.lastFrame() ?? "")).toContain("thinking"));
+    const lines = stripAnsi(app.lastFrame() ?? "").split("\n");
+    expect(lines.findIndex((line) => line.includes("thinking"))).toBe(2);
+    app.unmount();
+  });
+
   it("appends each message once and does not replay a previous mount", async () => {
     const first = [{ id: 0, role: "system" as const, text: "first history message" }];
     const app = renderApp(createElement(MessageList, { messages: first, termWidth: 80 }), {

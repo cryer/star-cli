@@ -98,7 +98,7 @@ import {
   ThinkingIndicator,
   truncateTail,
 } from "./components/ThinkingIndicator";
-import { TodoPanel, visibleTodoWindow } from "./components/TodoPanel";
+import { TodoPanel } from "./components/TodoPanel";
 import { type ToolCardData, formatToolCard } from "./components/ToolCallCard";
 import { computeCostUsd, estimateCost, formatDollars, formatTokens } from "./cost";
 import { type DiffLine, type DiffPreview, generateDiffPreview } from "./diff-preview";
@@ -2118,34 +2118,15 @@ export function Repl({
   }, [cwd, config, isStreaming, epoch, modelName]);
 
   const sessionCost = sessionCostUsd();
-  const todoWindow = visibleTodoWindow(todos);
-  const todoRows =
-    todos.length === 0 || todos.every((todo) => todo.status === "done")
-      ? 0
-      : todoWindow.items.length +
-        Number(todoWindow.hiddenBefore > 0) +
-        Number(todoWindow.hiddenAfter > 0);
   const activityVisible = isStreaming || activity !== null;
-  const liveRows =
-    (activityVisible ? (thinkingText === "" ? 1 : 2) : thoughtSummary !== null ? 1 : 0) +
-    Math.min(queueItems.length, MAX_VISIBLE_QUEUED) +
-    Number(queueItems.length > MAX_VISIBLE_QUEUED) +
-    pendingImages.length +
-    todoRows;
   const hasStreamingText = streamingText !== null && streamingText !== "";
-  const contentRows = Math.max(1, rows - (hasStreamingText ? 7 : 5) - liveRows);
+  const contentRows = Math.max(1, rows - (hasStreamingText ? 7 : 5));
   const historyRows = hasStreamingText ? Math.min(2, contentRows) : contentRows;
   const streamingMaxLines = Math.max(1, contentRows - historyRows);
 
   return (
     <Box flexDirection="column" height={Math.max(1, rows - 1)} overflow="hidden">
-      <Box
-        flexDirection="column"
-        flexGrow={1}
-        minHeight={0}
-        overflowY="hidden"
-        justifyContent="flex-end"
-      >
+      <Box flexDirection="column" flexGrow={1} minHeight={0} overflowY="hidden">
         <MessageList
           key={`messages-${epoch}`}
           messages={messages}
