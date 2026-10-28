@@ -46,7 +46,7 @@ export function formatElapsedSeconds(seconds: number): string {
 // remainder, once the buffer holds at least minCompleteLines complete lines.
 // The last line is always kept in the remainder: it may still be growing.
 // The head is further capped at a markdown block boundary (never mid-table
-// or mid-fence) because committed chunks render standalone in static history.
+// or mid-fence) because committed chunks render standalone in terminal history.
 // Returns null when there is nothing worth committing yet.
 export function splitCommittableLines(
   text: string,

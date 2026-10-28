@@ -10,6 +10,10 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ## [Unreleased]
 
+### Fixed
+
+- **stable, smoother terminal streaming**: long answers now stay inside a bounded scrolling viewport with a fixed input/status footer, including during terminal resize. The live UI grows only as needed instead of filling the screen, so a newly submitted prompt remains visible above the footer. Streaming flushes are event-driven with low-latency coalescing, incomplete Markdown no longer reparses on every frame, and tool/history redraws no longer replay stale Ink Static output or leave old cards and borders flashing over new content
+
 ## [0.3.14] - 2026-10-24
 
 ### Added

@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TICK_MS, isMotionDisabled, nextFlush, startTicker } from "../src/cli/ticker";
+import {
+  STREAM_FLUSH_MS,
+  TICK_MS,
+  createFlushScheduler,
+  isMotionDisabled,
+  nextFlush,
+  startTicker,
+} from "../src/cli/ticker";
 
 describe("isMotionDisabled", () => {
   it("only enables reduced motion for STAR_NO_MOTION=1", () => {
@@ -52,5 +59,39 @@ describe("startTicker", () => {
     stop();
     vi.advanceTimersByTime(TICK_MS * 5);
     expect(ticks).toEqual([1]);
+  });
+});
+
+describe("createFlushScheduler", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("flushes the first request immediately and coalesces the trailing request", () => {
+    const flush = vi.fn();
+    const scheduler = createFlushScheduler(flush);
+    scheduler.request();
+    expect(flush).toHaveBeenCalledTimes(1);
+    scheduler.request();
+    scheduler.request();
+    vi.advanceTimersByTime(STREAM_FLUSH_MS - 1);
+    expect(flush).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1);
+    expect(flush).toHaveBeenCalledTimes(2);
+    scheduler.stop();
+  });
+
+  it("cancels a pending trailing flush on stop", () => {
+    const flush = vi.fn();
+    const scheduler = createFlushScheduler(flush);
+    scheduler.request();
+    scheduler.request();
+    scheduler.stop();
+    vi.advanceTimersByTime(STREAM_FLUSH_MS * 2);
+    expect(flush).toHaveBeenCalledTimes(1);
   });
 });

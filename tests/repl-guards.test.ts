@@ -121,7 +121,7 @@ describe("REPL turn guards", () => {
       await typeText(app.stdin, "/new", "\r");
       await vi.waitFor(
         () => {
-          expect(stripAnsi(app.lastFrame() ?? "")).toContain(
+          expect(stripAnsi(app.allOutput())).toContain(
             "Busy — wait for the turn to finish or press Esc to interrupt it.",
           );
         },
@@ -131,12 +131,12 @@ describe("REPL turn guards", () => {
       await typeText(app.stdin, "/cost", "\r");
       await vi.waitFor(
         () => {
-          expect(stripAnsi(app.lastFrame() ?? "")).toContain("API usage this session");
+          expect(stripAnsi(app.allOutput())).toContain("API usage this session");
         },
         { timeout: 15_000 },
       );
       // /new never ran: no "Started a new session" message.
-      expect(stripAnsi(app.lastFrame() ?? "")).not.toContain("Started a new session");
+      expect(stripAnsi(app.allOutput())).not.toContain("Started a new session");
       app.stdin.write(ESC);
       await tick();
       app.unmount();
@@ -174,7 +174,7 @@ describe("REPL turn guards", () => {
       const frame = stripAnsi(app.lastFrame() ?? "");
       expect(frame).not.toContain("Hello woHello world");
       expect(frame.match(/Hello world/g)).toHaveLength(1);
-      expect(frame).toContain("Request failed, retrying (2/4)");
+      expect(stripAnsi(app.allOutput())).toContain("Request failed, retrying (2/4)");
       app.unmount();
     },
   );
@@ -368,18 +368,18 @@ describe("REPL turn guards", () => {
       await typeText(app.stdin, "/compact", "\r");
       await vi.waitFor(
         () => {
-          expect(stripAnsi(app.lastFrame() ?? "")).toContain("Busy — /compact is still running.");
+          expect(stripAnsi(app.allOutput())).toContain("Busy — /compact is still running.");
         },
         { timeout: 15_000 },
       );
       await typeText(app.stdin, "/new", "\r");
       await tick();
-      expect(stripAnsi(app.lastFrame() ?? "")).not.toContain("Started a new session");
+      expect(stripAnsi(app.allOutput())).not.toContain("Started a new session");
       // Release the compaction: the rewrite lands, then the queued prompt runs.
       release();
       await vi.waitFor(
         () => {
-          expect(stripAnsi(app.lastFrame() ?? "")).toContain("Compacted context");
+          expect(stripAnsi(app.allOutput())).toContain("Compacted context");
         },
         { timeout: 15_000 },
       );

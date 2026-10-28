@@ -9,6 +9,7 @@ interface StatusBarProps {
   model: string;
   permissionMode: string;
   tokens: number;
+  columns?: number;
   // Git branch, refreshed on turn boundaries by the parent (null = not a repo).
   gitBranch?: string | null;
   // Context window usage in percent; null when unknown (non-loop backend).
@@ -72,6 +73,7 @@ export const StatusBar = memo(function StatusBar({
   model,
   permissionMode,
   tokens,
+  columns: columnsProp,
   gitBranch,
   contextPercent,
   contextTokens,
@@ -80,7 +82,7 @@ export const StatusBar = memo(function StatusBar({
   backgroundTasks = [],
 }: StatusBarProps) {
   const { stdout } = useStdout();
-  const columns = stdout?.columns ?? 80;
+  const columns = columnsProp ?? stdout?.columns ?? 80;
   const wide = columns >= WIDE_COLUMNS;
   const cwdSegment = `${folderIcon}${cwdLabel(cwd, wide)}${gitBranch ? ` [${gitBranch}]` : ""}`;
   const modelSegment = `✦ ${model}`;

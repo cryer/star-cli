@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
-import { createElement } from "react";
+import { type ReactElement, createElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentLoop } from "../src/agent/loop";
 import type { StarConfig } from "../src/config/schema";
@@ -12,6 +12,10 @@ import { rmWithRetry } from "./test-fs";
 
 process.env.STAR_NO_UPDATE_CHECK = "1";
 const { Repl } = await import("../src/cli/repl");
+
+function renderStatusApp(node: ReactElement) {
+  return renderApp(node, { debug: false });
+}
 
 function makeConfig(): StarConfig {
   return {
@@ -73,7 +77,7 @@ describe("StatusBar context percent", () => {
         config,
         cwd,
       });
-      const app = renderApp(
+      const app = renderStatusApp(
         createElement(Repl, {
           backend,
           model: "test",
@@ -110,7 +114,7 @@ describe("StatusBar context percent", () => {
       config,
       cwd,
     });
-    const app = renderApp(
+    const app = renderStatusApp(
       createElement(Repl, {
         backend,
         model: "test",
@@ -159,7 +163,7 @@ describe("StatusBar context percent", () => {
       config,
       cwd,
     });
-    const app = renderApp(
+    const app = renderStatusApp(
       createElement(Repl, {
         backend,
         model: "test",
@@ -184,7 +188,7 @@ describe("StatusBar context percent", () => {
     await typeText(app.stdin, "/model big", "\r");
     await vi.waitFor(
       () => {
-        expect(stripAnsi(app.lastFrame() ?? "")).toContain('Switched to model "big"');
+        expect(stripAnsi(app.allOutput())).toContain('Switched to model "big"');
       },
       { timeout: 15_000 },
     );
@@ -259,7 +263,7 @@ describe("StatusBar context percent", () => {
         config,
         cwd,
       });
-      const app = renderApp(
+      const app = renderStatusApp(
         createElement(Repl, {
           backend,
           model: "test",
@@ -285,7 +289,7 @@ describe("StatusBar context percent", () => {
       );
       await vi.waitFor(
         () => {
-          expect(stripAnsi(app.lastFrame() ?? "")).toContain("done");
+          expect(stripAnsi(app.allOutput())).toContain("done");
         },
         { timeout: 20_000 },
       );

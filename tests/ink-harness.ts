@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import type { ReactElement } from "react";
+import { createInkStdout } from "../src/cli/ink-stdout";
 
 // Force chalk (used by ink) to emit ANSI styles in this non-TTY environment.
 // Must run before ink is imported, hence the dynamic import below.
@@ -18,24 +19,33 @@ export interface InkApp {
   // Every frame ever written, concatenated — for output that a later frame
   // (e.g. the unmount repaint after exit()) overwrites in lastFrame().
   allOutput(): string;
+  resize(columns: number, rows: number): void;
   rerender(node: ReactElement): void;
   unmount(): void;
 }
 
+export interface InkHarnessOptions {
+  debug?: boolean;
+  columns?: number;
+  rows?: number;
+}
+
 // Mirrors ink-testing-library's harness; it cannot be required directly because
 // its CJS entry does require("ink") and ink 5 is ESM with top-level await.
-export function renderApp(node: ReactElement): InkApp {
+export function renderApp(node: ReactElement, options: InkHarnessOptions = {}): InkApp {
   let lastFrame: string | undefined;
   let output = "";
   const stdout = new EventEmitter() as EventEmitter & {
     write(frame: string): void;
     columns: number;
+    rows: number;
   };
   stdout.write = (frame: string) => {
     lastFrame = frame;
     output += frame;
   };
-  stdout.columns = 100;
+  stdout.columns = options.columns ?? 100;
+  stdout.rows = options.rows ?? 24;
   const stdin = new Readable({ read() {} }) as Readable & {
     setRawMode(): void;
     isTTY: boolean;
@@ -44,10 +54,11 @@ export function renderApp(node: ReactElement): InkApp {
   stdin.isTTY = true;
   (stdin as unknown as { ref(): void; unref(): void }).ref = () => {};
   (stdin as unknown as { ref(): void; unref(): void }).unref = () => {};
+  const debug = options.debug ?? true;
   const instance = inkRender(node, {
-    stdout: stdout as never,
+    stdout: (debug ? stdout : createInkStdout(stdout as never)) as never,
     stdin: stdin as never,
-    debug: true,
+    debug,
     // Mirrors REPL_RENDER_OPTIONS in src/cli/repl.tsx (production value).
     exitOnCtrlC: false,
   });
@@ -55,6 +66,11 @@ export function renderApp(node: ReactElement): InkApp {
     stdin: { write: (s: string) => stdin.push(s) },
     lastFrame: () => lastFrame,
     allOutput: () => output,
+    resize(columns: number, rows: number) {
+      stdout.columns = columns;
+      stdout.rows = rows;
+      stdout.emit("resize");
+    },
     rerender: (node: ReactElement) => instance.rerender(node),
     unmount: () => instance.unmount(),
   };

@@ -202,7 +202,7 @@ function renderTable(lines: string[], base: string, maxWidth: number): string[] 
 // Longest leading run of lines that ends at a markdown block boundary: not
 // inside a fenced code block, and not inside a run of pipe lines (a table, or
 // a would-be table whose separator is still streaming). The REPL commits
-// streamed text to static history in chunks and each chunk is rendered
+// streamed text to terminal history in chunks and each chunk is rendered
 // standalone, so a chunk must never end mid-construct — a table split in two
 // would render its tail as raw pipe text.
 export function committableLineCount(lines: string[]): number {

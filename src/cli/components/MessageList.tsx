@@ -1,8 +1,8 @@
-import { Box, Static, Text, useStdout } from "ink";
-import { memo, useState } from "react";
+import { useStdout } from "ink";
+import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { DiffLine } from "../diff-preview";
 import { renderMarkdown } from "../markdown";
-import { DiffLines } from "./DiffLines";
+import { toTerminalSafe } from "../terminal-text";
 
 export interface DisplayMessage {
   id: number;
@@ -30,17 +30,61 @@ export interface DisplayMessage {
   collapsed?: number;
 }
 
-const roleStyles: Record<
-  Exclude<DisplayMessage["role"], "assistant-cont" | "user" | "tool">,
-  { label: string; color: string }
-> = {
-  assistant: { label: "✦ star", color: "green" },
-  system: { label: "● system", color: "yellow" },
+const ANSI = {
+  reset: "\u001B[0m",
+  bold: "\u001B[1m",
+  dim: "\u001B[2m",
+  green: "\u001B[32m",
+  yellow: "\u001B[33m",
+  magenta: "\u001B[35m",
+  cyan: "\u001B[36m",
 };
 
-const interruptedMarker = (text: string) => (
-  <Text dimColor>{text.length > 0 ? " [interrupted]" : "[interrupted]"}</Text>
-);
+function styled(text: string, ...codes: string[]): string {
+  return `${codes.join("")}${text}${ANSI.reset}`;
+}
+
+function interruptedMarker(text: string): string {
+  return styled(text.length > 0 ? " [interrupted]" : "[interrupted]", ANSI.dim);
+}
+
+function formatDiff(line: DiffLine): string {
+  const text = toTerminalSafe(line.text);
+  if (line.kind === "add") return styled(`+ ${text}`, ANSI.green);
+  if (line.kind === "del") return styled(`- ${text}`, "\u001B[31m");
+  return styled(line.kind === "marker" ? text : ` ${text}`, ANSI.dim);
+}
+
+export function formatDisplayMessage(message: DisplayMessage, termWidth = 80): string {
+  const margin = message.tight ? "" : "\n";
+  if (message.collapsed !== undefined) {
+    return `${styled(`… ${message.collapsed} earlier messages hidden — full history in the session file`, ANSI.dim)}\n${margin}`;
+  }
+  const interrupted = message.interrupted ? interruptedMarker(message.text) : "";
+  const note = message.note
+    ? `\n${styled(message.role === "user" ? ` ${message.note}` : message.note, ANSI.dim)}`
+    : "";
+  const diff = message.diff?.length
+    ? `\n${message.diff.map((line) => formatDiff(line)).join("\n")}`
+    : "";
+  if (message.role === "assistant-cont") {
+    return `${styled(renderMarkdown(message.text, "32", termWidth) + interrupted, ANSI.green)}\n${margin}`;
+  }
+  if (message.role === "user") {
+    const color = message.steer ? ANSI.magenta : ANSI.cyan;
+    const prefix = styled(message.steer ? "» " : "❯ ", ANSI.bold, color);
+    return `${prefix}${styled(message.text + interrupted, color)}${note}\n${margin}`;
+  }
+  if (message.role === "tool") {
+    const text = message.dim ? styled(message.text, ANSI.dim) : styled(message.text, ANSI.magenta);
+    return `${text}${diff}\n${margin}`;
+  }
+  const assistant = message.role === "assistant";
+  const color = assistant ? ANSI.green : ANSI.yellow;
+  const label = assistant ? "✦ star" : "● system";
+  const text = assistant ? renderMarkdown(message.text, "32", termWidth) : message.text;
+  return `${styled(label, ANSI.bold, color)}\n${styled(text + interrupted, color)}${diff}${note}\n${margin}`;
+}
 
 // How many entries of an initial (resumed) history batch render in full;
 // anything older folds into a single placeholder line.
@@ -65,92 +109,31 @@ export function collapseInitialMessages(
   return { hidden: messages.length - limit, visible: messages.slice(-limit) };
 }
 
-export const MessageList = memo(function MessageList({ messages }: { messages: DisplayMessage[] }) {
-  const { stdout } = useStdout();
-  const termWidth = stdout.columns ?? 80;
-  // Captured once at mount: only the batch already present is eligible for
-  // collapsing. Within one mount the list is append-only (wholesale rewrites
-  // go through redrawMessages/applyMessages in repl.tsx, which bump the
-  // epoch key and remount this component), so everything past the initial
-  // length is a live-turn append and always renders in full.
+export const MessageList = memo(function MessageList({
+  messages,
+  termWidth = 80,
+}: {
+  messages: DisplayMessage[];
+  termWidth?: number;
+}) {
+  const { write } = useStdout();
   const [initial] = useState(() => ({
     length: messages.length,
     view: collapseInitialMessages(messages),
   }));
-  const placeholder: DisplayMessage[] =
-    initial.view.hidden > 0
-      ? [{ id: -1, role: "system", text: "", collapsed: initial.view.hidden }]
-      : [];
-  const items = [...placeholder, ...initial.view.visible, ...messages.slice(initial.length)];
-  return (
-    <Static items={items}>
-      {(message) => {
-        if (message.collapsed !== undefined) {
-          return (
-            <Box key={message.id} flexDirection="column" marginBottom={1}>
-              <Text dimColor>
-                … {message.collapsed} earlier messages hidden — full history in the session file
-              </Text>
-            </Box>
-          );
-        }
-        const marginBottom = message.tight ? 0 : 1;
-        if (message.role === "assistant-cont") {
-          return (
-            <Box key={message.id} flexDirection="column" marginBottom={marginBottom}>
-              <Text color="green">
-                {renderMarkdown(message.text, "32", termWidth)}
-                {message.interrupted && interruptedMarker(message.text)}
-              </Text>
-            </Box>
-          );
-        }
-        if (message.role === "user") {
-          const color = message.steer ? "magenta" : "cyan";
-          return (
-            <Box key={message.id} flexDirection="column" marginBottom={marginBottom}>
-              <Box>
-                <Text bold color={color}>
-                  {message.steer ? "» " : "❯ "}
-                </Text>
-                <Text color={color}>
-                  {message.text}
-                  {message.interrupted && interruptedMarker(message.text)}
-                </Text>
-              </Box>
-              {message.note && <Text dimColor> {message.note}</Text>}
-            </Box>
-          );
-        }
-        if (message.role === "tool") {
-          // The card text carries its own tool icon + name header, so no
-          // separate label line is needed.
-          return (
-            <Box key={message.id} flexDirection="column" marginBottom={marginBottom}>
-              <Text color={message.dim ? undefined : "magenta"} dimColor={message.dim}>
-                {message.text}
-              </Text>
-              {message.diff && <DiffLines lines={message.diff} />}
-            </Box>
-          );
-        }
-        const style = roleStyles[message.role];
-        return (
-          <Box key={message.id} flexDirection="column" marginBottom={marginBottom}>
-            <Text bold color={style.color}>
-              {style.label}
-            </Text>
-            <Text color={style.color}>
-              {message.role === "assistant"
-                ? renderMarkdown(message.text, "32", termWidth)
-                : message.text}
-              {message.interrupted && interruptedMarker(message.text)}
-            </Text>
-            {message.diff && <DiffLines lines={message.diff} />}
-            {message.note && <Text dimColor>{message.note}</Text>}
-          </Box>
-        );
-      }}
-    </Static>
-  );
+  const writtenRef = useRef(0);
+  const items = useMemo(() => {
+    const placeholder: DisplayMessage[] =
+      initial.view.hidden > 0
+        ? [{ id: -1, role: "system", text: "", collapsed: initial.view.hidden }]
+        : [];
+    return [...placeholder, ...initial.view.visible, ...messages.slice(initial.length)];
+  }, [initial, messages]);
+  useLayoutEffect(() => {
+    const pending = items.slice(writtenRef.current);
+    if (pending.length === 0) return;
+    writtenRef.current = items.length;
+    write(pending.map((message) => formatDisplayMessage(message, termWidth)).join(""));
+  }, [items, termWidth, write]);
+  return null;
 });

@@ -9,9 +9,8 @@ const SYMBOLS: Record<TodoItem["status"], string> = {
   done: "●",
 };
 
-// The panel lives in Ink's live region, so its height must stay bounded:
-// an unbounded list can reach terminal height, at which point Ink repaints
-// the entire static history on every frame (the "scroll spam" bug).
+// The panel shares the bounded live viewport with streaming text and
+// prompts, so it must not crowd the fixed footer off the screen.
 export const MAX_VISIBLE_TODOS = 10;
 
 export interface TodoWindow {

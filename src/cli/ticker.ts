@@ -1,4 +1,5 @@
 export const TICK_MS = 100;
+export const STREAM_FLUSH_MS = 40;
 
 export function isMotionDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.STAR_NO_MOTION === "1";
@@ -16,10 +17,8 @@ export function nextFlush(prev: FlushState, next: FlushState): FlushState | null
   return next;
 }
 
-// Shared 100ms interval helper. The Repl's stream flush and the
-// ThinkingIndicator's spinner each run their own instance, so the spinner's
-// per-frame re-render stays inside the indicator instead of touching the
-// Repl root. Returns a stop function; the callback receives the tick count.
+// The ThinkingIndicator owns its interval so spinner frames do not set state
+// on the Repl root. Returns a stop function; the callback receives the tick count.
 export function startTicker(onTick: (tick: number) => void, intervalMs = TICK_MS): () => void {
   let tick = 0;
   const timer = setInterval(() => {
@@ -27,4 +26,37 @@ export function startTicker(onTick: (tick: number) => void, intervalMs = TICK_MS
     onTick(tick);
   }, intervalMs);
   return () => clearInterval(timer);
+}
+
+export interface FlushScheduler {
+  request(): void;
+  stop(): void;
+}
+
+export function createFlushScheduler(
+  onFlush: () => void,
+  intervalMs = STREAM_FLUSH_MS,
+): FlushScheduler {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let lastFlush = Number.NEGATIVE_INFINITY;
+  let stopped = false;
+  const flush = () => {
+    if (stopped) return;
+    timer = null;
+    lastFlush = Date.now();
+    onFlush();
+  };
+  return {
+    request() {
+      if (stopped || timer) return;
+      const wait = Math.max(0, intervalMs - (Date.now() - lastFlush));
+      if (wait === 0) flush();
+      else timer = setTimeout(flush, wait);
+    },
+    stop() {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      timer = null;
+    },
+  };
 }

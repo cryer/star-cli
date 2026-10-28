@@ -1,4 +1,4 @@
-import { Box, Text, render, useApp } from "ink";
+import { Box, Text, render, useApp, useStdout } from "ink";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type AgentTaskSnapshot,
@@ -98,7 +98,7 @@ import {
   ThinkingIndicator,
   truncateTail,
 } from "./components/ThinkingIndicator";
-import { TodoPanel } from "./components/TodoPanel";
+import { TodoPanel, visibleTodoWindow } from "./components/TodoPanel";
 import { type ToolCardData, formatToolCard } from "./components/ToolCallCard";
 import { computeCostUsd, estimateCost, formatDollars, formatTokens } from "./cost";
 import { type DiffLine, type DiffPreview, generateDiffPreview } from "./diff-preview";
@@ -113,6 +113,7 @@ import {
 } from "./format";
 import { appendHistory, loadHistory } from "./history";
 import { thinkingIcon, toolIcon } from "./icons";
+import { createInkStdout } from "./ink-stdout";
 import { resolveMentions } from "./mentions";
 import { notifyBell } from "./notify";
 import { PromptQueue, type QueuedPrompt } from "./queue";
@@ -120,9 +121,10 @@ import { executeShellBang } from "./shell-bang";
 import { SYSTEM_PROMPT } from "./system-prompt";
 import { toTerminalSafe } from "./terminal-text";
 import { TerminalTitle } from "./terminal-title";
-import { type FlushState, nextFlush, startTicker } from "./ticker";
+import { type FlushState, createFlushScheduler, nextFlush } from "./ticker";
 import { checkForUpdate } from "./update-check";
 import { useInput } from "./use-input";
+import { useTerminalSize } from "./use-terminal-size";
 
 // Matches ansi-escapes' clearTerminal (Ink pulls the same sequence for its
 // own full redraws): erase screen + scrollback, cursor home.
@@ -250,6 +252,8 @@ export function Repl({
   initialUsage,
 }: ReplProps) {
   const { exit } = useApp();
+  const { write: writeStdout } = useStdout();
+  const { columns, rows } = useTerminalSize();
   const [initialDisplay] = useState(() => buildDisplayMessages(initialMessages ?? []));
   const [messages, setMessages] = useState<DisplayMessage[]>(initialDisplay);
   const [epoch, setEpoch] = useState(0);
@@ -288,9 +292,9 @@ export function Repl({
   const busyAbortRef = useRef<AbortController | null>(null);
   const streamedRef = useRef("");
   const turnStartedAtRef = useRef(0);
-  // Chars of streamedRef already committed to static history by the ticker.
-  // The live region renders only the suffix past this point, and a stream
-  // retry rolls the buffer back to it (the resend re-streams from scratch).
+  // Chars of streamedRef already committed to terminal history by the flush
+  // scheduler. The live region renders only the suffix past this point, and
+  // a retry rolls back to it because the resend re-streams from scratch.
   const lastCommittedLenRef = useRef(0);
   const thinkingRef = useRef(false);
   const reasoningRef = useRef("");
@@ -327,7 +331,7 @@ export function Repl({
     configRef.current = config;
   }, [config]);
   const usageRef = useRef<UsageStats>(initialUsage ? { ...initialUsage } : emptyUsage());
-  // Number of assistant chunks already committed to static history this turn;
+  // Number of assistant chunks already committed to terminal history this turn;
   // 0 means the next streamed text still needs the "star" header.
   const turnChunksRef = useRef(0);
   // Mirror of `messages` for code that needs the current list synchronously
@@ -384,24 +388,18 @@ export function Repl({
     [],
   );
 
-  // Replace the whole history and remount the list (fresh Static instance).
   const applyMessages = useCallback((next: DisplayMessage[]) => {
     messagesRef.current = next;
     setMessages(next);
     setEpoch((e) => e + 1);
   }, []);
 
-  // Ink's <Static> can only append — dropping items from state does not erase
-  // them from the terminal. Clear the screen first, then let the remounted
-  // Static rewrite the surviving history.
   const redrawMessages = useCallback(
     (next: DisplayMessage[]) => {
-      if (process.stdout.isTTY) {
-        process.stdout.write(CLEAR_TERMINAL);
-      }
+      if (process.stdout.isTTY) writeStdout(CLEAR_TERMINAL);
       applyMessages(next);
     },
-    [applyMessages],
+    [applyMessages, writeStdout],
   );
 
   const pushAssistantChunk = useCallback(
@@ -1063,10 +1061,9 @@ export function Repl({
       setIsStreaming(true);
       terminalTitle().start();
       flushedRef.current = { streamed: "", reasoning: "" };
-      // Move the current streaming buffer into static history. Used at tool-call
-      // boundaries (to keep chronological order) and by the ticker for long
-      // answers, so the live redraw area — and with it the visible flicker —
-      // stays small no matter how long the answer gets.
+      // Commit safe blocks into terminal history at tool boundaries and as
+      // complete lines accumulate. The bounded live viewport handles blocks
+      // that must stay whole, such as fences and tables.
       const commitStreamed = (tight: boolean) => {
         const uncommitted = streamedRef.current.slice(lastCommittedLenRef.current);
         if (uncommitted.length > 0) {
@@ -1077,7 +1074,7 @@ export function Repl({
         flushedRef.current = { ...flushedRef.current, streamed: "" };
         setStreamingText("");
       };
-      tickerStopRef.current = startTicker(() => {
+      const scheduler = createFlushScheduler(() => {
         const uncommitted = streamedRef.current.slice(lastCommittedLenRef.current);
         const split = splitCommittableLines(uncommitted, 8);
         if (split) {
@@ -1096,6 +1093,7 @@ export function Repl({
           setThinkingText(next.reasoning);
         }
       });
+      tickerStopRef.current = scheduler.stop;
       try {
         for await (const event of backendRef.current.stream(
           images.length > 0 ? { text: resolved.input, images } : resolved.input,
@@ -1118,8 +1116,10 @@ export function Repl({
               }
             }
             streamedRef.current += toTerminalSafe(event.text);
+            scheduler.request();
           } else if (event.type === "reasoning") {
             reasoningRef.current += toTerminalSafe(event.text);
+            scheduler.request();
           } else if (event.type === "tool-call") {
             // Flush the text spoken before this call into history first, so the
             // card lands in chronological order instead of after the whole turn.
@@ -1160,7 +1160,7 @@ export function Repl({
               argsSummary: "",
             };
             toolCardsRef.current.delete(event.id);
-            // Rendered once, straight into static history — no live card region
+            // Rendered once, straight into terminal history — no live card region
             // that would have to be erased (and could linger) at turn end.
             pushMessage(
               "tool",
@@ -1183,7 +1183,7 @@ export function Repl({
             // The resend re-streams the reply from scratch, so roll the
             // buffer back to the committed prefix: the failed attempt's
             // uncommitted tail must go before it duplicates on screen.
-            // Already-committed chunks stay (static history can't be edited).
+            // Already-committed chunks stay (terminal history can't be edited).
             streamedRef.current = streamedRef.current.slice(0, lastCommittedLenRef.current);
             flushedRef.current = { ...flushedRef.current, streamed: "" };
             setStreamingText("");
@@ -1693,9 +1693,8 @@ export function Repl({
           return "Nothing to undo (no conversation turn to retract).";
         }
         // Mirror the retraction on screen: drop the last prompt and everything
-        // the turn produced (answer chunks, tool cards, notifications). Static
-        // output cannot be edited in place, so the surviving history is
-        // redrawn from a cleared screen.
+        // the turn produced, then redraw the surviving terminal history from
+        // a cleared screen.
         const visible = messagesRef.current;
         let cut = -1;
         for (let i = visible.length - 1; i >= 0; i--) {
@@ -2119,106 +2118,136 @@ export function Repl({
   }, [cwd, config, isStreaming, epoch, modelName]);
 
   const sessionCost = sessionCostUsd();
+  const todoWindow = visibleTodoWindow(todos);
+  const todoRows =
+    todos.length === 0 || todos.every((todo) => todo.status === "done")
+      ? 0
+      : todoWindow.items.length +
+        Number(todoWindow.hiddenBefore > 0) +
+        Number(todoWindow.hiddenAfter > 0);
+  const liveRows =
+    (thinking || activity !== null ? 2 : thoughtSummary !== null ? 1 : 0) +
+    Math.min(queueItems.length, MAX_VISIBLE_QUEUED) +
+    Number(queueItems.length > MAX_VISIBLE_QUEUED) +
+    pendingImages.length +
+    todoRows;
+  const streamingMaxLines = Math.max(1, rows - 8 - liveRows);
 
   return (
-    <Box flexDirection="column">
-      <MessageList key={`messages-${epoch}`} messages={messages} />
-      {(thinking || activity !== null) && (
-        <ThinkingIndicator
-          reasoning={thinkingText}
-          activity={activity ?? undefined}
-          startedAt={turnStartedAtRef.current}
+    <Box flexDirection="column" overflow="hidden">
+      <MessageList key={`messages-${epoch}`} messages={messages} termWidth={columns} />
+      <Box
+        flexDirection="column"
+        flexGrow={1}
+        minHeight={0}
+        overflowY="hidden"
+        justifyContent="flex-end"
+      >
+        {(thinking || activity !== null) && (
+          <ThinkingIndicator
+            reasoning={thinkingText}
+            activity={activity ?? undefined}
+            startedAt={turnStartedAtRef.current}
+          />
+        )}
+        {!thinking && activity === null && thoughtSummary !== null && (
+          <Text dimColor>{thoughtSummary}</Text>
+        )}
+        {streamingText !== null && (streamingText !== "" || turnChunksRef.current === 0) && (
+          <StreamingMessage
+            text={streamingText}
+            continuation={turnChunksRef.current > 0}
+            maxLines={streamingMaxLines}
+            columns={columns}
+          />
+        )}
+        {pending && (
+          <PermissionPrompt
+            request={pending.request}
+            preview={pending.preview}
+            onDecision={handleDecision}
+          />
+        )}
+        {planApproval && <ExitPlanPrompt onDecision={handlePlanDecision} />}
+        {pendingRewind && (
+          <RewindConfirmPrompt
+            summary={pendingRewind.summary}
+            title={pendingRewind.title}
+            confirmLabel={pendingRewind.confirmLabel}
+            diffs={pendingRewind.diffs}
+            onDecision={handleRewindDecision}
+          />
+        )}
+        {picker && (
+          <SelectPrompt
+            title={picker.title}
+            options={picker.options}
+            onSelect={handlePickerSelect}
+            onCancel={handlePickerCancel}
+            onDelete={picker.onDelete}
+          />
+        )}
+        {pendingConnect && (
+          <ConnectWizard
+            existingProviderNames={config.providers.map((p) => p.name)}
+            existingModelNames={config.models.map((m) => m.name)}
+            onSave={handleConnectSave}
+            onSetDefault={handleConnectSetDefault}
+            onOpenConfig={handleConnectOpenConfig}
+            onFinish={finishConnect}
+            onCancel={cancelConnect}
+          />
+        )}
+        {queueItems.slice(0, MAX_VISIBLE_QUEUED).map((item) => (
+          <Text key={item.id} dimColor>
+            queued: {item.text.length > 80 ? `${item.text.slice(0, 80)}…` : item.text}
+          </Text>
+        ))}
+        {queueItems.length > MAX_VISIBLE_QUEUED && (
+          <Text dimColor>… {queueItems.length - MAX_VISIBLE_QUEUED} more queued</Text>
+        )}
+        {pendingImages.map((staged) => (
+          <Text key={staged.id} dimColor>
+            [image attached: {staged.image.path}]
+          </Text>
+        ))}
+        <TodoPanel todos={todos} />
+      </Box>
+      <Box flexDirection="column" flexShrink={0}>
+        <InputBox
+          isStreaming={isStreaming || shellRunning}
+          disabled={
+            pending !== null ||
+            planApproval ||
+            pendingRewind !== null ||
+            pendingConnect !== null ||
+            picker !== null
+          }
+          commands={commandHints}
+          cwd={cwd}
+          refill={inputRefill}
+          initialHistory={initialHistory}
+          onSubmit={handleSubmit}
+          onInterrupt={interrupt}
+          onExit={handleExit}
+          onPasteImage={handlePasteImage}
         />
-      )}
-      {!thinking && activity === null && thoughtSummary !== null && (
-        <Text dimColor>{thoughtSummary}</Text>
-      )}
-      {streamingText !== null && (streamingText !== "" || turnChunksRef.current === 0) && (
-        <StreamingMessage text={streamingText} continuation={turnChunksRef.current > 0} />
-      )}
-      {pending && (
-        <PermissionPrompt
-          request={pending.request}
-          preview={pending.preview}
-          onDecision={handleDecision}
+        <StatusBar
+          cwd={cwd}
+          model={modelName}
+          permissionMode={permissionModeState}
+          tokens={usageRef.current.totalTokens}
+          columns={columns}
+          gitBranch={gitBranch}
+          contextPercent={contextUsage?.percent ?? null}
+          contextTokens={
+            contextUsage ? { used: contextUsage.used, window: contextUsage.window } : null
+          }
+          cachePercent={usageRef.current.cache ? cacheHitPercent(usageRef.current.cache) : null}
+          sessionCostUsd={sessionCost}
+          backgroundTasks={bgLabels}
         />
-      )}
-      {planApproval && <ExitPlanPrompt onDecision={handlePlanDecision} />}
-      {pendingRewind && (
-        <RewindConfirmPrompt
-          summary={pendingRewind.summary}
-          title={pendingRewind.title}
-          confirmLabel={pendingRewind.confirmLabel}
-          diffs={pendingRewind.diffs}
-          onDecision={handleRewindDecision}
-        />
-      )}
-      {picker && (
-        <SelectPrompt
-          title={picker.title}
-          options={picker.options}
-          onSelect={handlePickerSelect}
-          onCancel={handlePickerCancel}
-          onDelete={picker.onDelete}
-        />
-      )}
-      {pendingConnect && (
-        <ConnectWizard
-          existingProviderNames={config.providers.map((p) => p.name)}
-          existingModelNames={config.models.map((m) => m.name)}
-          onSave={handleConnectSave}
-          onSetDefault={handleConnectSetDefault}
-          onOpenConfig={handleConnectOpenConfig}
-          onFinish={finishConnect}
-          onCancel={cancelConnect}
-        />
-      )}
-      {queueItems.slice(0, MAX_VISIBLE_QUEUED).map((item) => (
-        <Text key={item.id} dimColor>
-          queued: {item.text.length > 80 ? `${item.text.slice(0, 80)}…` : item.text}
-        </Text>
-      ))}
-      {queueItems.length > MAX_VISIBLE_QUEUED && (
-        <Text dimColor>… {queueItems.length - MAX_VISIBLE_QUEUED} more queued</Text>
-      )}
-      {pendingImages.map((staged) => (
-        <Text key={staged.id} dimColor>
-          [image attached: {staged.image.path}]
-        </Text>
-      ))}
-      <TodoPanel todos={todos} />
-      <InputBox
-        isStreaming={isStreaming || shellRunning}
-        disabled={
-          pending !== null ||
-          planApproval ||
-          pendingRewind !== null ||
-          pendingConnect !== null ||
-          picker !== null
-        }
-        commands={commandHints}
-        cwd={cwd}
-        refill={inputRefill}
-        initialHistory={initialHistory}
-        onSubmit={handleSubmit}
-        onInterrupt={interrupt}
-        onExit={handleExit}
-        onPasteImage={handlePasteImage}
-      />
-      <StatusBar
-        cwd={cwd}
-        model={modelName}
-        permissionMode={permissionModeState}
-        tokens={usageRef.current.totalTokens}
-        gitBranch={gitBranch}
-        contextPercent={contextUsage?.percent ?? null}
-        contextTokens={
-          contextUsage ? { used: contextUsage.used, window: contextUsage.window } : null
-        }
-        cachePercent={usageRef.current.cache ? cacheHitPercent(usageRef.current.cache) : null}
-        sessionCostUsd={sessionCost}
-        backgroundTasks={bgLabels}
-      />
+      </Box>
     </Box>
   );
 }
@@ -2256,6 +2285,6 @@ export function renderRepl(backend: ChatBackend, opts: ReplOptions) {
       initialMessages={opts.initialMessages}
       initialUsage={opts.initialUsage}
     />,
-    REPL_RENDER_OPTIONS,
+    { ...REPL_RENDER_OPTIONS, stdout: createInkStdout(process.stdout) },
   );
 }

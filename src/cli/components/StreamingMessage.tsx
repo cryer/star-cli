@@ -1,12 +1,44 @@
-import { Box, Text, useStdout } from "ink";
+import { Box, Text } from "ink";
 import { memo } from "react";
-import { renderMarkdown } from "../markdown";
+import { cellWidth } from "../markdown";
+
+export function streamingTail(text: string, maxLines: number, columns: number): string {
+  if (maxLines <= 0) return "";
+  const width = Math.max(2, columns);
+  const lines: string[] = [];
+  let line = "";
+  let lineWidth = 0;
+  for (const ch of text) {
+    if (ch === "\n") {
+      lines.push(line);
+      line = "";
+      lineWidth = 0;
+      continue;
+    }
+    const charWidth = cellWidth(ch);
+    if (line && lineWidth + charWidth > width) {
+      lines.push(line);
+      line = "";
+      lineWidth = 0;
+    }
+    line += ch;
+    lineWidth += charWidth;
+  }
+  lines.push(line);
+  return lines.slice(-maxLines).join("\n");
+}
 
 export const StreamingMessage = memo(function StreamingMessage({
   text,
   continuation,
-}: { text: string; continuation?: boolean }) {
-  const { stdout } = useStdout();
+  maxLines = 20,
+  columns = 80,
+}: {
+  text: string;
+  continuation?: boolean;
+  maxLines?: number;
+  columns?: number;
+}) {
   return (
     <Box flexDirection="column" marginBottom={1}>
       {!continuation && (
@@ -14,8 +46,7 @@ export const StreamingMessage = memo(function StreamingMessage({
           ✦ star
         </Text>
       )}
-      {/* The outer green stays: styled spans reset and re-open the base color. */}
-      <Text color="green">{renderMarkdown(text, "32", stdout.columns ?? 80)}</Text>
+      <Text color="green">{streamingTail(text, maxLines, columns)}</Text>
     </Box>
   );
 });
