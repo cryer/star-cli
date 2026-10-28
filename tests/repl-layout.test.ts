@@ -225,6 +225,55 @@ describe("production REPL layout", () => {
     app.unmount();
   });
 
+  it("keeps the tail of a long tool result visible after later output", async () => {
+    let release = () => {};
+    const finished = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const backend: ChatBackend = {
+      async *stream(): AsyncGenerator<StreamEvent> {
+        yield {
+          type: "tool-call",
+          id: "long-call",
+          name: "read_file",
+          args: { path: "src/long.js" },
+        };
+        yield {
+          type: "tool-result",
+          id: "long-call",
+          name: "read_file",
+          content: Array.from({ length: 30 }, (_, index) => `long output ${index + 1}`).join("\n"),
+        };
+        yield { type: "text-delta", text: "Checking the next file." };
+        yield {
+          type: "tool-call",
+          id: "short-call",
+          name: "grep",
+          args: { pattern: "TODO" },
+        };
+        yield {
+          type: "tool-result",
+          id: "short-call",
+          name: "grep",
+          content: "latest output",
+        };
+        await finished;
+        yield { type: "finish", finishReason: "stop" };
+      },
+    };
+    const app = renderRepl(backend, cwd, 80, 20);
+    await typeText(app.stdin, "inspect", "\r");
+    await vi.waitFor(() => expect(stripAnsi(app.lastFrame() ?? "")).toContain("latest output"));
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("long output 10");
+    expect(frame).toContain("Checking the next file.");
+    expect(frame).toContain("latest output");
+
+    release();
+    await vi.waitFor(() => expect(app.lastFrame() ?? "").not.toContain("thinking"));
+    app.unmount();
+  });
+
   it("lays out the footer after shrinking both terminal dimensions", async () => {
     const backend: ChatBackend = { async *stream(): AsyncGenerator<StreamEvent> {} };
     const app = renderRepl(backend, cwd, 100, 24);

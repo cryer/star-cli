@@ -112,13 +112,65 @@ export function collapseInitialMessages(
 // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping generated SGR codes is the point
 const ANSI_SGR_RE = /\u001B\[[0-9;]*m/g;
 
-function formattedRows(text: string, termWidth: number): number {
-  const lines = text.replace(ANSI_SGR_RE, "").split("\n");
+function formattedLines(text: string): string[] {
+  const lines = text.split("\n");
   if (lines.at(-1) === "") lines.pop();
-  return lines.reduce(
-    (rows, line) => rows + Math.max(1, Math.ceil(cellWidth(line) / termWidth)),
-    0,
-  );
+  return lines;
+}
+
+function lineRows(text: string, termWidth: number): number {
+  return Math.max(1, Math.ceil(cellWidth(text.replace(ANSI_SGR_RE, "")) / termWidth));
+}
+
+interface TailStart {
+  messageIndex: number;
+  lineIndex: number;
+}
+
+function findTailStart(formatted: string[], maxLines: number, termWidth: number): TailStart {
+  let usedRows = 0;
+  for (let messageIndex = formatted.length - 1; messageIndex >= 0; messageIndex--) {
+    const lines = formattedLines(formatted[messageIndex] ?? "");
+    for (let lineIndex = lines.length - 1; lineIndex >= 0; lineIndex--) {
+      const rows = lineRows(lines[lineIndex] ?? "", termWidth);
+      if (usedRows > 0 && usedRows + rows > maxLines) {
+        return lineIndex + 1 < lines.length
+          ? { messageIndex, lineIndex: lineIndex + 1 }
+          : { messageIndex: messageIndex + 1, lineIndex: 0 };
+      }
+      usedRows += rows;
+      if (usedRows >= maxLines) return { messageIndex, lineIndex };
+    }
+  }
+  return { messageIndex: 0, lineIndex: 0 };
+}
+
+function sliceFormattedMessage(text: string, lineIndex: number, endLine?: number): string {
+  if (lineIndex === 0 && endLine === undefined) return text;
+  const lines = formattedLines(text);
+  const prefix = lines.slice(0, lineIndex).join("\n");
+  const lastReset = prefix.lastIndexOf(ANSI.reset);
+  const activeStyles = prefix
+    .slice(lastReset < 0 ? 0 : lastReset + ANSI.reset.length)
+    .match(ANSI_SGR_RE)
+    ?.join("");
+  return `${activeStyles ?? ""}${lines.slice(lineIndex, endLine).join("\n")}\n${endLine === undefined ? "" : ANSI.reset}`;
+}
+
+function formattedRange(formatted: string[], start: TailStart, end: TailStart): string {
+  if (start.messageIndex === end.messageIndex) {
+    return start.lineIndex === end.lineIndex
+      ? ""
+      : sliceFormattedMessage(formatted[start.messageIndex] ?? "", start.lineIndex, end.lineIndex);
+  }
+  const chunks = [sliceFormattedMessage(formatted[start.messageIndex] ?? "", start.lineIndex)];
+  for (let index = start.messageIndex + 1; index < end.messageIndex; index++) {
+    chunks.push(formatted[index] ?? "");
+  }
+  if (end.lineIndex > 0) {
+    chunks.push(sliceFormattedMessage(formatted[end.messageIndex] ?? "", 0, end.lineIndex));
+  }
+  return chunks.join("");
 }
 
 export const MessageList = memo(function MessageList({
@@ -135,7 +187,8 @@ export const MessageList = memo(function MessageList({
     length: messages.length,
     view: collapseInitialMessages(messages),
   }));
-  const writtenRef = useRef(0);
+  const writtenRef = useRef<TailStart>({ messageIndex: 0, lineIndex: 0 });
+  const writtenWidthRef = useRef(termWidth);
   const formattedRef = useRef(new Map<string, string>());
   const items = useMemo(() => {
     const placeholder: DisplayMessage[] =
@@ -144,35 +197,38 @@ export const MessageList = memo(function MessageList({
         : [];
     return [...placeholder, ...initial.view.visible, ...messages.slice(initial.length)];
   }, [initial, messages]);
-  const formatted = items.map((message) => {
-    const key = `${message.id}:${termWidth}`;
+  const formatted = items.map((message, index) => {
+    const partiallyWritten =
+      index === writtenRef.current.messageIndex && writtenRef.current.lineIndex > 0;
+    const messageWidth = partiallyWritten ? writtenWidthRef.current : termWidth;
+    const key = `${message.id}:${messageWidth}`;
     const cached = formattedRef.current.get(key);
     if (cached !== undefined) return cached;
-    const value = formatDisplayMessage(message, termWidth);
+    const value = formatDisplayMessage(message, messageWidth);
     formattedRef.current.set(key, value);
     return value;
   });
 
-  let visibleStart = items.length;
-  if (maxLines !== undefined && maxLines > 0) {
-    let usedRows = 0;
-    for (let index = items.length - 1; index >= writtenRef.current; index--) {
-      const rows = formattedRows(formatted[index] ?? "", Math.max(1, termWidth));
-      if (visibleStart < items.length && usedRows + rows > maxLines) break;
-      usedRows += rows;
-      visibleStart = index;
-      if (usedRows >= maxLines) break;
-    }
-  }
-  const historyEnd = maxLines === undefined ? items.length : visibleStart;
+  const width = Math.max(1, termWidth);
+  const visibleStart =
+    maxLines === undefined
+      ? { messageIndex: items.length, lineIndex: 0 }
+      : findTailStart(formatted, maxLines, width);
+  const written = writtenRef.current;
+  const canArchive =
+    visibleStart.messageIndex > written.messageIndex ||
+    (visibleStart.messageIndex === written.messageIndex &&
+      visibleStart.lineIndex > written.lineIndex);
+  const historyEnd = canArchive ? visibleStart : written;
   useLayoutEffect(() => {
-    const pending = formatted.slice(writtenRef.current, historyEnd);
-    if (pending.length === 0) return;
-    write(pending.join(""));
+    const history = formattedRange(formatted, writtenRef.current, historyEnd);
+    if (history === "") return;
+    write(history);
     writtenRef.current = historyEnd;
-  }, [formatted, historyEnd, write]);
+    writtenWidthRef.current = termWidth;
+  }, [formatted, historyEnd, termWidth, write]);
 
-  if (maxLines === undefined || visibleStart === items.length) return null;
+  if (maxLines === undefined || visibleStart.messageIndex === items.length) return null;
   return (
     <Box
       flexDirection="column"
@@ -181,7 +237,9 @@ export const MessageList = memo(function MessageList({
       overflowY="hidden"
       justifyContent="flex-end"
     >
-      <Text>{formatted.slice(visibleStart).join("")}</Text>
+      <Text>
+        {formattedRange(formatted, visibleStart, { messageIndex: items.length, lineIndex: 0 })}
+      </Text>
     </Box>
   );
 });
