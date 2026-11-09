@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
@@ -94,6 +94,47 @@ describe("skills", () => {
 
   it("returns an empty list when no skill directories exist", () => {
     expect(discoverSkills(cwd, home)).toEqual([]);
+  });
+
+  it.runIf(process.platform !== "win32")("refuses skill files linked outside their scope", () => {
+    const outside = mkdtempSync(path.join(tmpdir(), "star-skills-outside-"));
+    try {
+      const outsideFile = writeSkill(outside, "outside", REVIEW_SKILL);
+      mkdirSync(path.join(projectSkills, "file-link"), { recursive: true });
+      symlinkSync(outsideFile, path.join(projectSkills, "file-link", "SKILL.md"), "file");
+      expect(discoverSkills(cwd, home)).toEqual([]);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses skill directories linked outside their scope", () => {
+    const outside = mkdtempSync(path.join(tmpdir(), "star-skills-outside-"));
+    try {
+      const outsideFile = writeSkill(outside, "outside", REVIEW_SKILL);
+      mkdirSync(projectSkills, { recursive: true });
+      symlinkSync(
+        path.dirname(outsideFile),
+        path.join(projectSkills, "dir-link"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      expect(discoverSkills(cwd, home)).toEqual([]);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("allows skill directory links that stay inside their scope", () => {
+    writeSkill(userSkills, "actual", REVIEW_SKILL);
+    symlinkSync(
+      path.join(userSkills, "actual"),
+      path.join(userSkills, "alias"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const skills = discoverSkills(cwd, home);
+    expect(skills.map((skill) => skill.name).sort()).toEqual(["actual", "alias"]);
+    const alias = skills.find((skill) => skill.name === "alias");
+    expect(alias ? loadSkillBody(alias) : null).toContain("Check error handling");
   });
 
   it("formats the system-prompt listing block", () => {

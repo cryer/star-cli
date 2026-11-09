@@ -1,8 +1,9 @@
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { starHome } from "../config/paths";
 import type { Tool, ToolResult } from "../tools/types";
+import { readContainedTextFile } from "./safe-file";
 
 export const SKILL_FILE = "SKILL.md";
 export const SKILL_MAX_CHARS = 32 * 1024;
@@ -17,6 +18,8 @@ export interface Skill {
   // are resolved relative to it.
   dir: string;
   scope: "project" | "user";
+  boundaryDir: string;
+  rootDir: string;
 }
 
 // Parses the YAML-ish frontmatter of a SKILL.md without a yaml dependency:
@@ -39,7 +42,13 @@ interface CacheEntry {
 
 const cache = new Map<string, CacheEntry>();
 
-function parseSkillFile(filePath: string, dirName: string, scope: Skill["scope"]): Skill | null {
+function parseSkillFile(
+  boundaryDir: string,
+  rootDir: string,
+  filePath: string,
+  dirName: string,
+  scope: Skill["scope"],
+): Skill | null {
   let mtimeMs: number;
   try {
     mtimeMs = statSync(filePath).mtimeMs;
@@ -49,22 +58,35 @@ function parseSkillFile(filePath: string, dirName: string, scope: Skill["scope"]
   const hit = cache.get(filePath);
   if (hit && hit.mtimeMs === mtimeMs) return hit.skill;
 
+  const safe = readContainedTextFile(boundaryDir, rootDir, filePath, SKILL_MAX_CHARS);
   let skill: Skill | null = null;
-  try {
-    const parsed = parseFrontmatter(readFileSync(filePath, "utf8"));
+  if (safe) {
+    mtimeMs = safe.mtimeMs;
+    const parsed = parseFrontmatter(safe.content);
     const name = parsed?.meta.name || dirName;
     const description = parsed?.meta.description;
     if (parsed && NAME_PATTERN.test(name) && description) {
-      skill = { name, description, filePath, dir: path.dirname(filePath), scope };
+      skill = {
+        name,
+        description,
+        filePath,
+        dir: path.dirname(filePath),
+        scope,
+        boundaryDir,
+        rootDir,
+      };
     }
-  } catch {
-    skill = null;
   }
   cache.set(filePath, { mtimeMs, skill });
   return skill;
 }
 
-function scanDir(base: string, scope: Skill["scope"], into: Map<string, Skill>): void {
+function scanDir(
+  boundaryDir: string,
+  base: string,
+  scope: Skill["scope"],
+  into: Map<string, Skill>,
+): void {
   let entries: string[];
   try {
     entries = readdirSync(base);
@@ -73,7 +95,13 @@ function scanDir(base: string, scope: Skill["scope"], into: Map<string, Skill>):
   }
   for (const entry of entries.sort()) {
     if (!NAME_PATTERN.test(entry)) continue;
-    const parsed = parseSkillFile(path.join(base, entry, SKILL_FILE), entry, scope);
+    const parsed = parseSkillFile(
+      boundaryDir,
+      base,
+      path.join(base, entry, SKILL_FILE),
+      entry,
+      scope,
+    );
     if (parsed) into.set(parsed.name, parsed);
   }
 }
@@ -84,8 +112,8 @@ function scanDir(base: string, scope: Skill["scope"], into: Map<string, Skill>):
 // every turn only costs two directory scans plus a stat per candidate.
 export function discoverSkills(cwd: string, home: string = starHome()): Skill[] {
   const byName = new Map<string, Skill>();
-  scanDir(path.join(home, "skills"), "user", byName);
-  scanDir(path.join(cwd, ".star", "skills"), "project", byName);
+  scanDir(home, path.join(home, "skills"), "user", byName);
+  scanDir(cwd, path.join(cwd, ".star", "skills"), "project", byName);
   return [...byName.values()];
 }
 
@@ -103,12 +131,14 @@ export function formatSkillsBlock(skills: Skill[]): string {
 
 // Reads the skill body (frontmatter stripped) for the skill tool result.
 export function loadSkillBody(skill: Skill): string | null {
-  let parsed: { meta: Record<string, string>; body: string } | null = null;
-  try {
-    parsed = parseFrontmatter(readFileSync(skill.filePath, "utf8"));
-  } catch {
-    return null;
-  }
+  const safe = readContainedTextFile(
+    skill.boundaryDir,
+    skill.rootDir,
+    skill.filePath,
+    SKILL_MAX_CHARS,
+  );
+  if (!safe) return null;
+  const parsed = parseFrontmatter(safe.content);
   if (!parsed?.body) return null;
   if (parsed.body.length > SKILL_MAX_CHARS) {
     return `${parsed.body.slice(0, SKILL_MAX_CHARS)}\n\n[skill truncated to ${SKILL_MAX_CHARS} characters]`;

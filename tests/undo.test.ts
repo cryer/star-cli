@@ -8,6 +8,7 @@ import {
   MAX_SNAPSHOT_CONTENT_BYTES,
   beginTurn,
   clearSnapshots,
+  hydrateSnapshots,
   listSnapshots,
   listTurnSnapshots,
   resolveSnapshotContent,
@@ -127,6 +128,38 @@ describe("turn-scoped snapshots", () => {
   it("returns an empty list when the turn made no file changes", async () => {
     const turn = beginTurn();
     expect(await undoTurnSnapshots(turn)).toEqual([]);
+  });
+
+  it("advances new turns beyond every hydrated turn id", () => {
+    hydrateSnapshots([
+      {
+        id: 100,
+        path: path.join(dir, "old.txt"),
+        existed: false,
+        content: null,
+        toolName: "write_file",
+        timestamp: Date.now(),
+        turn: 1_000_000,
+        messageIndex: 0,
+      },
+    ]);
+    expect(beginTurn()).toBe(1_000_001);
+  });
+
+  it("aborts the whole turn revert before changes when any content is unavailable", async () => {
+    writeFileSync(path.join(dir, "valid.txt"), "old");
+    const turn = beginTurn();
+    await writeFileTool.execute({ path: "valid.txt", content: "new" }, ctx());
+    const valid = listSnapshots()[0];
+    expect(valid).toBeDefined();
+    if (!valid) return;
+    valid.contentFile = path.join(dir, "missing.snapshot");
+    valid.content = null;
+
+    const messages = await undoTurnSnapshots(turn);
+    expect(messages[0]).toContain("no files changed");
+    expect(readFileSync(path.join(dir, "valid.txt"), "utf8")).toBe("new");
+    expect(snapshotCount()).toBe(1);
   });
 
   it("excludes subagent snapshots from turn listings and reverts by default", async () => {

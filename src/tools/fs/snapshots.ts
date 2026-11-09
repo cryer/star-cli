@@ -21,8 +21,8 @@ export interface FileSnapshot {
   // still pushes a string (it only edits text) — written back as utf8.
   content: string | Buffer | null;
   // Set when the pre-change content exceeded MAX_SNAPSHOT_CONTENT_BYTES: only
-  // metadata is kept (no content, no persisted content file) and revert()
-  // skips the file instead of restoring it.
+  // metadata is kept (no content, no persisted content file), so restore
+  // preflight aborts before changing files or checkpoints.
   contentTooLarge?: boolean;
   // The file existed but reading its pre-change bytes failed. Keep existed
   // true so an undo can never mistake it for a newly created file and delete it.
@@ -34,8 +34,8 @@ export interface FileSnapshot {
   toolName: string;
   timestamp: number;
   // Seq of the conversation turn that produced this snapshot (0 = no turn
-  // context, e.g. direct tool use in tests). Monotonically increasing per
-  // process, so a turn's snapshots can be reverted without touching older ones.
+  // context, e.g. direct tool use in tests). Resume advances it past every
+  // hydrated turn so new snapshots never collide with an older session turn.
   turn: number;
   // Index of the user message that started the turn, used by /rewind to
   // retract the conversation to the same point. -1 = unknown (no turn
@@ -217,14 +217,15 @@ export function clearSnapshots(): void {
 }
 
 // Replaces the in-memory stack with checkpoints loaded from a resumed
-// session's persisted records. The id counter is advanced past the loaded
-// records so new checkpoints never collide with persisted ones.
+// session's persisted records. Both counters advance past the loaded records
+// so neither checkpoints nor later turns collide with persisted ones.
 export function hydrateSnapshots(snapshots: FileSnapshot[]): void {
   for (const snapshot of stack) void discardSpill(snapshot);
   stack.length = 0;
   stack.push(...snapshots.slice(-MAX_SNAPSHOTS));
   for (const snapshot of stack) {
     if (snapshot.id > checkpointSeq) checkpointSeq = snapshot.id;
+    if (snapshot.turn > activeTurn) activeTurn = snapshot.turn;
   }
 }
 
@@ -240,14 +241,34 @@ async function resolveContent(snapshot: FileSnapshot): Promise<string | Buffer |
   }
 }
 
+export async function snapshotRestoreProblems(
+  snapshots: readonly FileSnapshot[],
+): Promise<string[]> {
+  const problems: string[] = [];
+  for (const snapshot of snapshots) {
+    if (!snapshot.existed) continue;
+    if (snapshot.contentTooLarge) {
+      problems.push(`${snapshot.path}: content too large, not restored`);
+      continue;
+    }
+    if ((await resolveContent(snapshot)) === null) {
+      problems.push(`${snapshot.path}: the snapshot content is no longer available`);
+    }
+  }
+  return problems;
+}
+
+function failedProblems(problems: readonly string[]): string[] {
+  return problems.map(
+    (problem) => `Failed to revert ${problem} (checkpoint kept; no files changed)`,
+  );
+}
+
 async function revert(snapshot: FileSnapshot): Promise<string> {
   if (snapshot.existed) {
-    if (snapshot.contentTooLarge) {
-      return `Skipped ${snapshot.path}: content too large, not restored.`;
-    }
     const content = await resolveContent(snapshot);
-    if (content === null) {
-      return `Skipped ${snapshot.path}: the snapshot content is no longer available.`;
+    if (snapshot.contentTooLarge || content === null) {
+      throw new Error("snapshot content is no longer available");
     }
     await mkdir(path.dirname(snapshot.path), { recursive: true });
     await writeFile(snapshot.path, content);
@@ -262,6 +283,8 @@ export async function undoLastSnapshot(): Promise<string> {
   if (!snapshot) {
     return "Nothing to undo (/undo only reverts file changes made by write_file/edit_file, and none are recorded yet).";
   }
+  const problems = await snapshotRestoreProblems([snapshot]);
+  if (problems.length > 0) return failedProblems(problems)[0] as string;
   try {
     const message = await revert(snapshot);
     stack.pop();
@@ -295,17 +318,13 @@ export async function resolveSnapshotContent(snapshot: FileSnapshot): Promise<st
 }
 
 // Reverts every snapshot created by the given turn, newest first, and leaves
-// snapshots from other turns untouched. A snapshot that fails to revert stays
-// on the stack (and keeps its persisted checkpoint); the returned messages
-// report each file's outcome.
+// snapshots from other turns untouched. Unavailable content aborts the whole
+// batch before any file or checkpoint changes; later I/O failures keep only
+// the checkpoint whose write failed.
 export async function undoTurnSnapshots(turn: number, includeSubagent = false): Promise<string[]> {
-  const matches: FileSnapshot[] = [];
-  for (let i = stack.length - 1; i >= 0; i--) {
-    const snapshot = stack[i];
-    if (snapshot && snapshot.turn === turn && (includeSubagent || ownerOf(snapshot) === "root")) {
-      matches.push(snapshot);
-    }
-  }
+  const matches = listTurnSnapshots(turn, includeSubagent);
+  const problems = await snapshotRestoreProblems(matches);
+  if (problems.length > 0) return failedProblems(problems);
   const messages: string[] = [];
   const revertedIds: number[] = [];
   for (const snapshot of matches) {
@@ -346,6 +365,7 @@ export async function dropTurnSnapshots(turn: number, includeSubagent = false): 
 }
 
 export interface RewindResult {
+  ok: boolean;
   reverted: string[];
   // Smallest conversation message index among the reverted snapshots; the
   // caller retracts the conversation back to this point. null when none of
@@ -353,11 +373,8 @@ export interface RewindResult {
   messageIndex: number | null;
 }
 
-// Reverts every snapshot from checkpoint `id` onwards, newest first, restoring
-// the file state as it was just before that checkpoint. Successfully reverted
-// snapshots are dropped from the stack (and from the persisted store via
-// hooks); a snapshot that fails to revert stays on the stack, keeps its
-// persisted checkpoint, and gets a failure line in the result.
+// Reverts every snapshot from checkpoint `id` onwards, newest first. Content
+// preflight is all-or-nothing; later I/O failures keep their own checkpoint.
 export async function rewindToSnapshot(
   id: number,
   includeSubagent = false,
@@ -369,6 +386,10 @@ export async function rewindToSnapshot(
     if (snapshot && snapshot.id >= id && (includeSubagent || ownerOf(snapshot) === "root")) {
       matches.push(snapshot);
     }
+  }
+  const problems = await snapshotRestoreProblems(matches);
+  if (problems.length > 0) {
+    return { ok: false, reverted: failedProblems(problems), messageIndex: null };
   }
   const reverted: string[] = [];
   const revertedIds: number[] = [];
@@ -393,5 +414,5 @@ export async function rewindToSnapshot(
     }
   }
   await removeFromStore(revertedIds);
-  return { reverted, messageIndex };
+  return { ok: true, reverted, messageIndex };
 }

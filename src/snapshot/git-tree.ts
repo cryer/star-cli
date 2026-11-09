@@ -190,15 +190,13 @@ function repoArgs(dir: string, cwd: string): string[] {
   return [`--git-dir=${dir}`, `--work-tree=${cwd}`];
 }
 
-// Drops index entries that match the exclude rules. Ignore patterns only keep
-// untracked files out of `git add`; a path already in the index — tracked by
-// a pre-exclusion star, or put back by read-tree of an old tree — stays until
-// explicitly removed, so both trackTree and restoreTree scrub it.
-async function untrackExcluded(dir: string, cwd: string): Promise<boolean> {
+// Project ignore rules cannot widen or narrow the secret boundary: negations
+// such as `!.env` must not make a sensitive path eligible for a snapshot.
+async function scrubSensitiveIndex(dir: string, cwd: string): Promise<boolean> {
   const base = repoArgs(dir, cwd);
-  const listed = await runGit([...base, "ls-files", "-z", "-c", "-i", "--exclude-standard"]);
+  const listed = await runGit([...base, "ls-files", "-z", "-c"]);
   if (listed === null) return false;
-  const files = listed.split("\0").filter(Boolean);
+  const files = listed.split("\0").filter((file) => file !== "" && isSensitivePath(file));
   if (files.length === 0) return true;
   const removed = await runGit([
     ...base,
@@ -210,6 +208,18 @@ async function untrackExcluded(dir: string, cwd: string): Promise<boolean> {
     ...files.map((file) => `:(literal)${file}`),
   ]);
   return removed !== null;
+}
+
+async function listCleanCandidates(base: string[]): Promise<string[] | null> {
+  const listed = await runGit([...base, "ls-files", "--others", "--exclude-standard", "-z"]);
+  return listed === null ? null : listed.split("\0").filter(Boolean);
+}
+
+// clean -e takes ignore patterns rather than pathspecs. Anchor and escape each
+// actual sensitive candidate so `git clean -fd` cannot remove its parent
+// directory, and so glob characters in a filename cannot widen the exclusion.
+function literalCleanExclude(file: string): string {
+  return `/${file.replace(/[\\*?[\] ]/g, "\\$&")}`;
 }
 
 // Captures the whole working tree (any change — write_file, edit_file, bash)
@@ -278,8 +288,9 @@ async function trackTreeUncached(cwd: string): Promise<string | null> {
   const dir = await ensureTreeRepo(cwd);
   if (!dir) return null;
   const base = repoArgs(dir, cwd);
-  if (!(await untrackExcluded(dir, cwd))) return null;
+  if (!(await scrubSensitiveIndex(dir, cwd))) return null;
   if ((await runGit([...base, "add", "-A"])) === null) return null;
+  if (!(await scrubSensitiveIndex(dir, cwd))) return null;
   const tree = await runGit([...base, "write-tree"]);
   if (tree === null) return null;
   await pinTree(base, tree);
@@ -294,12 +305,10 @@ async function trackTreeUncached(cwd: string): Promise<string | null> {
 }
 
 // Restores the working tree to a captured tree: index reset to the tree,
-// every index file checked out over the work tree, then untracked
-// (post-snapshot) files cleaned. `clean` keeps ignored files, so dependencies
-// and excluded secrets survive. checkout-index -a only writes paths present
-// in the index, so scrubbing excluded entries after read-tree guarantees a
-// tree captured before the exclusion existed still cannot overwrite the
-// user's current .env (or delete it via clean, which also skips it).
+// every non-sensitive index file checked out over the work tree, then
+// untracked (post-snapshot) files cleaned. Sensitive clean candidates get
+// independent literal excludes because project ignore negations cannot be
+// trusted to preserve them.
 export async function restoreTree(cwd: string, hash: string): Promise<boolean> {
   if (isGuardedDir(cwd)) return false;
   if (!(await isGitAvailable())) return false;
@@ -307,9 +316,14 @@ export async function restoreTree(cwd: string, hash: string): Promise<boolean> {
   if (!dir) return false;
   const base = repoArgs(dir, cwd);
   if ((await runGit([...base, "read-tree", hash])) === null) return false;
-  if (!(await untrackExcluded(dir, cwd))) return false;
+  if (!(await scrubSensitiveIndex(dir, cwd))) return false;
   if ((await runGit([...base, "checkout-index", "-f", "-a"])) === null) return false;
-  if ((await runGit([...base, "clean", "-fd"])) === null) return false;
+  const candidates = await listCleanCandidates(base);
+  if (candidates === null) return false;
+  const excludes = candidates
+    .filter((file) => isSensitivePath(file))
+    .flatMap((file) => ["-e", literalCleanExclude(file)]);
+  if ((await runGit([...base, "clean", "-fd", ...excludes])) === null) return false;
   return true;
 }
 
@@ -323,10 +337,10 @@ export async function diffTreeNames(cwd: string, hash: string): Promise<string[]
   if (!(await ensureTreeRepo(cwd))) return null;
   const base = repoArgs(dir, cwd);
   const changed = await runGit([...base, "diff", "--name-only", hash]);
-  const untracked = await runGit([...base, "ls-files", "--others", "--exclude-standard"]);
-  if (changed === null || untracked === null) return null;
+  const candidates = await listCleanCandidates(base);
+  if (changed === null || candidates === null) return null;
   const names = new Set<string>();
-  for (const line of [...changed.split("\n"), ...untracked.split("\n")]) {
+  for (const line of [...changed.split("\n"), ...candidates]) {
     // Restore never touches excluded likely-secret paths (trees captured
     // before the exclusion may still list them); keep the preview honest.
     if (line !== "" && !isSensitivePath(line)) names.add(line);

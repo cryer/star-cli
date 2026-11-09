@@ -277,14 +277,51 @@ describe("sensitive file exclusion", () => {
     writeFileSync(path.join(dir, ".env.example"), "TEMPLATE=v2");
 
     expect(await restoreTree(dir, tree)).toBe(true);
-    // checkout-index -a only writes index contents, and clean -fd skips
-    // ignored files: the rotated secrets survive the restore byte-for-byte
+    // Sensitive index entries and actual clean candidates are independently
+    // excluded, so the rotated secrets survive the restore byte-for-byte.
     expect(readFileSync(path.join(dir, ".env"), "utf8")).toBe("SECRET=rotated");
     expect(readFileSync(path.join(dir, ".env.local"), "utf8")).toBe("LOCAL=2");
     expect(existsSync(path.join(dir, "fresh.key"))).toBe(true);
     // ordinary files still restore, templates included
     expect(readFileSync(path.join(dir, "tracked.txt"), "utf8")).toBe("v1");
     expect(readFileSync(path.join(dir, ".env.example"), "utf8")).toBe("TEMPLATE=");
+  });
+
+  it("does not let gitignore negations expose secrets to capture or restore", async () => {
+    writeFileSync(
+      path.join(dir, ".gitignore"),
+      "*\n!.gitignore\n!.env\n!*.key\n!.env.example\n!tracked.txt\n",
+    );
+    writeFileSync(path.join(dir, ".env"), "SECRET=old");
+    writeFileSync(path.join(dir, "old.key"), "OLD KEY");
+    writeFileSync(path.join(dir, ".env.example"), "TEMPLATE=");
+    writeFileSync(path.join(dir, "tracked.txt"), "v1");
+    const oldTree = seedPreExclusionRepo();
+    expect(repoFiles(treeRepoDir(dir), dir)).toContain(".env");
+    expect(repoFiles(treeRepoDir(dir), dir)).toContain("old.key");
+
+    expect(await trackTree(dir)).not.toBeNull();
+    expect(repoFiles(treeRepoDir(dir), dir)).toEqual([".env.example", ".gitignore", "tracked.txt"]);
+
+    writeFileSync(path.join(dir, ".env"), "SECRET=rotated");
+    writeFileSync(path.join(dir, "old.key"), "ROTATED KEY");
+    writeFileSync(path.join(dir, "fresh.key"), "FRESH KEY");
+    writeFileSync(path.join(dir, ".env.example"), "TEMPLATE=v2");
+    writeFileSync(path.join(dir, "tracked.txt"), "v2");
+
+    const names = await diffTreeNames(dir, oldTree);
+    expect(names).toContain(".env.example");
+    expect(names).toContain("tracked.txt");
+    expect(names).not.toContain(".env");
+    expect(names).not.toContain("old.key");
+    expect(names).not.toContain("fresh.key");
+
+    expect(await restoreTree(dir, oldTree)).toBe(true);
+    expect(readFileSync(path.join(dir, ".env"), "utf8")).toBe("SECRET=rotated");
+    expect(readFileSync(path.join(dir, "old.key"), "utf8")).toBe("ROTATED KEY");
+    expect(readFileSync(path.join(dir, "fresh.key"), "utf8")).toBe("FRESH KEY");
+    expect(readFileSync(path.join(dir, ".env.example"), "utf8")).toBe("TEMPLATE=");
+    expect(readFileSync(path.join(dir, "tracked.txt"), "utf8")).toBe("v1");
   });
 
   it("untracks secrets committed before the exclusion and never restores them", async () => {

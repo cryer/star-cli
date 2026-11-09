@@ -16,7 +16,6 @@ export { matchAllowRule, parseAllowRule } from "./rules";
 // "<(...)"): `echo 'alias x=...' >> ~/.bashrc` must not sail through on
 // bash(echo *). Fd duplication (2>&1) stays allow-eligible.
 function splitCommandChain(command: string, lex?: LexCache): string[] | null {
-  if (command.includes("$(") || command.includes("`")) return null;
   const tokens = lexCached(lex, command);
   if (tokens.some((token) => token.kind === "subst")) return null;
   const segments = splitShellSegments(tokens);
@@ -52,8 +51,31 @@ export function isAllowedByRules(
   return segments.every((segment) => matchesAnyRule(rules, withCommand(req, segment)));
 }
 
-// Deny rules stay maximally suspicious: any single matching segment denies,
-// and a command that cannot be segmented falls back to whole-command matching.
+const MAX_RULE_ANALYSIS_DEPTH = 8;
+
+function matchesBashRules(
+  rules: readonly string[],
+  req: PermissionRequest,
+  command: string,
+  lex: LexCache | undefined,
+  depth: number,
+): boolean {
+  if (depth > MAX_RULE_ANALYSIS_DEPTH) {
+    return compiledRules(rules).some((rule) => rule !== null);
+  }
+  const tokens = lexCached(lex, command);
+  const segments = splitShellSegments(tokens);
+  if (segments.length === 0) return matchesAnyRule(rules, req);
+  if (segments.some((segment) => matchesAnyRule(rules, withCommand(req, renderSegment(segment))))) {
+    return true;
+  }
+  return tokens.some(
+    (token) => token.kind === "subst" && matchesBashRules(rules, req, token.inner, lex, depth + 1),
+  );
+}
+
+// Deny rules match any outer segment or command-substitution body. Excessive
+// nesting fails closed whenever at least one valid rule exists.
 export function isDeniedByRules(
   rules: readonly string[],
   req: PermissionRequest,
@@ -62,16 +84,11 @@ export function isDeniedByRules(
   if (req.toolName !== "bash") return matchesAnyRule(rules, req);
   const command = requestTarget(req);
   if (command === undefined) return matchesAnyRule(rules, req);
-  const segments = splitCommandChain(command, lex);
-  if (segments === null || segments.length === 0) return matchesAnyRule(rules, req);
-  return segments.some((segment) => matchesAnyRule(rules, withCommand(req, segment)));
+  return matchesBashRules(rules, req, command, lex, 0);
 }
 
-// Ask rules force a confirmation prompt (auto mode's "still ask me about
-// git push"). They use the same per-segment bash analysis as allow/deny
-// rules, but — like deny — a single matching segment is enough: "git push &&
-// git status" must still prompt about the push. A command that cannot be
-// segmented falls back to whole-command matching.
+// Ask rules use the same outer-and-inner matching as deny rules, so a
+// substitution cannot hide a command that requires confirmation.
 export function isAskedByRules(
   rules: readonly string[],
   req: PermissionRequest,
@@ -80,9 +97,7 @@ export function isAskedByRules(
   if (req.toolName !== "bash") return matchesAnyRule(rules, req);
   const command = requestTarget(req);
   if (command === undefined) return matchesAnyRule(rules, req);
-  const segments = splitCommandChain(command, lex);
-  if (segments === null || segments.length === 0) return matchesAnyRule(rules, req);
-  return segments.some((segment) => matchesAnyRule(rules, withCommand(req, segment)));
+  return matchesBashRules(rules, req, command, lex, 0);
 }
 
 function matchesAnyRule(rules: readonly string[], req: PermissionRequest): boolean {

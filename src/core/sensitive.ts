@@ -7,6 +7,7 @@ const SENSITIVE_BASENAMES = new Set([
   ".npmrc",
   ".netrc",
   ".pgpass",
+  ".git-credentials",
 ]);
 
 const SENSITIVE_SUFFIXES = [".pem", ".key", ".p12", ".pfx"];
@@ -40,6 +41,7 @@ export function sensitiveExcludePatterns(): string[] {
     ".npmrc",
     ".netrc",
     ".pgpass",
+    ".git-credentials",
     "*.pem",
     "*.key",
     "*.p12",
@@ -67,14 +69,22 @@ function pathSegments(p: string): string[] {
 // model read it into context or overwrite it". Matches on the basename, with
 // two directory-aware rules for well-known credential locations. Templates
 // and example env files are explicitly safe unless a configured glob says
-// otherwise.
+// otherwise. NTFS stream suffixes never hide the underlying file's identity;
+// on Windows all ADS paths are refused by the file tools.
 export function isSensitivePath(p: string): boolean {
   const segments = pathSegments(p);
-  const base = segments[segments.length - 1] ?? "";
+  const rawBase = segments[segments.length - 1] ?? "";
+  const streamSeparator = rawBase.indexOf(":");
+  const base = streamSeparator > 0 ? rawBase.slice(0, streamSeparator) : rawBase;
+  if (process.platform === "win32" && streamSeparator > 0) return true;
   const normalized = p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const normalizedBase =
+    rawBase === base || normalized.endsWith(rawBase) === false
+      ? normalized
+      : `${normalized.slice(0, -rawBase.length)}${base}`;
   for (const pattern of extraPatterns) {
     const re = globToRegExp(pattern);
-    if (re.test(normalized) || re.test(base)) {
+    if (re.test(normalized) || re.test(normalizedBase) || re.test(rawBase) || re.test(base)) {
       return true;
     }
   }

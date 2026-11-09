@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { appendCheckpointRecord, checkpointContentPath } from "../src/session/checkpoints";
 import { editFileTool } from "../src/tools/fs/edit";
+import { readFileTool } from "../src/tools/fs/read";
 import {
   MAX_SNAPSHOT_CONTENT_BYTES,
   clearSnapshots,
@@ -67,6 +68,27 @@ describe("sensitive-target guards", () => {
     expect(edit.isError).toBe(true);
     expect(edit.content).toContain("sensitive");
   });
+
+  it.runIf(process.platform === "win32")(
+    "refuses sensitive files through NTFS alternate data streams",
+    async () => {
+      writeFileSync(path.join(dir, ".env"), "SECRET=original");
+      const read = await readFileTool.execute({ path: ".env::$DATA" }, ctx());
+      expect(read.isError).toBe(true);
+      expect(read.content).toContain("sensitive");
+      const write = await writeFileTool.execute(
+        { path: ".env::$DATA", content: "SECRET=changed" },
+        ctx(),
+      );
+      expect(write.isError).toBe(true);
+      const edit = await editFileTool.execute(
+        { path: ".env::$DATA", old_string: "original", new_string: "changed" },
+        ctx(),
+      );
+      expect(edit.isError).toBe(true);
+      expect(readFileSync(path.join(dir, ".env"), "utf8")).toBe("SECRET=original");
+    },
+  );
 
   it("refuses writes and edits through a junction whose target is sensitive", async () => {
     const outside = mkdtempSync(path.join(os.tmpdir(), "star-write-link-outside-"));

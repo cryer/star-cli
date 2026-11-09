@@ -233,6 +233,23 @@ describe("rewindToSnapshot", () => {
     expect(await rewindToSnapshot(99999)).toBeNull();
   });
 
+  it("keeps files and every checkpoint unchanged when content is unavailable", async () => {
+    writeFileSync(path.join(dir, "f.txt"), "v0");
+    beginTurn(0);
+    await writeFileTool.execute({ path: "f.txt", content: "v1" }, ctx());
+    const snapshot = listSnapshots()[0];
+    expect(snapshot).toBeDefined();
+    if (!snapshot) return;
+    snapshot.content = null;
+    snapshot.contentFile = path.join(dir, "missing.snapshot");
+
+    const result = await rewindToSnapshot(snapshot.id);
+    expect(result?.ok).toBe(false);
+    expect(result?.messageIndex).toBeNull();
+    expect(readFileSync(path.join(dir, "f.txt"), "utf8")).toBe("v1");
+    expect(snapshotCount()).toBe(1);
+  });
+
   it("keeps checkpoints that fail to revert and reports per-file outcomes", async () => {
     writeFileSync(path.join(dir, "ok.txt"), "v0");
     writeFileSync(path.join(dir, "blocked.txt"), "b0");

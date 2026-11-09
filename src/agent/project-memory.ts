@@ -1,5 +1,6 @@
-import { readFileSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import path from "node:path";
+import { readContainedTextFile } from "./safe-file";
 
 export const PROJECT_MEMORY_FILE = "AGENTS.md";
 export const PROJECT_MEMORY_MAX_CHARS = 32 * 1024;
@@ -27,17 +28,17 @@ export function readProjectMemory(cwd: string): string | null {
   const hit = cache.get(file);
   if (hit && hit.mtimeMs === mtimeMs) return hit.block;
 
+  const safe = readContainedTextFile(cwd, cwd, file, PROJECT_MEMORY_MAX_CHARS);
   let block: string | null = null;
-  try {
-    let body = readFileSync(file, "utf8").trim();
+  if (safe) {
+    mtimeMs = safe.mtimeMs;
+    let body = safe.content.trim();
     if (body) {
       if (body.length > PROJECT_MEMORY_MAX_CHARS) {
         body = `${body.slice(0, PROJECT_MEMORY_MAX_CHARS)}\n\n[AGENTS.md truncated to ${PROJECT_MEMORY_MAX_CHARS} characters]`;
       }
       block = `# Project instructions (AGENTS.md)\n${body}`;
     }
-  } catch {
-    block = null;
   }
   cache.set(file, { mtimeMs, block });
   return block;

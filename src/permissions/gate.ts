@@ -1,5 +1,7 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { starHome } from "../config/paths";
 import { isSecretEnvName, isSensitivePath } from "../core/sensitive";
 import { isAllowedByRules, isAskedByRules, isDeniedByRules } from "./allow";
 import { type LexCache, lexCached } from "./lex-cache";
@@ -85,7 +87,10 @@ function isDynamicTarget(target: string): boolean {
 function isDangerousDeleteTarget(target: string): boolean {
   if (isDynamicTarget(target)) return true;
   if (/^\/+$/.test(target)) return true;
-  const norm = target.replace(/\\/g, "/").replace(/\/+$/, "");
+  const extended = target.replace(/\\/g, "/").replace(/^\/\/[?]\/(?:UNC\/)?/i, "");
+  const normalized = path.posix.normalize(extended);
+  if (/^\/+$/.test(normalized)) return true;
+  const norm = normalized.replace(/\/+$/, "");
   if (norm === "/*" || norm === "*") return true;
   if (norm === "~" || norm.startsWith("~/") || /^~[^/]/.test(norm)) return true;
   if (norm === "." || norm === "./*") return true;
@@ -161,6 +166,17 @@ function rmIsDangerous(args: string[]): boolean {
   return recursive && targets.some(isDangerousDeleteTarget);
 }
 
+function shellScript(args: string[]): string | undefined {
+  for (let k = 0; k < args.length; k += 1) {
+    const arg = args[k] as string;
+    if (arg === "--") return undefined;
+    if (arg.startsWith("-") && !arg.startsWith("--") && arg.slice(1).includes("c")) {
+      return args[k + 1];
+    }
+  }
+  return undefined;
+}
+
 function findIsDangerous(args: string[], depth: number, lex?: LexCache): boolean {
   const paths: string[] = [];
   for (const arg of args) {
@@ -190,8 +206,7 @@ function findIsDangerous(args: string[], depth: number, lex?: LexCache): boolean
     const name = baseName(argv[0] as string);
     if (name === "rm" && rmIsDangerous(argv.slice(1))) return true;
     if (SH_FAMILY.has(name)) {
-      const idx = argv.indexOf("-c");
-      const script = idx >= 0 ? argv[idx + 1] : undefined;
+      const script = shellScript(argv.slice(1));
       if (script !== undefined && commandLineIsDangerous(script, depth + 1, lex)) return true;
     }
     if (commandLineIsDangerous(argv.join(" "), depth + 1, lex)) return true;
@@ -252,9 +267,7 @@ function xargsIsDangerous(args: string[], depth: number, lex?: LexCache): boolea
     const name = baseName(arg);
     if (name === "rm") return true;
     if (!SH_FAMILY.has(name)) return false;
-    const scriptArgs = args.slice(k + 1);
-    const idx = scriptArgs.indexOf("-c");
-    const script = idx >= 0 ? scriptArgs[idx + 1] : undefined;
+    const script = shellScript(args.slice(k + 1));
     if (script === undefined) return false;
     const substituted = replstr !== undefined ? script.split(replstr).join("~") : script;
     return commandLineIsDangerous(substituted, depth + 1, lex);
@@ -287,6 +300,7 @@ interface CommandInvocation {
   name: string;
   rest: string[];
   sudo: boolean;
+  splitScripts: string[];
 }
 
 interface WrapperSpec {
@@ -328,6 +342,8 @@ const WRAPPER_COMMANDS: Record<string, WrapperSpec> = {
   },
   doas: { valueOpts: new Set(["-u"]), positionals: 0 },
   env: { valueOpts: new Set(["-u", "-C", "--unset", "--chdir"]), positionals: 0 },
+  command: { valueOpts: new Set(), positionals: 0 },
+  exec: { valueOpts: new Set(["-a"]), positionals: 0 },
   nice: { valueOpts: new Set(["-n", "--adjustment"]), positionals: 0 },
   ionice: {
     valueOpts: new Set(["-c", "-n", "-p", "--class", "--classdata", "--pid"]),
@@ -352,12 +368,14 @@ const WRAPPER_COMMANDS: Record<string, WrapperSpec> = {
 };
 
 // Strips leading VAR=value assignments and wrapper commands (sudo/doas/env,
-// nice/ionice/nohup/timeout/stdbuf/setsid/chrt/taskset, with their flags and
-// arguments) to find the command actually being run.
-function commandInvocation(words: string[]): CommandInvocation | null {
+// command/exec/nice/ionice/nohup/timeout/stdbuf/setsid/chrt/taskset, with their
+// flags and arguments) to find the command actually being run.
+function commandInvocation(inputWords: string[], lex?: LexCache): CommandInvocation | null {
+  let words = inputWords;
   let sudo = false;
   let k = 0;
-  for (;;) {
+  const splitScripts: string[] = [];
+  outer: for (;;) {
     const word = words[k];
     if (word === undefined) return null;
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
@@ -367,7 +385,7 @@ function commandInvocation(words: string[]): CommandInvocation | null {
     const name = baseName(word);
     const spec = WRAPPER_COMMANDS[name];
     if (spec === undefined) {
-      return { name, rest: words.slice(k + 1), sudo };
+      return { name, rest: words.slice(k + 1), sudo, splitScripts };
     }
     sudo = sudo || name === "sudo" || name === "doas";
     k += 1;
@@ -375,6 +393,25 @@ function commandInvocation(words: string[]): CommandInvocation | null {
     for (;;) {
       const arg = words[k];
       if (arg === undefined) return null;
+      if (name === "env") {
+        let split: string | undefined;
+        let next = k + 1;
+        if (arg === "-S" || arg === "--split-string") {
+          split = words[k + 1];
+          next = k + 2;
+        } else if (arg.startsWith("--split-string=")) {
+          split = arg.slice("--split-string=".length);
+        } else if (arg.startsWith("-S") && arg.length > 2) {
+          split = arg.slice(2);
+        }
+        if (split !== undefined) {
+          splitScripts.push(split);
+          words = [...segmentWords(lexCached(lex, split)).words, ...words.slice(next)];
+          k = 0;
+          continue outer;
+        }
+        if (next === k + 2) return null;
+      }
       if (arg.startsWith("-") && arg !== "-") {
         if (spec.valueOpts.has(arg)) {
           if (spec.positionalSubstitutes?.has(arg)) positionals = 0;
@@ -421,8 +458,11 @@ function segmentIsDangerous(segment: ShellToken[], depth: number, lex?: LexCache
   if (redirectTargets.some((target) => isDynamicTarget(target) || BLOCK_DEVICE.test(target))) {
     return true;
   }
-  const invocation = commandInvocation(words);
+  const invocation = commandInvocation(words, lex);
   if (!invocation) return false;
+  if (invocation.splitScripts.some((script) => commandLineIsDangerous(script, depth + 1, lex))) {
+    return true;
+  }
   const { name, rest, sudo } = invocation;
   if (sudo && name === "rm") return true;
   switch (name) {
@@ -447,7 +487,8 @@ function segmentIsDangerous(segment: ShellToken[], depth: number, lex?: LexCache
     case "del":
     case "erase":
       return rest.some((arg) => /^\/s$/i.test(arg));
-    case "remove-item": {
+    case "remove-item":
+    case "ri": {
       let recursive = false;
       const targets: string[] = [];
       for (const arg of rest) {
@@ -497,8 +538,7 @@ function segmentIsDangerous(segment: ShellToken[], depth: number, lex?: LexCache
     case "zsh":
     case "dash":
     case "ash": {
-      const idx = rest.indexOf("-c");
-      const script = idx >= 0 ? rest[idx + 1] : undefined;
+      const script = shellScript(rest);
       return script !== undefined && commandLineIsDangerous(script, depth + 1, lex);
     }
     case "eval":
@@ -544,21 +584,45 @@ export function isDangerousCommand(command: string, lex?: LexCache): boolean {
 }
 
 // Directories whose contents must never leave the machine: the CLI's own
-// config home (~/.star-cli holds the API-key .env) and ssh keys. Compared
-// case-insensitively, with $HOME / %USERPROFILE% spellings of the same dirs.
+// config home and ssh keys. Absolute home/STAR_HOME spellings are expanded too;
+// restricting this to `~` would make the same secret visible under another name.
 const SENSITIVE_DIR_PREFIXES = [
   "~/.star-cli",
   "~/.ssh",
   "$home/.star-cli",
   "$home/.ssh",
+  "$userprofile/.star-cli",
   "$userprofile/.ssh",
+  "%userprofile%/.star-cli",
   "%userprofile%/.ssh",
 ];
 
+function normalizeSensitiveWord(word: string): string {
+  const home = os.homedir().replace(/\\/g, "/").replace(/\/+$/, "");
+  let normalized = (word.startsWith("@") ? word.slice(1) : word).replace(/\\/g, "/");
+  normalized = normalized
+    .replace(/^~(?=\/|$)/, home)
+    .replace(/^\$home(?=\/|$)/i, home)
+    .replace(/^\$userprofile(?=\/|$)/i, home)
+    .replace(/^%userprofile%(?=\/|$)/i, home);
+  if (process.platform === "win32") {
+    normalized = normalized.replace(/^\/([a-z])(?=\/|$)/i, "$1:");
+  }
+  return normalized.replace(/\/+$/, "").toLowerCase();
+}
+
 function tokenTouchesSensitivePath(word: string): boolean {
-  const norm = word.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-  for (const prefix of SENSITIVE_DIR_PREFIXES) {
-    if (norm === prefix || norm.startsWith(`${prefix}/`)) return true;
+  const norm = normalizeSensitiveWord(word);
+  const home = os.homedir();
+  const prefixes = [
+    ...SENSITIVE_DIR_PREFIXES,
+    path.join(home, ".star-cli"),
+    path.join(home, ".ssh"),
+    path.resolve(starHome()),
+  ];
+  for (const prefix of prefixes) {
+    const normalizedPrefix = normalizeSensitiveWord(prefix);
+    if (norm === normalizedPrefix || norm.startsWith(`${normalizedPrefix}/`)) return true;
   }
   return isSensitivePath(word);
 }
@@ -598,13 +662,15 @@ function bashHygiene(command: string, lex?: LexCache): BashHygiene {
       for (const word of [...words, ...redirectTargets]) {
         if (tokenTouchesSensitivePath(word) || tokenReferencesSecretEnv(word)) sensitive = true;
       }
-      const invocation = commandInvocation(words);
+      const invocation = commandInvocation(words, lex);
       if (!invocation) continue;
       if (EGRESS_COMMANDS.has(invocation.name)) egress = true;
+      for (const split of invocation.splitScripts) {
+        visit(lexCached(lex, split), depth + 1);
+      }
       let script: string | undefined;
       if (SH_FAMILY.has(invocation.name)) {
-        const idx = invocation.rest.indexOf("-c");
-        script = idx >= 0 ? invocation.rest[idx + 1] : undefined;
+        script = shellScript(invocation.rest);
       } else if (invocation.name === "cmd") {
         const idx = invocation.rest.findIndex((arg) => /^\/[ck]$/i.test(arg));
         script = idx >= 0 ? invocation.rest.slice(idx + 1).join(" ") : undefined;
@@ -649,7 +715,8 @@ function getStringArg(args: unknown, key: string): string | undefined {
 
 function normalizeAbsolute(p: string, cwd: string): string {
   const abs = path.isAbsolute(p) ? path.normalize(p) : path.resolve(cwd, p);
-  return abs.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const normalized = abs.replace(/\\/g, "/").replace(/\/+$/, "");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 function isOutsideCwd(p: string, cwd: string): boolean {

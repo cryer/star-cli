@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -6,7 +6,7 @@ import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { AgentLoop } from "../src/agent/loop";
-import { PROJECT_MEMORY_MAX_CHARS } from "../src/agent/project-memory";
+import { PROJECT_MEMORY_MAX_CHARS, readProjectMemory } from "../src/agent/project-memory";
 import type { StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
 import { SessionStore } from "../src/session/store";
@@ -714,6 +714,21 @@ describe("AgentLoop", () => {
     expect(system?.content).toContain("# Project instructions (AGENTS.md)");
     expect(system?.content).toContain("Use pnpm, not npm.");
   });
+
+  it.runIf(process.platform !== "win32")(
+    "refuses AGENTS.md linked to a file outside the cwd",
+    async () => {
+      const outside = mkdtempSync(path.join(tmpdir(), "star-agents-outside-"));
+      try {
+        const target = path.join(outside, "private.txt");
+        writeFileSync(target, "PRIVATE MATERIAL");
+        symlinkSync(target, path.join(cwd, "AGENTS.md"), "file");
+        expect(readProjectMemory(cwd)).toBeNull();
+      } finally {
+        await rmWithRetry(outside);
+      }
+    },
+  );
 
   it("injects MEMORY.md from STAR_HOME into the system message", async () => {
     writeFileSync(path.join(home, "MEMORY.md"), "- prefers dark mode", "utf8");

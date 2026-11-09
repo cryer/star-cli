@@ -1758,6 +1758,12 @@ export function Repl({
         if (!result) {
           return `Checkpoint #${id} is no longer available.`;
         }
+        if (!result.ok) {
+          return [
+            ...result.reverted,
+            "Rewind aborted; conversation and checkpoints left unchanged.",
+          ].join("\n");
+        }
         let retracted = 0;
         if (result.messageIndex !== null && current instanceof AgentLoop) {
           retracted = await current.retractFromIndex(result.messageIndex);

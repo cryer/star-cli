@@ -10,6 +10,15 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ## [Unreleased]
 
+### Security
+
+- **shell and filesystem boundaries close equivalence bypasses**: dangerous-command analysis now normalizes `..` and Windows extended paths, understands combined shell options, `command`/`exec`, `env -S` and PowerShell `ri`; deny/ask rules inspect both command substitutions and outer chain segments. POSIX cwd checks preserve case, NTFS alternate data streams cannot hide sensitive files, absolute home/STAR_HOME paths and curl `@file` operands trigger secret protection, `.git-credentials` is protected, and AGENTS.md/skill reads reject links escaping their allowed roots
+- **project ignore rules cannot reinclude secrets in whole-tree snapshots**: capture, index scrubbing, restore, preview and clean now apply the sensitive-path policy independently of `.gitignore` precedence, so negated `.env`/key files are neither captured nor overwritten or deleted during undo
+
+### Fixed
+
+- **undo and rewind no longer mix session turns or discard unrecoverable checkpoints**: hydrating snapshots advances turn ids, per-file restores preflight all required content before changing files or conversation, and whole-tree undo restores files before committing history retraction
+
 ## [0.3.15] - 2026-10-28
 
 ### Fixed

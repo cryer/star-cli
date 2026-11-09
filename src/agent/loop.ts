@@ -50,7 +50,9 @@ import {
   beginTurn,
   currentTurnSeq,
   dropTurnSnapshots,
+  listTurnSnapshots,
   setSnapshotHooks,
+  snapshotRestoreProblems,
   undoTurnSnapshots,
 } from "../tools/fs/snapshots";
 import { ToolRegistry } from "../tools/registry";
@@ -713,19 +715,24 @@ export class AgentLoop {
     return { removed: result.removed, turn, tree };
   }
 
-  // The confirmed /undo: retract the last turn, then revert its file changes.
-  // With a whole-tree snapshot the working tree is restored from git — which
-  // also reverts changes no tool snapshot saw (bash edits, deleted files) —
-  // and the turn's per-file snapshots are dropped instead of replayed (they
-  // would double-restore). The pre-undo tree feeds the redo stack, so /redo
-  // returns to the exact state before the undo. Any git failure falls back
-  // to the per-file snapshot revert, which never pushes the redo stack.
+  // The confirmed /undo restores files before committing the history rewrite.
+  // A whole-tree restore can roll back to the pre-undo tree if retraction
+  // fails; the per-file path preflights every required snapshot before any
+  // messages are removed. Any git failure falls back to those per-file snapshots.
   async undoLastTurn(): Promise<{ removed: number; reverted: string[]; tree?: string }> {
-    const { removed, turn, tree } = await this.retractLastTurn();
-    if (removed === 0) return { removed, reverted: [] };
+    const preview = this.previewLastTurnRetraction();
+    if (preview.removed === 0) return { removed: 0, reverted: [] };
+    const { turn, tree } = preview;
     if (turn !== undefined && tree !== undefined) {
       const preUndoTree = await trackTree(this.opts.cwd);
       if (preUndoTree !== null && (await restoreTree(this.opts.cwd, tree))) {
+        let removed: number;
+        try {
+          removed = (await this.retractLastTurn()).removed;
+        } catch (error) {
+          await restoreTree(this.opts.cwd, preUndoTree);
+          throw error;
+        }
         this.redoStack.push({ tree: preUndoTree, label: this.lastUndoneLabel });
         const dropped = await dropTurnSnapshots(turn, true);
         return {
@@ -737,6 +744,15 @@ export class AgentLoop {
         };
       }
     }
+    if (turn !== undefined) {
+      const problems = await snapshotRestoreProblems(listTurnSnapshots(turn));
+      if (problems.length > 0) {
+        throw new Error(
+          `Undo aborted; conversation and checkpoints left unchanged:\n${problems.join("\n")}`,
+        );
+      }
+    }
+    const { removed } = await this.retractLastTurn();
     const reverted = turn !== undefined ? await undoTurnSnapshots(turn) : [];
     return { removed, reverted };
   }

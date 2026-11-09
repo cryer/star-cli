@@ -9,7 +9,12 @@ import type { StreamEvent } from "../src/core/events";
 import { type CoreMessage, type StarMessage, retractLastTurn } from "../src/core/messages";
 import { SessionStore } from "../src/session/store";
 import { createDefaultRegistry } from "../src/tools";
-import { clearSnapshots, undoTurnSnapshots } from "../src/tools/fs/snapshots";
+import {
+  clearSnapshots,
+  listSnapshots,
+  snapshotCount,
+  undoTurnSnapshots,
+} from "../src/tools/fs/snapshots";
 import { rmWithRetry } from "./test-fs";
 
 function makeConfig(): StarConfig {
@@ -362,5 +367,29 @@ describe("turn-scoped undo (end to end)", () => {
     expect(reverted.some((m) => m.includes("f.txt"))).toBe(true);
     expect(fs.existsSync(path.join(cwd, "f.txt"))).toBe(false);
     expect(loop.getMessages()).toHaveLength(0);
+  });
+
+  it("leaves conversation, files, and checkpoints unchanged when undo content is missing", async () => {
+    fs.writeFileSync(path.join(cwd, "f.txt"), "old");
+    const loop = new AgentLoop({
+      model: mockModel([toolCallRound("c1", "write_file", { path: "f.txt", content: "new" })]),
+      registry: createDefaultRegistry(),
+      config: { ...makeConfig(), gitSnapshots: false },
+      cwd,
+      sessionStore: null,
+    });
+    await collect(loop.stream("write f.txt", new AbortController().signal));
+    const messagesBefore = loop.getMessages().length;
+    const snapshot = listSnapshots()[0];
+    expect(snapshot).toBeDefined();
+    if (!snapshot) return;
+    snapshot.content = null;
+    snapshot.contentFile = path.join(cwd, "missing.snapshot");
+    const checkpointsBefore = snapshotCount();
+
+    await expect(loop.undoLastTurn()).rejects.toThrow("left unchanged");
+    expect(loop.getMessages()).toHaveLength(messagesBefore);
+    expect(fs.readFileSync(path.join(cwd, "f.txt"), "utf8")).toBe("new");
+    expect(snapshotCount()).toBe(checkpointsBefore);
   });
 });
