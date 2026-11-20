@@ -151,11 +151,11 @@ function runningTaskLabels(): string[] {
   const shells = defaultTaskManager
     .list()
     .filter((t) => t.status === "running")
-    .map((t) => t.description ?? t.command);
+    .map((t) => `${t.id}: ${t.description ?? t.command}`);
   const agents = defaultAgentTasks
     .list()
     .filter((t) => t.status === "running")
-    .map((t) => t.description ?? t.id);
+    .map((t) => `${t.id}: ${t.description ?? t.prompt}`);
   return [...shells, ...agents];
 }
 

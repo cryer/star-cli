@@ -8,6 +8,7 @@ import type { ChatBackend } from "../src/cli/backend";
 import type { StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
 import type { ChatInput } from "../src/core/messages";
+import { defaultTaskManager } from "../src/tasks/manager";
 import { renderApp, stripAnsi, tick, typeText } from "./ink-harness";
 import { rmWithRetry } from "./test-fs";
 
@@ -68,8 +69,54 @@ describe("production REPL layout", () => {
 
   afterEach(async () => {
     vi.unstubAllEnvs();
+    defaultTaskManager.cleanup();
     defaultAgentTasks.cleanup();
     for (const dir of [cwd, home]) await rmWithRetry(dir);
+  });
+
+  it("distinguishes a failed shell task from other running background work", async () => {
+    let release = () => {};
+    let completeAgent = () => {};
+    const finished = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const agentFinished = new Promise<string>((resolve) => {
+      completeAgent = () => resolve("done");
+    });
+    const backend: ChatBackend = {
+      async *stream(): AsyncGenerator<StreamEvent> {
+        await finished;
+        yield { type: "finish", finishReason: "stop" };
+      },
+    };
+    const app = renderRepl(backend, cwd, 120, 24);
+    await typeText(app.stdin, "next prompt", "\r");
+    await vi.waitFor(() => expect(app.lastFrame() ?? "").toContain("star is thinking"));
+
+    const agent = defaultAgentTasks.start(() => agentFinished, {
+      prompt: "keep running",
+      description: "other agent",
+    });
+    const shell = defaultTaskManager.start({
+      command: 'node -e "setTimeout(() => process.exit(3), 200)"',
+      cwd,
+      description: "expected failure",
+    });
+    await vi.waitFor(() => expect(app.lastFrame() ?? "").toContain("bg: 2"));
+    await vi.waitFor(() => {
+      const frame = stripAnsi(app.lastFrame() ?? "");
+      const status = frame.split("\n").find((line) => line.includes("mode: auto")) ?? "";
+      expect(frame).toContain(`Background task ${shell.id} failed`);
+      expect(frame).toContain("star is thinking");
+      expect(status).toContain(`bg: 1 (${agent.id}: other agent)`);
+      expect(status).not.toContain("expected failure");
+    });
+
+    completeAgent();
+    await vi.waitFor(() => expect(app.lastFrame() ?? "").not.toContain("bg:"));
+    release();
+    await vi.waitFor(() => expect(app.lastFrame() ?? "").not.toContain("star is thinking"));
+    app.unmount();
   });
 
   it("keeps a long streamed fence inside a bounded viewport with a fixed footer", async () => {

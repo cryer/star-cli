@@ -17,6 +17,7 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ### Fixed
 
+- **the status bar identifies background tasks by id**: labels now include `task-N`/`agent-N`, so a still-running subagent is not mistaken for a different shell command that already failed while both share the combined `bg` counter
 - **undo and rewind no longer mix session turns or discard unrecoverable checkpoints**: hydrating snapshots advances turn ids, per-file restores preflight all required content before changing files or conversation, and whole-tree undo restores files before committing history retraction
 
 ## [0.3.15] - 2026-10-28

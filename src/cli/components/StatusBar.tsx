@@ -20,7 +20,7 @@ interface StatusBarProps {
   // fields (rendered as "Not provided").
   cachePercent?: number | null;
   sessionCostUsd?: number | null;
-  // Labels of currently running background tasks (description or command).
+  // ID-prefixed labels of currently running background tasks.
   backgroundTasks?: string[];
 }
 
