@@ -2,7 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { TaskManager, type TaskSnapshot, defaultTaskManager } from "../src/tasks/manager";
+import {
+  TaskManager,
+  type TaskSnapshot,
+  defaultTaskManager,
+  readOutputChunk,
+} from "../src/tasks/manager";
 import { bashTool, decodeOutput, trimUtf8End, trimUtf8Start } from "../src/tools/bash";
 
 let cwd: string;
@@ -11,8 +16,8 @@ beforeEach(() => {
   cwd = mkdtempSync(path.join(os.tmpdir(), "star-decode-test-"));
 });
 
-afterEach(() => {
-  defaultTaskManager.cleanup();
+afterEach(async () => {
+  await defaultTaskManager.cleanup();
   rmSync(cwd, { recursive: true, force: true });
 });
 
@@ -22,7 +27,7 @@ function waitForTerminal(
   timeoutMs = 10000,
 ): Promise<TaskSnapshot> {
   const existing = manager.get(id);
-  if (existing && existing.status !== "running") {
+  if (existing && existing.status !== "running" && existing.status !== "stopping") {
     return Promise.resolve(existing);
   }
   return new Promise((resolve, reject) => {
@@ -31,7 +36,7 @@ function waitForTerminal(
       reject(new Error(`timed out waiting for ${id} to finish`));
     }, timeoutMs);
     const onUpdate = (task: TaskSnapshot) => {
-      if (task.id === id && task.status !== "running") {
+      if (task.id === id && task.status !== "running" && task.status !== "stopping") {
         clearTimeout(timer);
         manager.off("update", onUpdate);
         resolve(task);
@@ -94,6 +99,31 @@ describe("decodeOutput", () => {
   it("leaves undecodable bytes as U+FFFD off win32", () => {
     const gbk = Buffer.from([0xd6, 0xd0, 0xce, 0xc4]);
     expect(decodeOutput(gbk, "linux")).toContain("�");
+  });
+});
+
+describe("incremental UTF-8 cursors", () => {
+  it("rewinds to an incomplete tail and reads it whole on the next chunk", () => {
+    const first = Buffer.from([0x61, 0xe4, 0xb8]);
+    const initial = readOutputChunk(first, 40, 40);
+    expect(initial).toMatchObject({ output: "a", outputStart: 40, nextOffset: 41 });
+
+    const second = Buffer.concat([first, Buffer.from([0xad, 0x62])]);
+    const resumed = readOutputChunk(second, 40, initial.nextOffset);
+    expect(resumed).toMatchObject({ output: "中b", outputStart: 40, nextOffset: 45 });
+    expect(resumed.output).not.toContain("�");
+  });
+
+  it("retains a partial four-byte sequence without losing continuation bytes", () => {
+    const first = Buffer.from([0xf0, 0x9f]);
+    const initial = readOutputChunk(first, 0, 0);
+    expect(initial).toMatchObject({ output: "", nextOffset: 0 });
+
+    const second = Buffer.concat([first, Buffer.from([0x98, 0x80])]);
+    expect(readOutputChunk(second, 0, initial.nextOffset)).toMatchObject({
+      output: "😀",
+      nextOffset: 4,
+    });
   });
 });
 

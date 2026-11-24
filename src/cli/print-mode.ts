@@ -98,7 +98,39 @@ export async function printMode(
     }
   } finally {
     flushPending();
-    if (interrupted) exitCode = 130;
+    const reportFinalError = (error: unknown) => {
+      const message = error instanceof Error ? formatStreamError(error) : String(error);
+      process.stderr.write(`\n[error] ${message}\n`);
+      exitCode = 1;
+    };
+    try {
+      const [shellTasks, agentTasks] = await Promise.all([
+        defaultTaskManager.cleanup(),
+        defaultAgentTasks.cleanup(),
+      ]);
+      const cleanedTasks = [...shellTasks, ...agentTasks];
+      const stopped = cleanedTasks.filter((task) => task.status === "stopped").length;
+      const failedStops = shellTasks.filter((task) => task.status === "stop_failed");
+      if (stopped > 0) {
+        process.stderr.write(
+          `[info] ${stopped} background task(s) were still running and have been stopped.\n`,
+        );
+      }
+      if (failedStops.length > 0) {
+        const details = failedStops
+          .map((task) => `${task.id}: ${task.stopError ?? "process state is unconfirmed"}`)
+          .join("; ");
+        process.stderr.write(`[error] Failed to stop background task(s): ${details}\n`);
+        exitCode = 1;
+      }
+    } catch (error) {
+      reportFinalError(error);
+    }
+    try {
+      await loop.flushBackgroundNotifications();
+    } catch (error) {
+      reportFinalError(error);
+    }
     const usageLine = usage.toJsonLine();
     if (usageLine) {
       if (json) {
@@ -112,13 +144,12 @@ export async function printMode(
     }
     if (!json) process.stdout.write("\n");
     process.off("SIGINT", onSigint);
-    const stopped = defaultTaskManager.cleanup().length + defaultAgentTasks.cleanup().length;
-    if (stopped > 0) {
-      process.stderr.write(
-        `[info] ${stopped} background task(s) were still running and have been stopped.\n`,
-      );
+    try {
+      await sessionStore?.close();
+    } catch (error) {
+      reportFinalError(error);
     }
-    await sessionStore?.close();
+    if (interrupted) exitCode = 130;
   }
   return exitCode;
 }

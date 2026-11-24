@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { ModelConfig, StarConfig } from "../config/schema";
 import { type TokenUsage, usageTotalTokens } from "../core/events";
 import type { PermissionRequest } from "../permissions/types";
+import type { SessionStore } from "../session/store";
 import { createDefaultRegistry } from "../tools";
 import type { Tool, ToolResult } from "../tools/types";
 import { defaultAgentTasks } from "./agent-tasks";
@@ -44,13 +45,20 @@ export interface SubagentDeps {
   // entry, not the model id (several entries can share one id with
   // different prices).
   modelName?: string;
+  allowBackgroundTasks?: boolean;
+  getSessionStore?: () => SessionStore | null | undefined;
   getConfirmHandler?: () => ((req: PermissionRequest) => Promise<boolean>) | undefined;
   // Receives the child loop's accumulated token usage once the run settles
   // (sync or background, success or failure), along with the model the
   // child ran on and its [[models]] entry name. The parent records it in
   // the per-model session ledger immediately, covering /cost, /usage and
   // sessionBudgetUsd even when no further parent finish event arrives.
-  onUsage?: (usage: TokenUsage, model: LanguageModel, modelName?: string) => void;
+  onUsage?: (
+    usage: TokenUsage,
+    model: LanguageModel,
+    modelName?: string,
+    sourceStore?: SessionStore | null,
+  ) => void;
 }
 
 interface SubagentArgs {
@@ -154,7 +162,9 @@ async function runSubagent(
   args: SubagentArgs,
   cwd: string,
   signal: AbortSignal,
+  sourceStore: SessionStore | null | undefined,
   agentIdRef?: { id?: string },
+  reportProgress?: (progress: string) => void,
 ): Promise<string> {
   const { AgentLoop } = await import("./loop");
   const child = new AgentLoop({
@@ -174,6 +184,7 @@ async function runSubagent(
     subagentDepth: deps.depth + 1,
     readOnly: args.read_only,
     modelName: deps.modelName,
+    allowBackgroundTasks: deps.allowBackgroundTasks,
     // Read after the dynamic-import await: defaultAgentTasks.start() has
     // returned by then, so a background spawn's ref.id is already assigned.
     // Foreground spawns get a throwaway id.
@@ -184,11 +195,17 @@ async function runSubagent(
 
   let toolCalls = 0;
   let error: string | null = null;
+  const reportActivity = (activity: string) => {
+    reportProgress?.(`\n${activity.slice(0, 2000)}`);
+  };
   const usage: TokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   try {
     for await (const event of child.stream(args.prompt, signal)) {
-      if (event.type === "tool-result") {
+      if (event.type === "tool-call") {
+        reportActivity(`→ ${event.name} ${JSON.stringify(event.args)}`);
+      } else if (event.type === "tool-result") {
         toolCalls++;
+        reportActivity(`← ${event.name}: ${event.content}`);
       } else if (event.type === "error") {
         error = event.error.message;
         break;
@@ -210,7 +227,7 @@ async function runSubagent(
   } finally {
     // The child spent tokens even when it errored or was aborted — report
     // whatever accumulated so the parent can bill it.
-    if (usage.totalTokens > 0) deps.onUsage?.(usage, deps.model, deps.modelName);
+    if (usage.totalTokens > 0) deps.onUsage?.(usage, deps.model, deps.modelName, sourceStore);
   }
 
   // A user abort ends the child loop without an error event; surface it
@@ -255,7 +272,7 @@ export function createSubagentTool(deps: SubagentDeps): Tool {
   return {
     name: "subagent",
     description:
-      "Spawn a subagent with its own agent loop to handle a focused subtask (research, exploration, or an isolated change). The subagent has the same tools but cannot spawn further subagents, and it starts with zero context beyond what you write — brief it like a colleague who just walked in: state the goal, hand over what you already know (paths, identifiers, prior findings), and say exactly what the report should contain. Returns the subagent's final report. Prefer this for self-contained work that would otherwise clutter the main conversation. Set read_only for research, exploration, or review subtasks that must not modify anything. Set run_in_background to start it without blocking: independent subtasks then run concurrently and their reports are delivered to you automatically when they finish (also inspectable via task_list/task_output/task_kill).",
+      "Spawn a subagent with its own agent loop to handle a focused subtask (research, exploration, or an isolated change). The subagent has the same tools but cannot spawn further subagents, and it starts with zero context beyond what you write — brief it like a colleague who just walked in: state the goal, hand over what you already know (paths, identifiers, prior findings), and say exactly what the report should contain. Returns the subagent's final report. Prefer this for self-contained work that would otherwise clutter the main conversation. Set read_only for research, exploration, or review subtasks that must not modify anything. Set run_in_background to start it without blocking: independent subtasks then run concurrently and their reports are delivered at the next agent step or your next explicit turn (also inspectable via task_list/task_output/task_kill).",
     permission: "exec",
     parameters: z.object({
       prompt: z
@@ -281,14 +298,23 @@ export function createSubagentTool(deps: SubagentDeps): Tool {
         ),
     }),
     async execute(args, ctx): Promise<ToolResult> {
+      const sourceStore = deps.getSessionStore?.();
       if (args.run_in_background) {
+        if (ctx.backgroundTasksEnabled === false) {
+          return {
+            content:
+              "Background subagents are disabled in print mode; run the subagent in the foreground.",
+            isError: true,
+          };
+        }
         // start() invokes the closure synchronously, but runSubagent's first
         // await (the dynamic import) only continues after start() returns
         // and ref.id is assigned — so the child loop's agentId is its own
         // background task id.
         const ref: { id?: string } = {};
         const task = defaultAgentTasks.start(
-          (signal) => runSubagent(deps, args, ctx.cwd, signal, ref),
+          (signal, reportProgress) =>
+            runSubagent(deps, args, ctx.cwd, signal, sourceStore, ref, reportProgress),
           {
             prompt: args.prompt,
             description: args.description,
@@ -297,13 +323,13 @@ export function createSubagentTool(deps: SubagentDeps): Tool {
         ref.id = task.id;
         const label = args.description ? ` "${args.description}"` : "";
         return {
-          content: `Background subagent ${task.id}${label} started. Its report will be delivered as a message when it finishes; use task_list/task_output to check progress.`,
+          content: `Background subagent ${task.id}${label} started. Its report will be delivered at the next agent step or your next explicit turn; use task_list/task_output to check progress.`,
         };
       }
 
       const signal = ctx.abortSignal ?? new AbortController().signal;
       try {
-        return { content: await runSubagent(deps, args, ctx.cwd, signal) };
+        return { content: await runSubagent(deps, args, ctx.cwd, signal, sourceStore) };
       } catch (e) {
         return { content: e instanceof Error ? e.message : String(e), isError: true };
       }

@@ -221,7 +221,7 @@ star --clear-sessions all     delete every stored session
 | `/new` | 以干净的上下文开始新会话（旧会话保留在磁盘上） |
 | `/clear-sessions [--all]` | 删除已存会话：默认删除当前目录的，`--all` 删除所有会话（当前会话保留） |
 | `/todo` | 显示 TODO 列表 |
-| `/tasks` | 列出后台任务（id、状态、运行时长、退出码） |
+| `/tasks [output <id>\|kill <id>]` | 列出后台 shell 任务和子代理、查看单个结果，或等待单个任务停止 |
 | `/cost` | 显示 API token 用量与估算的美元成本（需要在配置中为模型设置定价） |
 | `/usage` | 跨所有会话的 token 用量面板：总计、按日柱状图、按模型细分及美元估算 |
 | `/config` | 显示解析后的配置 |
@@ -259,7 +259,9 @@ star --clear-sessions all     delete every stored session
 
 ## 后台任务
 
-模型可以通过 `bash` 加 `run_in_background: true` 在后台运行耗时 shell 命令（与前台命令同一道权限门禁）。有任务在后台运行时，状态栏显示 `bg: N`；任务完成、失败、超时或被停止时，系统消息会报告结果。`/tasks` 列出每个任务的状态、运行时长和退出码，模型也可以用 `task_list` / `task_output` / `task_kill` 工具查看或停止任务。REPL 退出时剩余任务会被终止。
+模型可以在后台运行耗时 shell 命令和子代理（与前台工作使用同一道权限门禁）。任务运行或停止中时，状态栏显示 `bg: N` 及任务 ID，最终状态也会产生系统消息。`/tasks` 同时列出 shell 任务和子代理，`/tasks output <id>` 查看结果，`/tasks kill <id>` 等待进程树或子代理真正停止。模型可使用对应的 `task_list` / `task_output` / `task_kill` 工具；shell 的 `task_output` 支持用 `offset` 游标增量读取，运行中的子代理会报告最近的工具活动。
+
+完成报告会在下一 step 或下一次显式回合注入主代理，并且只有会话持久化成功后才确认投递。退出以及 `/new`、`/resume`、`/fork` 会等待后台工作真正结束，先把报告保存到旧会话再切换或关闭。print 模式（`-p`）是一次性执行，因此启动后台 shell 或子代理的请求会被拒绝，并提示改用前台运行。
 
 ## 终端响铃
 

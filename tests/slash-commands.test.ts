@@ -21,6 +21,8 @@ function makeCtx(overrides: Partial<CommandContext> = {}) {
     resumeSession: async (id) => `resumed ${id}`,
     showTodos: async () => "todos",
     listTasks: () => "tasks list",
+    taskOutput: async (id) => `output for ${id}`,
+    taskKill: async (id) => `killed ${id}`,
     showUsage: () =>
       "API usage this session: 3 requests, 1234 prompt + 567 completion = 1801 tokens",
     showGlobalUsage: async () => "global usage dashboard",
@@ -288,6 +290,35 @@ describe("CommandRegistry", () => {
 
     expect(calls).toEqual([{ type: "system", text: "forked session" }]);
   });
+
+  it("/tasks lists tasks and dispatches output/kill subcommands", async () => {
+    const registry = makeRegistry();
+    const { ctx, calls } = makeCtx();
+
+    await registry.get("tasks")?.run("", ctx);
+    await registry.get("tasks")?.run("output task-2", ctx);
+    await registry.get("tasks")?.run("kill agent-3", ctx);
+
+    expect(calls).toEqual([
+      { type: "system", text: "tasks list" },
+      { type: "system", text: "output for task-2" },
+      { type: "system", text: "killed agent-3" },
+    ]);
+    expect(registry.get("tasks")?.usage).toBe("/tasks [output <id> | kill <id>]");
+    expect(registry.get("tasks")?.argHints).toEqual(["output", "kill"]);
+  });
+
+  it.each(["output", "kill", "output task-1 extra", "unknown task-1"])(
+    "/tasks %s shows usage",
+    async (args) => {
+      const registry = makeRegistry();
+      const { ctx, calls } = makeCtx();
+
+      await registry.get("tasks")?.run(args, ctx);
+
+      expect(calls).toEqual([{ type: "system", text: "Usage: /tasks [output <id> | kill <id>]" }]);
+    },
+  );
 
   describe("/memory", () => {
     let home: string;

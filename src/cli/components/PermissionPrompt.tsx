@@ -40,10 +40,14 @@ export function PermissionPrompt({ request, preview, onDecision }: PermissionPro
   });
 
   const command = request.toolName === "bash" ? bashCommand(request.args) : null;
+  const source =
+    request.agentId !== undefined && request.agentId !== "root"
+      ? ` from ${toTerminalSafe(request.agentId)}`
+      : "";
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1}>
       <Text bold color="yellow">
-        Permission required: {request.toolName} ({request.level})
+        Permission required: {request.toolName} ({request.level}){source}
       </Text>
       {preview ? (
         <Box flexDirection="column">

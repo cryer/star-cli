@@ -265,6 +265,44 @@ describe("PermissionPrompt bash display", () => {
     expect(stripAnsi(app.lastFrame() ?? "")).toContain('{"path":"src/x.ts"}');
     app.unmount();
   });
+
+  it("shows the source agent for non-root permission requests", async () => {
+    const app = renderApp(
+      createElement(PermissionPrompt, {
+        request: {
+          toolName: "read_file",
+          args: { path: "src/x.ts" },
+          level: "read" as const,
+          agentId: "agent-3",
+        },
+        onDecision: () => {},
+      }),
+    );
+    await tick();
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain(
+      "Permission required: read_file (read) from agent-3",
+    );
+    app.unmount();
+  });
+
+  it.each([undefined, "root"])("keeps the original title for %s requests", async (agentId) => {
+    const app = renderApp(
+      createElement(PermissionPrompt, {
+        request: {
+          toolName: "read_file",
+          args: { path: "src/x.ts" },
+          level: "read" as const,
+          agentId,
+        },
+        onDecision: () => {},
+      }),
+    );
+    await tick();
+    const frame = stripAnsi(app.lastFrame() ?? "");
+    expect(frame).toContain("Permission required: read_file (read)");
+    expect(frame).not.toContain("Permission required: read_file (read) from");
+    app.unmount();
+  });
 });
 
 describe("DiffLines terminal escaping", () => {

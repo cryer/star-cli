@@ -170,11 +170,34 @@ export function registerBuiltinCommands(registry: CommandRegistry): void {
 
   register({
     name: "tasks",
-    description: "List background shell tasks",
-    usage: "/tasks",
+    description: "List background shell tasks and subagents, or inspect/stop one",
+    usage: "/tasks [output <id> | kill <id>]",
     category: "Info",
-    run(_args, ctx) {
-      ctx.addSystemMessage(ctx.listTasks());
+    argHints: ["output", "kill"],
+    async run(args, ctx) {
+      const arg = args.trim();
+      if (!arg) {
+        ctx.addSystemMessage(ctx.listTasks());
+        return;
+      }
+      const [action, id, ...extra] = arg.split(/\s+/);
+      if (action === "output" && id && extra.length === 0) {
+        ctx.addSystemMessage(
+          ctx.taskOutput
+            ? await ctx.taskOutput(id)
+            : "/tasks output: this context cannot read background tasks.",
+        );
+        return;
+      }
+      if (action === "kill" && id && extra.length === 0) {
+        ctx.addSystemMessage(
+          ctx.taskKill
+            ? await ctx.taskKill(id)
+            : "/tasks kill: this context cannot stop background tasks.",
+        );
+        return;
+      }
+      ctx.addSystemMessage("Usage: /tasks [output <id> | kill <id>]");
     },
   });
 

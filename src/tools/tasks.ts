@@ -2,17 +2,28 @@ import { z } from "zod";
 import { type AgentTaskSnapshot, defaultAgentTasks } from "../agent/agent-tasks";
 import { formatDuration, formatTaskLine, formatTaskList } from "../tasks/format";
 import { type TaskSnapshot, defaultTaskManager } from "../tasks/manager";
-import { MAX_OUTPUT } from "./bash";
+import { MAX_OUTPUT, trimUtf8Start } from "./bash";
 import type { Tool, ToolContext } from "./types";
 
 const idSchema = z.object({
   id: z.string().describe("Task id, e.g. task-1 or agent-1"),
 });
 
-// Aligns with the foreground bash output cap: keep the tail, note the cut.
+const outputSchema = idSchema.extend({
+  offset: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe("Absolute shell output byte offset returned as nextOffset by the previous read"),
+});
+
+// Aligns with the foreground bash output cap: keep a UTF-8-safe tail.
 function truncateOutput(s: string): string {
-  if (s.length <= MAX_OUTPUT) return s;
-  return `[... earlier output truncated; showing the last ${MAX_OUTPUT} characters ...]\n${s.slice(-MAX_OUTPUT)}`;
+  const bytes = Buffer.from(s);
+  if (bytes.length <= MAX_OUTPUT) return s;
+  const tail = trimUtf8Start(bytes.subarray(bytes.length - MAX_OUTPUT)).toString("utf8");
+  return `[... earlier output truncated; showing the last ${MAX_OUTPUT} bytes ...]\n${tail}`;
 }
 
 // Shell tasks are owned by the agent that started them: root sees and
@@ -36,7 +47,9 @@ function formatAgentTaskLine(task: AgentTaskSnapshot): string {
   const duration = formatDuration(task.startedAt, task.endedAt);
   const label = task.description ?? task.prompt.slice(0, 60);
   const status =
-    task.status === "running" ? `running ${duration}` : `${task.status} after ${duration}`;
+    task.status === "running" || task.status === "stopping"
+      ? `${task.status} ${duration}`
+      : `${task.status} after ${duration}`;
   return `${task.id} [${status}] ${label}`;
 }
 
@@ -59,24 +72,33 @@ export const taskListTool: Tool = {
   },
 };
 
-export const taskOutputTool: Tool<typeof idSchema> = {
+export const taskOutputTool: Tool<typeof outputSchema> = {
   name: "task_output",
   description:
-    "Read the current output of a background task (shell command or subagent; works while still running).",
+    "Read the current output of a background task (shell command or subagent; works while still running). For shell tasks, pass offset to read only new bytes and receive the next cursor.",
   permission: "read",
-  parameters: idSchema,
+  parameters: outputSchema,
   execute(args, ctx) {
     const shell = accessibleShellTask(ctx, args.id);
     if (shell) {
+      if (args.offset !== undefined) {
+        const chunk = defaultTaskManager.outputSince(args.id, args.offset);
+        if (chunk) {
+          const body = truncateOutput(chunk.output.replace(/\s+$/, "") || "(no new output)");
+          return Promise.resolve({
+            content: `${formatTaskLine(shell)}\n${body}\noutputStart: ${chunk.outputStart}\nnextOffset: ${chunk.nextOffset}`,
+          });
+        }
+      }
       const body = truncateOutput(shell.output.replace(/\s+$/, "") || "(no output yet)");
       return Promise.resolve({ content: `${formatTaskLine(shell)}\n${body}` });
     }
     const agent = callerId(ctx) === "root" ? defaultAgentTasks.get(args.id) : undefined;
     if (agent) {
-      const body =
-        agent.status === "running"
-          ? "(still running)"
-          : truncateOutput(agent.result.replace(/\s+$/, "") || "(no report)");
+      const active = agent.status === "running" || agent.status === "stopping";
+      const body = active
+        ? truncateOutput(agent.progress.replace(/\s+$/, "") || `(${agent.status})`)
+        : truncateOutput(agent.result.replace(/\s+$/, "") || "(no report)");
       return Promise.resolve({ content: `${formatAgentTaskLine(agent)}\n${body}` });
     }
     return Promise.resolve({ content: `Unknown task: ${args.id}`, isError: true });
@@ -88,24 +110,32 @@ export const taskKillTool: Tool<typeof idSchema> = {
   description: "Stop a running background task (shell command process tree or subagent).",
   permission: "exec",
   parameters: idSchema,
-  execute(args, ctx) {
+  async execute(args, ctx) {
     const shell = accessibleShellTask(ctx, args.id);
     const agent = shell || callerId(ctx) !== "root" ? undefined : defaultAgentTasks.get(args.id);
     const task = shell ?? agent;
     if (!task) {
-      return Promise.resolve({ content: `Unknown task: ${args.id}`, isError: true });
+      return { content: `Unknown task: ${args.id}`, isError: true };
     }
-    if (task.status !== "running") {
-      return Promise.resolve({
+    if (task.status !== "running" && task.status !== "stopping") {
+      return {
         content: `Task ${args.id} is not running (status: ${task.status}).`,
         isError: true,
-      });
+      };
     }
+    let stopped: TaskSnapshot | AgentTaskSnapshot | undefined;
     if (shell) {
-      defaultTaskManager.kill(args.id);
+      stopped = await defaultTaskManager.kill(args.id);
     } else {
-      defaultAgentTasks.kill(args.id);
+      stopped = await defaultAgentTasks.kill(args.id);
+      await defaultTaskManager.cleanupOwner(args.id);
     }
-    return Promise.resolve({ content: `Task ${args.id} stopped.` });
+    if (stopped?.status === "stop_failed") {
+      return {
+        content: `Failed to stop task ${args.id}: ${stopped.stopError ?? "process state is unconfirmed"}`,
+        isError: true,
+      };
+    }
+    return { content: `Task ${args.id} ${stopped?.status ?? "stopped"}.` };
   },
 };

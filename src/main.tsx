@@ -27,6 +27,7 @@ async function createLoop(
   modelName: string,
   cwd: string,
   sessionStore: SessionStore | null,
+  allowBackgroundTasks: boolean,
 ) {
   // Dynamic like the REPL import below: the agent loop pulls in the ai SDK
   // and every @ai-sdk provider (~100ms of module evaluation) that --version,
@@ -51,6 +52,7 @@ async function createLoop(
     streamIdleTimeoutSec: modelConfig.streamIdleTimeoutSec,
     streamFirstChunkTimeoutSec: modelConfig.streamFirstChunkTimeoutSec,
     vision: modelConfig.vision,
+    allowBackgroundTasks,
   });
 }
 
@@ -126,15 +128,27 @@ program
     }
 
     let sessionStore: SessionStore | null = null;
+    let loop: AgentLoop | null = null;
     let shuttingDown = false;
     installStdoutEpipeGuard(process.stdout, () => {
       if (shuttingDown) return;
       shuttingDown = true;
       void (async () => {
-        defaultTaskManager.cleanup();
-        defaultAgentTasks.cleanup();
-        await sessionStore?.close();
-        process.exit(0);
+        let exitCode = 0;
+        try {
+          await Promise.all([defaultTaskManager.cleanup(), defaultAgentTasks.cleanup()]);
+          await loop?.flushBackgroundNotifications();
+        } catch (error) {
+          console.error(error instanceof Error ? error.message : String(error));
+          exitCode = 1;
+        }
+        try {
+          await sessionStore?.close();
+        } catch (error) {
+          console.error(error instanceof Error ? error.message : String(error));
+          exitCode = 1;
+        }
+        process.exit(exitCode);
       })();
     });
     let resumed: { meta: SessionMeta; messages: StarMessage[] } | null = null;
@@ -195,9 +209,8 @@ program
       setTodoSession(sessionStore.id);
     }
 
-    let loop: AgentLoop;
     try {
-      loop = await createLoop(config, modelName, cwd, sessionStore);
+      loop = await createLoop(config, modelName, cwd, sessionStore, opts.print === undefined);
     } catch (error) {
       console.error(error instanceof Error ? error.message : String(error));
       process.exit(1);

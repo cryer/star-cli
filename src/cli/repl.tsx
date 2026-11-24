@@ -35,7 +35,12 @@ import {
 import { resumeSession } from "../session/resume";
 import { SessionStore } from "../session/store";
 import { collectUsageStats, formatUsageDashboard } from "../session/usage";
-import { formatTaskFinished, formatTaskList, formatTaskStarted } from "../tasks/format";
+import {
+  formatAgentTaskList,
+  formatTaskFinished,
+  formatTaskList,
+  formatTaskStarted,
+} from "../tasks/format";
 import { type TaskSnapshot, defaultTaskManager } from "../tasks/manager";
 import { TodoStore, createDefaultRegistry } from "../tools";
 import {
@@ -45,6 +50,7 @@ import {
   listTurnSnapshots,
   rewindToSnapshot,
 } from "../tools/fs/snapshots";
+import { taskKillTool, taskOutputTool } from "../tools/tasks";
 import {
   type TodoItem,
   formatTodos,
@@ -150,12 +156,12 @@ function emptyUsage(): UsageStats {
 function runningTaskLabels(): string[] {
   const shells = defaultTaskManager
     .list()
-    .filter((t) => t.status === "running")
-    .map((t) => `${t.id}: ${t.description ?? t.command}`);
+    .filter((t) => t.status === "running" || t.status === "stopping")
+    .map((t) => t.id);
   const agents = defaultAgentTasks
     .list()
-    .filter((t) => t.status === "running")
-    .map((t) => `${t.id}: ${t.description ?? t.prompt}`);
+    .filter((t) => t.status === "running" || t.status === "stopping")
+    .map((t) => t.id);
   return [...shells, ...agents];
 }
 
@@ -188,6 +194,23 @@ interface PendingPermission {
   request: PermissionRequest;
   preview: DiffPreview | null;
   resolve: (approved: boolean) => void;
+}
+
+function withPermissionAbort(decision: Promise<boolean>, signal?: AbortSignal): Promise<boolean> {
+  if (!signal) return decision;
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const settle = (approved: boolean) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      resolve(approved);
+    };
+    const onAbort = () => settle(false);
+    signal.addEventListener("abort", onAbort, { once: true });
+    decision.then(settle, () => settle(false));
+  });
 }
 
 interface PendingRewind {
@@ -483,7 +506,8 @@ export function Repl({
   }, []);
 
   const recordUsage = useCallback(
-    (delta: TokenUsage, _modelName: string, costUsd: number | null) => {
+    (delta: TokenUsage, _modelName: string, costUsd: number | null, sourceSessionId?: string) => {
+      if (sourceSessionId !== undefined && sourceSessionId !== sessionStoreRef.current?.id) return;
       const usage = usageRef.current;
       usage.requests += 1;
       usage.promptTokens += delta.promptTokens;
@@ -595,13 +619,27 @@ export function Repl({
   const attachConfirmHandler = useCallback(
     (target: ChatBackend) => {
       target.confirmHandler = (req) => {
+        if (req.signal?.aborted) return Promise.resolve(false);
         if (isAllowedByRules(alwaysAllowedListRef.current, req)) {
           return Promise.resolve(true);
         }
         const ask = async (): Promise<boolean> => {
+          if (req.signal?.aborted) return false;
           const preview = await generateDiffPreview(req.toolName, req.args, cwd).catch(() => null);
+          if (req.signal?.aborted) return false;
           return new Promise<boolean>((resolve) => {
-            setPendingPermission({ request: req, preview, resolve });
+            let settled = false;
+            const finish = (approved: boolean) => {
+              if (settled) return;
+              settled = true;
+              req.signal?.removeEventListener("abort", onAbort);
+              if (pendingRef.current === entry) setPendingPermission(null);
+              resolve(approved);
+            };
+            const onAbort = () => finish(false);
+            const entry: PendingPermission = { request: req, preview, resolve: finish };
+            req.signal?.addEventListener("abort", onAbort, { once: true });
+            setPendingPermission(entry);
           });
         };
         // Queue behind the currently open prompt: a concurrent request (e.g.
@@ -612,7 +650,7 @@ export function Repl({
           () => undefined,
           () => undefined,
         );
-        return decision;
+        return withPermissionAbort(decision, req.signal);
       };
       target.onHookWarning = (message) => pushMessage("system", message);
     },
@@ -654,6 +692,7 @@ export function Repl({
   useEffect(() => {
     const onUpdate = (task: TaskSnapshot) => {
       setBgLabels(runningTaskLabels());
+      if (task.status === "stopping") return;
       pushMessage(
         "system",
         toTerminalSafe(
@@ -671,6 +710,7 @@ export function Repl({
     };
     const onAgentUpdate = (task: AgentTaskSnapshot) => {
       setBgLabels(runningTaskLabels());
+      if (task.status === "stopping") return;
       pushMessage("system", toTerminalSafe(formatAgentTaskUpdate(task)));
       if (task.status !== "running") {
         notifyBell({
@@ -682,11 +722,12 @@ export function Repl({
     };
     defaultTaskManager.on("update", onUpdate);
     defaultAgentTasks.on("update", onAgentUpdate);
+    setBgLabels(runningTaskLabels());
     return () => {
       defaultTaskManager.off("update", onUpdate);
       defaultAgentTasks.off("update", onAgentUpdate);
-      defaultTaskManager.cleanup();
-      defaultAgentTasks.cleanup();
+      void defaultTaskManager.cleanup();
+      void defaultAgentTasks.cleanup();
     };
   }, [pushMessage]);
 
@@ -729,33 +770,60 @@ export function Repl({
     pushMessage("system", "last message restored for editing");
   }, [pushMessage, redrawMessages]);
 
-  // Kills every still-running background shell task and subagent; returns the
-  // count. The agent-task drain is discarded with it: stopped agents stay
-  // un-notified otherwise, and the loop would inject their reports as user
-  // messages at the next step boundary — into whatever session is active then.
-  const stopBackgroundWork = useCallback((): number => {
-    const killed = defaultTaskManager.cleanup();
-    const killedAgents = defaultAgentTasks.cleanup();
-    defaultAgentTasks.drainNotifications();
-    return killed.length + killedAgents.length;
+  // Stop both kinds of work before changing the persistence target. A second
+  // shell sweep catches tasks a subagent started while its cancellation settled;
+  // flushing afterwards acknowledges every report into the old session store.
+  const stopBackgroundWork = useCallback(async (): Promise<number> => {
+    pendingRef.current?.resolve(false);
+    const initialShellCleanup = defaultTaskManager.cleanup();
+    const stoppedAgents = await defaultAgentTasks.cleanup();
+    const finalShellCleanup = defaultTaskManager.cleanup();
+    const [initialShells, finalShells] = await Promise.all([
+      initialShellCleanup,
+      finalShellCleanup,
+    ]);
+    const current = backendRef.current;
+    if (current instanceof AgentLoop) await current.flushBackgroundNotifications();
+    const shellResults = [...initialShells, ...finalShells];
+    const failedStops = shellResults.filter((task) => task.status === "stop_failed");
+    if (failedStops.length > 0) {
+      const details = failedStops
+        .map((task) => `${task.id}: ${task.stopError ?? "process state is unconfirmed"}`)
+        .join("; ");
+      throw new Error(`Failed to stop background task(s): ${details}`);
+    }
+    const stoppedShells = new Set(
+      shellResults.filter((task) => task.status === "stopped").map((task) => task.id),
+    );
+    return stoppedShells.size + stoppedAgents.filter((task) => task.status === "stopped").length;
   }, []);
 
   const handleExit = useCallback(() => {
-    const stopped = stopBackgroundWork();
-    if (stopped > 0) {
-      pushMessage("system", `${stopped} background task(s) still running; reports will be lost.`);
-    }
     void (async () => {
+      try {
+        const stopped = await stopBackgroundWork();
+        if (stopped > 0) {
+          pushMessage(
+            "system",
+            `Stopped ${stopped} background task(s) and flushed their reports before exit.`,
+          );
+        }
+      } catch (error) {
+        pushMessage(
+          "system",
+          `Exit cancelled because background work could not be stopped or its reports could not be saved: ${error instanceof Error ? error.message : String(error)}. Retry /exit after resolving the problem.`,
+        );
+        return;
+      }
       try {
         await sessionStoreRef.current?.close();
       } catch (error) {
         pushMessage(
           "system",
-          `Failed to flush session metadata: ${error instanceof Error ? error.message : String(error)}`,
+          `Failed to close the session cleanly; recent changes may not be saved: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
-      if (stopped > 0) setTimeout(exit, 50);
-      else exit();
+      exit();
     })();
   }, [exit, pushMessage, stopBackgroundWork]);
 
@@ -965,10 +1033,26 @@ export function Repl({
       if (!store) {
         return `Session not found: ${id}`;
       }
-      // Background work belongs to the conversation being replaced: left
-      // running, subagent reports would drain into the resumed session's
-      // history and its file changes into its checkpoints.
-      const stopped = stopBackgroundWork();
+      // Flush old background reports before loading or rebinding the target.
+      let stopped: number;
+      try {
+        stopped = await stopBackgroundWork();
+      } catch (error) {
+        let closeFailure = "";
+        if (!sameStore) {
+          try {
+            await store.close();
+          } catch (closeError) {
+            closeFailure = ` Failed to close the target session: ${closeError instanceof Error ? closeError.message : String(closeError)}.`;
+          }
+        }
+        return `Failed to stop background work; resume aborted and the current session is unchanged: ${error instanceof Error ? error.message : String(error)}.${closeFailure}`;
+      }
+      if (sameStore) {
+        const [meta, loaded] = await Promise.all([sameStore.meta(), sameStore.starMessages()]);
+        resumed.meta = meta;
+        resumed.messages = reconcileStarMessages(loaded);
+      }
       await current.loadMessages(resumed.messages);
       // Rebind persistence to the resumed session before anything else can
       // write: without this, new messages/usage/snapshots keep landing in the
@@ -1514,29 +1598,44 @@ export function Repl({
         if (messages.length === 0) {
           return "Nothing to fork — the current session has no messages yet.";
         }
+        const oldMeta = await store.meta();
+        let stopped: number;
+        try {
+          stopped = await stopBackgroundWork();
+        } catch (error) {
+          return `Failed to stop background work; fork aborted and the current session is unchanged: ${error instanceof Error ? error.message : String(error)}`;
+        }
         const fork = await SessionStore.create(cwd, modelNameRef.current);
         if (!(await fork.replaceMessages(messages))) {
           await fork.close();
           return "Failed to persist the fork; the current session is unchanged.";
         }
-        const oldMeta = await store.meta();
         const title = `Fork of ${oldMeta.title || shortSessionId(oldMeta.id)}`;
         await fork.setTitle(title);
         current.setSessionStore(fork);
         sessionStoreRef.current = fork;
+        await current.loadMessages(messages);
         await store.close();
         setTodoSession(fork.id);
-        return `Forked into new session ${fork.id} ("${title}") and switched to it. Checkpoints and rewind history do not carry over.`;
+        usageRef.current = emptyUsage();
+        budgetWarnedRef.current = false;
+        budgetExceededRef.current = false;
+        setUsageVersion((v) => v + 1);
+        const stoppedNote =
+          stopped > 0 ? ` Stopped ${stopped} background task(s) from the previous session.` : "";
+        return `Forked into new session ${fork.id} ("${title}") and switched to it.${stoppedNote} Checkpoints and rewind history do not carry over.`;
       },
       newSession: async () => {
         const current = backendRef.current;
         if (!(current instanceof AgentLoop)) {
           return "Current backend does not support starting a new session.";
         }
-        // Background work belongs to the conversation being abandoned: left
-        // running, subagent reports would drain into the new session's
-        // history and its file changes into its checkpoints.
-        const stopped = stopBackgroundWork();
+        let stopped: number;
+        try {
+          stopped = await stopBackgroundWork();
+        } catch (error) {
+          return `Failed to stop background work; new session was not created and the current session is unchanged: ${error instanceof Error ? error.message : String(error)}`;
+        }
         const store = await SessionStore.create(cwd, modelNameRef.current);
         const previousStore = sessionStoreRef.current;
         current.setSessionStore(store);
@@ -1580,7 +1679,12 @@ export function Repl({
         await store.load(cwd);
         return formatTodos(store.list());
       },
-      listTasks: () => formatTaskList(defaultTaskManager.list()),
+      listTasks: () =>
+        `${formatTaskList(defaultTaskManager.list())}\n${formatAgentTaskList(defaultAgentTasks.list())}`,
+      taskOutput: async (id) =>
+        (await taskOutputTool.execute({ id }, { cwd, agentId: "root" })).content,
+      taskKill: async (id) =>
+        (await taskKillTool.execute({ id }, { cwd, agentId: "root" })).content,
       showUsage: () => {
         const usage = usageRef.current;
         const modelConfig = config.models.find((m) => m.name === modelNameRef.current);
@@ -2283,7 +2387,8 @@ export const REPL_RENDER_OPTIONS = { exitOnCtrlC: false };
 export function renderRepl(backend: ChatBackend, opts: ReplOptions) {
   // Backstop for abnormal exits: never leave orphaned background processes.
   process.on("exit", () => {
-    defaultTaskManager.cleanup();
+    void defaultTaskManager.cleanup();
+    void defaultAgentTasks.cleanup();
   });
   return render(
     <Repl

@@ -228,7 +228,7 @@ star --clear-sessions all     delete every stored session
 | `/new` | start a new session with a clean context (the old session stays on disk) |
 | `/clear-sessions [--all]` | delete stored sessions: this directory by default, every session with `--all` (the current session is kept) |
 | `/todo` | show TODO list |
-| `/tasks` | list background tasks (id, status, runtime, exit code) |
+| `/tasks [output <id>\|kill <id>]` | list background shell tasks and subagents, read one result, or wait for one to stop |
 | `/cost` | show API token usage and estimated $ cost (needs per-model pricing in config) |
 | `/usage` | token usage dashboard across all sessions: totals, per-day bar chart, per-model breakdown with $ estimate |
 | `/config` | show resolved config |
@@ -266,7 +266,9 @@ Output renders as a tool card and is injected into the conversation so the model
 
 ## Background tasks
 
-The model can run long shell commands in the background via `bash` with `run_in_background: true` (same permission gate as foreground commands). While anything runs in the background, the status bar shows `bg: N`; when a task finishes, fails, times out, or is stopped, a system message reports the outcome. `/tasks` lists every task with status, runtime, and exit code, and the model can inspect or stop tasks with the `task_list` / `task_output` / `task_kill` tools. Remaining tasks are killed when the REPL exits.
+The model can run long shell commands and subagents in the background (same permission gate as foreground work). While anything is running or stopping, the status bar shows `bg: N` with task IDs; terminal outcomes also produce system messages. `/tasks` lists shell tasks and subagents, `/tasks output <id>` reads a result, and `/tasks kill <id>` waits for the process tree or subagent to stop. The model has the equivalent `task_list` / `task_output` / `task_kill` tools; shell `task_output` accepts an `offset` cursor for incremental reads, and running subagents report recent tool activity.
+
+Finished reports are injected into the main agent at the next step or explicit turn and are acknowledged only after session persistence succeeds. Exit and `/new`, `/resume`, `/fork` wait for background work to settle and save its reports to the old session before switching or closing. Print mode (`-p`) is one-shot, so requests to start background shell commands or subagents are rejected with instructions to run in the foreground instead.
 
 ## Terminal bell
 

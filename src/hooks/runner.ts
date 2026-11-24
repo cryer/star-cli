@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import type { HookConfig } from "../config/schema";
+import { killTree } from "../core/process";
 
 export type HookEvent = "PreToolUse" | "PostToolUse" | "Stop";
 
@@ -28,6 +29,7 @@ interface CommandOutcome {
   code: number;
   stderr: string;
   timedOut: boolean;
+  aborted?: boolean;
   spawnError?: string;
 }
 
@@ -36,38 +38,12 @@ function truncate(text: string): string {
   return trimmed.length > STDERR_LIMIT ? `${trimmed.slice(0, STDERR_LIMIT)}…` : trimmed;
 }
 
-// On timeout the whole process tree must die: killing only the shell (what
-// child_process timeout does) orphans the real command. On Windows cmd.exe
-// does not exec its child — the survivor would keep running and lock the
-// working directory. On POSIX the orphaned grandchild keeps the stdio pipes
-// open, so the "close" event never fires and the hook hangs — hence the
-// process-group kill (the child is spawned detached, making it a group
-// leader).
-function killTree(pid: number | undefined): void {
-  if (pid === undefined) return;
-  if (process.platform === "win32") {
-    spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true }).on(
-      "error",
-      () => {},
-    );
-  } else {
-    try {
-      process.kill(-pid, "SIGKILL");
-    } catch {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // Already gone.
-      }
-    }
-  }
-}
-
 function runCommand(
   hook: HookConfig,
   event: HookEvent,
   ctx: HookRunContext,
   timeoutSec: number,
+  signal?: AbortSignal,
 ): Promise<CommandOutcome> {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -82,6 +58,10 @@ function runCommand(
   if (inputJson !== undefined && !inputViaStdin) env.STAR_TOOL_INPUT = inputJson;
   if (inputViaStdin) env.STAR_TOOL_INPUT_STDIN = "1";
   return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve({ code: 1, stderr: "", timedOut: false, aborted: true });
+      return;
+    }
     let child: ChildProcess;
     try {
       child = spawn(hook.command, [], {
@@ -114,24 +94,32 @@ function runCommand(
     const stderrDecoder = new StringDecoder("utf8");
     let timedOut = false;
     let settled = false;
+    let termination: Promise<void> | undefined;
     const finish = (outcome: CommandOutcome) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      clearTimeout(fallback);
+      signal?.removeEventListener("abort", onAbort);
       resolve({ ...outcome, stderr: outcome.stderr + stderrDecoder.end() });
     };
+    const terminate = (outcome: CommandOutcome) => {
+      termination ??= (async () => {
+        await killTree(child);
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+      })();
+      void termination.then(
+        () => finish(outcome),
+        () => finish(outcome),
+      );
+    };
+    const onAbort = () => terminate({ code: 1, stderr, timedOut: false, aborted: true });
     const timer = setTimeout(() => {
       timedOut = true;
-      killTree(child.pid);
-      child.stdout?.destroy();
-      child.stderr?.destroy();
-      fallback = setTimeout(() => {
-        finish({ code: 1, stderr, timedOut: true });
-      }, 2000);
-      fallback.unref?.();
+      terminate({ code: 1, stderr, timedOut: true });
     }, timeoutSec * 1000);
-    let fallback: NodeJS.Timeout;
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
     child.stderr?.on("data", (chunk: Buffer) => {
       if (stderr.length < STDERR_CAPTURE_LIMIT) stderr += stderrDecoder.write(chunk);
     });
@@ -164,6 +152,7 @@ export interface RunHooksOptions {
   // timeoutSec — e.g. the abort path keeps Stop hooks on a short leash so a
   // hanging hook cannot hold the user's prompt hostage.
   timeoutSec?: number;
+  signal?: AbortSignal;
 }
 
 export async function runHooks(
@@ -174,17 +163,20 @@ export async function runHooks(
 ): Promise<HookRunResult> {
   const result: HookRunResult = { blocked: false, warnings: [] };
   for (const hook of hooks) {
+    if (opts?.signal?.aborted) return result;
     if (!hookMatches(hook, event, ctx.toolName)) continue;
     const timeoutSec = opts?.timeoutSec ?? hook.timeoutSec;
     let outcome: CommandOutcome;
     try {
-      outcome = await runCommand(hook, event, ctx, timeoutSec);
+      outcome = await runCommand(hook, event, ctx, timeoutSec, opts?.signal);
     } catch (error) {
+      if (opts?.signal?.aborted) return result;
       result.warnings.push(
         `Hook "${hook.command}" (${event}) failed: ${error instanceof Error ? error.message : String(error)}`,
       );
       continue;
     }
+    if (outcome.aborted || opts?.signal?.aborted) return result;
     if (outcome.code === 0) continue;
     const stderr = truncate(outcome.stderr);
     if (event === "PreToolUse" && outcome.code === 2 && !outcome.timedOut) {

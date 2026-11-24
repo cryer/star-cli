@@ -8,6 +8,8 @@ export interface PermissionRequest {
   toolName: string;
   args: unknown;
   level: PermissionLevel;
+  agentId?: string;
+  signal?: AbortSignal;
 }
 
 export interface PermissionContext {

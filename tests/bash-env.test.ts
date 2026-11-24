@@ -18,15 +18,15 @@ beforeEach(() => {
   loadEnvFile(path.join(dir, ".env"));
 });
 
-afterEach(() => {
-  defaultTaskManager.cleanup();
+afterEach(async () => {
+  await defaultTaskManager.cleanup();
   delete process.env[KEY];
   rmSync(dir, { recursive: true, force: true });
 });
 
 function waitForTerminal(id: string, timeoutMs = 10000): Promise<TaskSnapshot> {
   const existing = defaultTaskManager.get(id);
-  if (existing && existing.status !== "running") {
+  if (existing && existing.status !== "running" && existing.status !== "stopping") {
     return Promise.resolve(existing);
   }
   return new Promise((resolve, reject) => {
@@ -35,7 +35,7 @@ function waitForTerminal(id: string, timeoutMs = 10000): Promise<TaskSnapshot> {
       reject(new Error(`timed out waiting for ${id} to finish`));
     }, timeoutMs);
     const onUpdate = (task: TaskSnapshot) => {
-      if (task.id === id && task.status !== "running") {
+      if (task.id === id && task.status !== "running" && task.status !== "stopping") {
         clearTimeout(timer);
         defaultTaskManager.off("update", onUpdate);
         resolve(task);

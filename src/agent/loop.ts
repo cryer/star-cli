@@ -46,6 +46,8 @@ import type { PermissionRequest } from "../permissions/types";
 import type { SessionStore } from "../session/store";
 import { scheduleSessionTitle } from "../session/title";
 import { diffTreeNames, restoreTree, trackTree } from "../snapshot/git-tree";
+import { defaultTaskManager } from "../tasks/manager";
+import { MAX_OUTPUT, trimUtf8Start } from "../tools/bash";
 import {
   beginTurn,
   currentTurnSeq,
@@ -101,6 +103,7 @@ export interface AgentLoopOptions {
   // for run_in_background spawns) so the task_* tools can scope background
   // task ownership per agent.
   agentId?: string;
+  allowBackgroundTasks?: boolean;
   // Whether the active model accepts image input (the model's [[models]]
   // vision key), resolved by the caller; undefined = images allowed.
   // Subagents inherit it. When false, read_image/screenshot decline with a
@@ -408,7 +411,12 @@ export class AgentLoop {
   // their stderr surfaces through this callback (REPL system message / stderr
   // in print mode).
   onHookWarning?: (message: string) => void;
-  onUsage?: (usage: TokenUsage, modelName: string, costUsd: number | null) => void;
+  onUsage?: (
+    usage: TokenUsage,
+    modelName: string,
+    costUsd: number | null,
+    sourceSessionId?: string,
+  ) => void;
 
   constructor(opts: AgentLoopOptions) {
     this.opts = opts;
@@ -444,7 +452,6 @@ export class AgentLoop {
     // applies in ask mode; available at every subagent depth.
     opts.registry?.register(createRememberTool());
     if (opts.registry && depth < MAX_SUBAGENT_DEPTH) {
-      const subagentSessionStore = opts.sessionStore;
       opts.registry.register(
         createSubagentTool({
           model: opts.model,
@@ -459,9 +466,11 @@ export class AgentLoop {
           vision: opts.vision,
           depth,
           modelName: opts.modelName,
+          allowBackgroundTasks: opts.allowBackgroundTasks,
+          getSessionStore: () => this.opts.sessionStore,
           getConfirmHandler: () => this.confirmHandler,
-          onUsage: (usage, _childModel, childModelName) =>
-            this.recordUsage(usage, childModelName, subagentSessionStore),
+          onUsage: (usage, _childModel, childModelName, sourceStore) =>
+            this.recordUsage(usage, childModelName, sourceStore),
         }),
       );
     }
@@ -501,6 +510,51 @@ export class AgentLoop {
   // as ordinary prompts so user input is never dropped.
   takeUndeliveredSteers(): string[] {
     return this.pendingSteers.splice(0);
+  }
+
+  async flushBackgroundNotifications(): Promise<number> {
+    if ((this.opts.subagentDepth ?? 0) !== 0) return 0;
+    const notifications = [
+      ...defaultTaskManager.peekNotifications().map((task) => {
+        const bytes = Buffer.from(task.output);
+        const output =
+          bytes.length <= MAX_OUTPUT
+            ? task.output
+            : trimUtf8Start(bytes.subarray(bytes.length - MAX_OUTPUT)).toString("utf8");
+        return {
+          id: task.notificationId,
+          message: {
+            role: "user",
+            content: `[background shell ${task.id} ${task.status}]\ncommand: ${task.command}\nexitCode: ${task.exitCode ?? "unknown"}\noutput:\n${output || "(no output)"}`,
+          } satisfies CoreMessage,
+          ack: () => defaultTaskManager.ackNotifications([task.id]),
+        };
+      }),
+      ...defaultAgentTasks.peekNotifications().map((task) => {
+        const label = task.description ? ` "${task.description}"` : "";
+        return {
+          id: task.notificationId,
+          message: {
+            role: "user",
+            content: `[background subagent ${task.id}${label} ${task.status}]\n${task.result}`,
+          } satisfies CoreMessage,
+          ack: () => defaultAgentTasks.ackNotifications([task.id]),
+        };
+      }),
+    ];
+    let delivered = 0;
+    for (const notification of notifications) {
+      const meta: MessageMeta = { synthetic: "bg-report", notificationId: notification.id };
+      if (this.messages.some((star) => star.meta?.notificationId === notification.id)) {
+        await this.replacePersisted(this.messages);
+      } else {
+        this.messages.push({ message: notification.message, meta });
+        await this.persist(notification.message, meta);
+      }
+      notification.ack();
+      delivered++;
+    }
+    return delivered;
   }
 
   // Append queued steers to the history as synthetic user messages: they
@@ -611,7 +665,7 @@ export class AgentLoop {
     const normalized = { ...usage, totalTokens: usageTotalTokens(usage) };
     const model = this.opts.config.models.find((entry) => entry.name === modelName);
     const costUsd = computeCostUsd(normalized, model);
-    this.onUsage?.(normalized, modelName, costUsd);
+    this.onUsage?.(normalized, modelName, costUsd, store?.id);
     void store
       ?.addUsage(normalized, { modelName, costUsd })
       .catch((error: unknown) =>
@@ -1073,23 +1127,7 @@ export class AgentLoop {
           message: `maxSteps (${maxSteps}) reached and the turn is still making progress; continuing. Press Esc to interrupt.`,
         };
       }
-      // Deliver finished background subagent reports at step boundaries so
-      // the parent monitors its children without polling. Only the root
-      // loop drains — children cannot spawn subagents.
-      if ((this.opts.subagentDepth ?? 0) === 0) {
-        for (const finished of defaultAgentTasks.drainNotifications()) {
-          const label = finished.description ? ` "${finished.description}"` : "";
-          const note: CoreMessage = {
-            role: "user",
-            content: `[background subagent ${finished.id}${label} ${finished.status}]\n${finished.result}`,
-          };
-          // Synthetic: the report lands mid-turn but belongs to the turn in
-          // progress — it must not become a turn boundary for /undo.
-          const meta: MessageMeta = { synthetic: "bg-report" };
-          this.messages.push({ message: note, meta });
-          await this.persist(note, meta);
-        }
-      }
+      await this.flushBackgroundNotifications();
       // User steering prompts (the REPL's "insert now" choice) land at step
       // boundaries like background reports: the current model reply and its
       // tool calls always run to completion first.
@@ -1518,6 +1556,7 @@ export class AgentLoop {
           await this.runStopHooks("completed");
           return;
         }
+        if ((await this.flushBackgroundNotifications()) > 0) continue;
         // A turn that ends in text only is suspect: weaker models announce
         // work ("我会…") instead of calling tools. Signals decide whether to
         // nudge the model onward (bounded by maxAutoContinues, never in plan
@@ -1911,6 +1950,7 @@ export class AgentLoop {
     toolName?: string,
     toolInput?: unknown,
     timeoutSec?: number,
+    signal?: AbortSignal,
   ): Promise<HookRunResult> {
     const empty: HookRunResult = { blocked: false, warnings: [] };
     if (this.opts.config.hooks.length === 0) return empty;
@@ -1924,7 +1964,7 @@ export class AgentLoop {
           toolName,
           toolInput,
         },
-        timeoutSec !== undefined ? { timeoutSec } : undefined,
+        { timeoutSec, signal },
       );
       for (const warning of result.warnings) this.onHookWarning?.(warning);
       return result;
@@ -1952,7 +1992,29 @@ export class AgentLoop {
     return `Refused: tool "${call.name}" was called ${this.repeatedToolCalls} times in a row with identical arguments. Stop retrying it — change your approach or report that you are blocked.`;
   }
 
+  private waitForConfirmation(request: PermissionRequest, signal: AbortSignal): Promise<boolean> {
+    const handler = this.confirmHandler;
+    if (!handler || signal.aborted) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const settle = (approved: boolean) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        resolve(approved);
+      };
+      const onAbort = () => settle(false);
+      signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        Promise.resolve(handler({ ...request, signal })).then(settle, () => settle(false));
+      } catch {
+        settle(false);
+      }
+    });
+  }
+
   private async executeTool(call: PendingToolCall, signal: AbortSignal): Promise<ToolResult> {
+    if (signal.aborted) return { content: "Tool execution aborted.", isError: true };
     const { registry, config, cwd } = this.opts;
     const tool = registry.get(call.name);
     if (!tool) {
@@ -1972,18 +2034,16 @@ export class AgentLoop {
       return { content: `Permission denied for tool "${call.name}".`, isError: true };
     }
     if (decision === "ask") {
-      let approved = false;
-      try {
-        approved = this.confirmHandler
-          ? await this.confirmHandler({
-              toolName: call.name,
-              args: call.args,
-              level: tool.permission,
-            })
-          : false;
-      } catch {
-        approved = false;
-      }
+      const approved = await this.waitForConfirmation(
+        {
+          toolName: call.name,
+          args: call.args,
+          level: tool.permission,
+          agentId: this.opts.agentId ?? "root",
+        },
+        signal,
+      );
+      if (signal.aborted) return { content: "Tool execution aborted.", isError: true };
       if (!approved) {
         return { content: `User rejected tool "${call.name}".`, isError: true };
       }
@@ -1994,7 +2054,8 @@ export class AgentLoop {
       return { content: `Invalid arguments: ${parsed.error.message}`, isError: true };
     }
 
-    const pre = await this.runEventHooks("PreToolUse", call.name, call.args);
+    const pre = await this.runEventHooks("PreToolUse", call.name, call.args, undefined, signal);
+    if (signal.aborted) return { content: "Tool execution aborted.", isError: true };
     if (pre.blocked) {
       return {
         content: `Tool "${call.name}" blocked by a PreToolUse hook: ${pre.reason}`,
@@ -2008,6 +2069,7 @@ export class AgentLoop {
         cwd,
         abortSignal: signal,
         agentId: this.opts.agentId ?? "root",
+        backgroundTasksEnabled: this.opts.allowBackgroundTasks !== false,
         visionEnabled: this.opts.vision !== false,
         snapshotContext: {
           owner: (this.opts.subagentDepth ?? 0) > 0 ? "subagent" : "root",

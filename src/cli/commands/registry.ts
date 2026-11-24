@@ -11,6 +11,8 @@ export interface CommandContext {
   resumeSession(id: string): Promise<string>;
   showTodos(): Promise<string>;
   listTasks(): string;
+  taskOutput?(id: string): Promise<string>;
+  taskKill?(id: string): Promise<string>;
   showUsage(): string;
   showGlobalUsage(): Promise<string>;
   describeConfig(): string;

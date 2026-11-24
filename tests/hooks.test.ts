@@ -8,6 +8,7 @@ import { loadConfig } from "../src/config/loader";
 import { globalConfigPath } from "../src/config/paths";
 import { type HookConfig, HookConfigSchema, type StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
+import { runHooks } from "../src/hooks/runner";
 import { SessionStore } from "../src/session/store";
 import { createDefaultRegistry } from "../src/tools";
 import { clearSnapshots, setSnapshotHooks } from "../src/tools/fs/snapshots";
@@ -213,6 +214,81 @@ command = "echo hi"
 `,
     );
     await expect(loadConfig(cwd)).rejects.toThrow(/Invalid config/);
+  });
+});
+
+describe("hook cancellation", () => {
+  it("kills the process tree, settles without warnings, and skips later hooks", async () => {
+    fs.writeFileSync(
+      path.join(cwd, "hook-parent.cjs"),
+      `const { spawn } = require("node:child_process");
+const orphan = spawn(process.execPath, ["-e", "setTimeout(() => require('node:fs').writeFileSync('orphan.txt', 'ran'), 30000)"], { stdio: "ignore" });
+require("node:fs").writeFileSync("orphan.pid", String(orphan.pid));
+require("node:fs").writeFileSync("first-started.txt", "started");
+setTimeout(() => {}, 30000);
+`,
+    );
+    const controller = new AbortController();
+    const pending = runHooks(
+      "PreToolUse",
+      [
+        makeHook({ command: "node hook-parent.cjs" }),
+        makeHook({
+          command: "node -e \"require('fs').writeFileSync('second-ran.txt', 'ran')\"",
+        }),
+      ],
+      { cwd, toolName: "write_file" },
+      { signal: controller.signal },
+    );
+    await vi.waitFor(() => {
+      expect(fs.existsSync(path.join(cwd, "first-started.txt"))).toBe(true);
+    });
+
+    const abortedAt = Date.now();
+    controller.abort();
+    const result = await pending;
+
+    expect(Date.now() - abortedAt).toBeLessThan(5000);
+    expect(result).toEqual({ blocked: false, warnings: [] });
+    expect(fs.existsSync(path.join(cwd, "second-ran.txt"))).toBe(false);
+    const orphanPid = Number(fs.readFileSync(path.join(cwd, "orphan.pid"), "utf8"));
+    const isAlive = () => {
+      try {
+        process.kill(orphanPid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      await vi.waitFor(() => expect(isAlive()).toBe(false), { timeout: 2000 });
+    } finally {
+      if (isAlive()) {
+        try {
+          process.kill(orphanPid, "SIGKILL");
+        } catch {}
+      }
+    }
+    expect(fs.existsSync(path.join(cwd, "orphan.txt"))).toBe(false);
+  }, 10_000);
+
+  it("does not start any hook when the signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await runHooks(
+      "PreToolUse",
+      [
+        makeHook({
+          command: "node -e \"require('fs').writeFileSync('should-not-run.txt', 'ran')\"",
+        }),
+      ],
+      { cwd, toolName: "write_file" },
+      { signal: controller.signal },
+    );
+
+    expect(result).toEqual({ blocked: false, warnings: [] });
+    expect(fs.existsSync(path.join(cwd, "should-not-run.txt"))).toBe(false);
   });
 });
 

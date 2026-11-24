@@ -15,9 +15,9 @@ import type { ToolContext, ToolResult } from "../src/tools/types";
 const cwd = tmpdir();
 const registry = createDefaultRegistry();
 
-afterEach(() => {
-  defaultTaskManager.cleanup();
-  defaultAgentTasks.cleanup();
+afterEach(async () => {
+  await defaultTaskManager.cleanup();
+  await defaultAgentTasks.cleanup();
 });
 
 const SLEEPER = 'node -e "setTimeout(() => {}, 30000)"';
@@ -33,14 +33,14 @@ function run(
 }
 
 describe("TaskManager ownership", () => {
-  it("records the owner id, defaulting to root", () => {
+  it("records the owner id, defaulting to root", async () => {
     const manager = new TaskManager();
     const rootTask = manager.start({ command: SLEEPER, cwd });
     expect(rootTask.ownerId).toBe("root");
     const subTask = manager.start({ command: SLEEPER, cwd, ownerId: "agent-3" });
     expect(subTask.ownerId).toBe("agent-3");
     expect(manager.get(subTask.id)?.ownerId).toBe("agent-3");
-    manager.cleanup();
+    await manager.cleanup();
   });
 });
 
@@ -115,9 +115,13 @@ describe("task_* ownership scoping", () => {
   });
 
   it("background subagent tasks belong to root only", async () => {
-    const agent = defaultAgentTasks.start(() => new Promise<string>(() => {}), {
-      prompt: "never resolves",
-    });
+    const agent = defaultAgentTasks.start(
+      (signal) =>
+        new Promise<string>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        }),
+      { prompt: "runs until stopped" },
+    );
     const denied = await run("task_kill", { id: agent.id }, { agentId: agent.id });
     expect(denied.isError).toBe(true);
     expect(denied.content).toContain("Unknown task");

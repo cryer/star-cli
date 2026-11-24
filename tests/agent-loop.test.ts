@@ -5,11 +5,13 @@ import path from "node:path";
 import { MockLanguageModelV1, convertArrayToReadableStream } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { defaultAgentTasks } from "../src/agent/agent-tasks";
 import { AgentLoop } from "../src/agent/loop";
 import { PROJECT_MEMORY_MAX_CHARS, readProjectMemory } from "../src/agent/project-memory";
 import type { StarConfig } from "../src/config/schema";
 import type { StreamEvent } from "../src/core/events";
 import { SessionStore } from "../src/session/store";
+import { TaskManager, defaultTaskManager } from "../src/tasks/manager";
 import { ToolRegistry, createDefaultRegistry } from "../src/tools";
 import { resetTodos } from "../src/tools/todo";
 import type { Tool, ToolContext } from "../src/tools/types";
@@ -143,6 +145,13 @@ describe("AgentLoop", () => {
   });
 
   afterEach(async () => {
+    await Promise.all([defaultTaskManager.cleanup(), defaultAgentTasks.cleanup()]);
+    defaultTaskManager.ackNotifications(
+      defaultTaskManager.peekNotifications().map((task) => task.id),
+    );
+    defaultAgentTasks.ackNotifications(
+      defaultAgentTasks.peekNotifications().map((task) => task.id),
+    );
     vi.unstubAllEnvs();
     await rmWithRetry(cwd);
     await rmWithRetry(home);
@@ -291,6 +300,172 @@ describe("AgentLoop", () => {
     // the persisted history (user "hi" + assistant "answer") grew it.
     const after = loop.estimateContextTokens();
     expect(after - before).toBeLessThan(100);
+  });
+
+  it("flushes shell and subagent notifications once without starting a stream", async () => {
+    const shell = defaultTaskManager.start({
+      command: `node -e "console.log('shell report')"`,
+      cwd,
+    });
+    const agent = defaultAgentTasks.start(() => Promise.resolve("agent report"), {
+      prompt: "report",
+    });
+    await vi.waitFor(() => {
+      expect(defaultTaskManager.peekNotifications().map((task) => task.id)).toContain(shell.id);
+      expect(defaultAgentTasks.peekNotifications()).toHaveLength(1);
+    });
+    const loop = makeLoop(mockModel([textRound("unused")]));
+
+    expect(await loop.flushBackgroundNotifications()).toBe(2);
+    expect(await loop.flushBackgroundNotifications()).toBe(0);
+
+    const reports = loop.getStarMessages().filter((star) => star.meta?.synthetic === "bg-report");
+    expect(reports).toHaveLength(2);
+    const shellReport = reports.find((star) => star.meta?.notificationId === shell.notificationId);
+    expect(shellReport?.message.content).toContain(shell.command);
+    expect(shellReport?.message.content).toContain("completed");
+    expect(shellReport?.message.content).toContain("exitCode: 0");
+    expect(shellReport?.message.content).toContain("shell report");
+    expect(
+      reports.some(
+        (star) =>
+          star.message.content === `[background subagent ${agent.id} completed]\nagent report`,
+      ),
+    ).toBe(true);
+  });
+
+  it("does not suppress a same-named task report from another manager namespace", async () => {
+    const manager = new TaskManager();
+    const started = manager.start({ command: "node -e \"console.log('new report')\"", cwd });
+    expect(started.id).toBe("task-1");
+    await vi.waitFor(() => expect(manager.get(started.id)?.status).toBe("completed"));
+    const task = manager.get(started.id);
+    if (!task) throw new Error("task disappeared");
+    const loop = makeLoop(mockModel([textRound("unused")]));
+    await loop.loadMessages([
+      {
+        message: { role: "user", content: "[background shell task-1 completed]\nold report" },
+        meta: { synthetic: "bg-report", notificationId: "old-process:task-1" },
+      },
+    ]);
+    const peek = vi.spyOn(defaultTaskManager, "peekNotifications").mockReturnValue([task]);
+    const ack = vi.spyOn(defaultTaskManager, "ackNotifications").mockImplementation(() => {});
+    try {
+      expect(await loop.flushBackgroundNotifications()).toBe(1);
+      const reports = loop.getStarMessages().filter((star) => star.meta?.synthetic === "bg-report");
+      expect(reports).toHaveLength(2);
+      expect(reports[1]?.meta?.notificationId).toBe(task.notificationId);
+      expect(reports[1]?.message.content).toContain("new report");
+      expect(ack).toHaveBeenCalledWith(["task-1"]);
+    } finally {
+      peek.mockRestore();
+      ack.mockRestore();
+    }
+  });
+
+  it("keeps notifications unacknowledged after a persistence failure and retries without duplicates", async () => {
+    const store = await SessionStore.create(cwd, "test");
+    try {
+      const agent = defaultAgentTasks.start(() => Promise.resolve("persist this report"), {
+        prompt: "report",
+      });
+      await vi.waitFor(() => expect(defaultAgentTasks.peekNotifications()).toHaveLength(1));
+      const loop = new AgentLoop({
+        model: mockModel([textRound("unused")]),
+        registry: createDefaultRegistry(),
+        config: makeConfig(),
+        cwd,
+        sessionStore: store,
+      });
+      vi.spyOn(store, "append").mockRejectedValueOnce(new Error("disk full"));
+      const replace = vi.spyOn(store, "replaceMessages");
+
+      await expect(loop.flushBackgroundNotifications()).rejects.toThrow("disk full");
+      expect(defaultAgentTasks.peekNotifications()).toHaveLength(1);
+
+      expect(await loop.flushBackgroundNotifications()).toBe(1);
+      expect(replace).toHaveBeenCalledTimes(1);
+      expect(defaultAgentTasks.peekNotifications()).toHaveLength(0);
+      const inMemory = loop
+        .getStarMessages()
+        .filter((star) => star.meta?.notificationId === agent.notificationId);
+      const onDisk = (await store.starMessages()).filter(
+        (star) => star.meta?.notificationId === agent.notificationId,
+      );
+      expect(inMemory).toHaveLength(1);
+      expect(onDisk).toHaveLength(1);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("delivers a report that finishes after a text-only reply and continues the current turn", async () => {
+    let finishTask: (report: string) => void = () => {};
+    defaultAgentTasks.start(
+      () =>
+        new Promise<string>((resolve) => {
+          finishTask = resolve;
+        }),
+      { prompt: "late report" },
+    );
+    const prompts: unknown[] = [];
+    let call = 0;
+    const model = new MockLanguageModelV1({
+      doStream: async (options) => {
+        prompts.push(options.prompt);
+        const chunks = call++ === 0 ? textRound("first reply") : textRound("final reply");
+        return {
+          stream: convertArrayToReadableStream(chunks),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const loop = makeLoop(model);
+    let finished = false;
+
+    for await (const event of loop.stream("work", new AbortController().signal)) {
+      if (event.type === "finish" && !finished) {
+        finished = true;
+        finishTask("late child report");
+        await vi.waitFor(() => expect(defaultAgentTasks.peekNotifications()).toHaveLength(1));
+      }
+    }
+
+    expect(call).toBe(2);
+    expect(JSON.stringify(prompts[1])).toContain("late child report");
+    expect(loop.getMessages().at(-1)?.content).toEqual([{ type: "text", text: "final reply" }]);
+    expect(defaultAgentTasks.peekNotifications()).toHaveLength(0);
+  });
+
+  it("aborts a pending permission without waiting for the handler and includes the agent id", async () => {
+    const loop = new AgentLoop({
+      model: mockModel([
+        toolCallRound("call-1", "write_file", { path: "late.txt", content: "no" }),
+      ]),
+      registry: createDefaultRegistry(),
+      config: makeConfig({ permissionMode: "ask", gitSnapshots: false }),
+      cwd,
+      agentId: "agent-7",
+    });
+    const controller = new AbortController();
+    let requestedAgentId: string | undefined;
+    let requestSignal: AbortSignal | undefined;
+    loop.confirmHandler = (request) => {
+      requestedAgentId = request.agentId;
+      requestSignal = request.signal;
+      return new Promise<boolean>(() => {});
+    };
+    const running = collect(loop.stream("write", controller.signal));
+    await vi.waitFor(() => expect(requestedAgentId).toBe("agent-7"));
+    expect(requestSignal).toBe(controller.signal);
+
+    controller.abort();
+    const events = await running;
+
+    const results = events.filter((event) => event.type === "tool-result");
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ content: "Tool execution aborted.", isError: true });
+    expect(existsSync(path.join(cwd, "late.txt"))).toBe(false);
   });
 
   it("executes a tool call and continues with the result", async () => {

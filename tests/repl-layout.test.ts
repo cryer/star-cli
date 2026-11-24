@@ -69,8 +69,14 @@ describe("production REPL layout", () => {
 
   afterEach(async () => {
     vi.unstubAllEnvs();
-    defaultTaskManager.cleanup();
-    defaultAgentTasks.cleanup();
+    await defaultAgentTasks.cleanup();
+    await defaultTaskManager.cleanup();
+    defaultAgentTasks.ackNotifications(
+      defaultAgentTasks.peekNotifications().map((task) => task.id),
+    );
+    defaultTaskManager.ackNotifications(
+      defaultTaskManager.peekNotifications().map((task) => task.id),
+    );
     for (const dir of [cwd, home]) await rmWithRetry(dir);
   });
 
@@ -108,7 +114,8 @@ describe("production REPL layout", () => {
       const status = frame.split("\n").find((line) => line.includes("mode: auto")) ?? "";
       expect(frame).toContain(`Background task ${shell.id} failed`);
       expect(frame).toContain("star is thinking");
-      expect(status).toContain(`bg: 1 (${agent.id}: other agent)`);
+      expect(status).toContain(`bg: 1 (${agent.id})`);
+      expect(status).not.toContain("other agent");
       expect(status).not.toContain("expected failure");
     });
 
@@ -116,6 +123,44 @@ describe("production REPL layout", () => {
     await vi.waitFor(() => expect(app.lastFrame() ?? "").not.toContain("bg:"));
     release();
     await vi.waitFor(() => expect(app.lastFrame() ?? "").not.toContain("star is thinking"));
+    app.unmount();
+  });
+
+  it("keeps stopping agents active without announcing a terminal state", async () => {
+    let settle = (_result: string) => {};
+    const agentResult = new Promise<string>((resolve) => {
+      settle = resolve;
+    });
+    const backend: ChatBackend = {
+      async *stream(): AsyncGenerator<StreamEvent> {},
+    };
+    const app = renderRepl(backend, cwd, 120, 24);
+    const agent = defaultAgentTasks.start(() => agentResult, {
+      prompt: "private prompt",
+      description: "private description",
+    });
+    await vi.waitFor(() => {
+      const status =
+        stripAnsi(app.lastFrame() ?? "")
+          .split("\n")
+          .find((line) => line.includes("mode: auto")) ?? "";
+      expect(status).toContain(`bg: 1 (${agent.id})`);
+      expect(status).not.toContain("private prompt");
+      expect(status).not.toContain("private description");
+    });
+
+    const killed = defaultAgentTasks.kill(agent.id);
+    await vi.waitFor(() => expect(defaultAgentTasks.get(agent.id)?.status).toBe("stopping"));
+    expect(stripAnsi(app.allOutput())).not.toContain(`Background subagent ${agent.id} stopping`);
+    expect(stripAnsi(app.allOutput())).not.toContain(`Background subagent ${agent.id} stopped`);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain(`bg: 1 (${agent.id})`);
+
+    settle("done");
+    await expect(killed).resolves.toMatchObject({ id: agent.id, status: "stopped" });
+    await vi.waitFor(() => {
+      expect(stripAnsi(app.allOutput())).toContain(`Background subagent ${agent.id} stopped`);
+      expect(stripAnsi(app.lastFrame() ?? "")).not.toContain("bg:");
+    });
     app.unmount();
   });
 

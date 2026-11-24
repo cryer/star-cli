@@ -15,8 +15,10 @@ import { convertUsagePricing } from "../src/agent/subagent";
 import type { ModelConfig, StarConfig } from "../src/config/schema";
 import type { StreamEvent, TokenUsage } from "../src/core/events";
 import { usageTotalTokens } from "../src/core/events";
+import type { SessionStore } from "../src/session/store";
 import { createDefaultRegistry } from "../src/tools";
 import type { ToolRegistry } from "../src/tools";
+import { taskOutputTool } from "../src/tools/tasks";
 import { createTodoTools, resetTodos } from "../src/tools/todo";
 
 type Chunk =
@@ -118,8 +120,8 @@ describe("subagent tool", () => {
     cwd = mkdtempSync(path.join(tmpdir(), "star-subagent-test-"));
   });
 
-  afterEach(() => {
-    defaultAgentTasks.cleanup();
+  afterEach(async () => {
+    await defaultAgentTasks.cleanup();
     rmSync(cwd, { recursive: true, force: true });
   });
 
@@ -430,6 +432,110 @@ describe("subagent tool", () => {
     expect(recorded.reduce((sum, usage) => sum + usage.promptTokens, 0)).toBe(20);
   });
 
+  it("records late background usage to the session that started the subagent", async () => {
+    let releaseChild: () => void = () => {};
+    let markChildStarted: () => void = () => {};
+    const childStarted = new Promise<void>((resolve) => {
+      markChildStarted = resolve;
+    });
+    const childGate = new Promise<void>((resolve) => {
+      releaseChild = resolve;
+    });
+    const model = new MockLanguageModelV1({
+      doStream: async () => {
+        markChildStarted();
+        await childGate;
+        return {
+          stream: convertArrayToReadableStream(textRound("child done")),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const addUsageA = vi.fn(async () => {});
+    const addUsageB = vi.fn(async () => {});
+    const store = (id: string, addUsage: typeof addUsageA) =>
+      ({
+        id,
+        addUsage,
+        appendCheckpoint: vi.fn(),
+        removeCheckpoints: vi.fn(),
+      }) as unknown as SessionStore;
+    const sourceA = store("session-a", addUsageA);
+    const sourceB = store("session-b", addUsageB);
+    const { loop, registry } = makeLoop(model, {}, { sessionStore: sourceA });
+    const sourceIds: (string | undefined)[] = [];
+    loop.onUsage = (_usage, _model, _cost, sourceId) => sourceIds.push(sourceId);
+
+    try {
+      const result = await registry
+        .get("subagent")
+        ?.execute(
+          { prompt: "background work", run_in_background: true },
+          { cwd, backgroundTasksEnabled: true },
+        );
+      expect(result?.isError).toBeFalsy();
+      await childStarted;
+      loop.setSessionStore(sourceB);
+      releaseChild();
+      await vi.waitFor(() => expect(defaultAgentTasks.runningCount()).toBe(0));
+
+      expect(addUsageA).toHaveBeenCalledTimes(1);
+      expect(addUsageB).not.toHaveBeenCalled();
+      expect(sourceIds).toEqual(["session-a"]);
+    } finally {
+      releaseChild();
+    }
+  });
+
+  it("reports recent tool activity without emitting progress updates", async () => {
+    writeFileSync(path.join(cwd, "progress.txt"), "progress output", "utf8");
+    let call = 0;
+    let releaseChild: () => void = () => {};
+    const childGate = new Promise<void>((resolve) => {
+      releaseChild = resolve;
+    });
+    const model = new MockLanguageModelV1({
+      doStream: async () => {
+        call++;
+        if (call > 1) await childGate;
+        return {
+          stream: convertArrayToReadableStream(
+            call === 1
+              ? toolCallRound("child-read", "read_file", { path: "progress.txt" })
+              : textRound("child done"),
+          ),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const { registry } = makeLoop(model);
+    const result = await registry
+      .get("subagent")
+      ?.execute(
+        { prompt: "background progress", run_in_background: true },
+        { cwd, backgroundTasksEnabled: true },
+      );
+    const id = result?.content.match(/Background subagent (agent-\d+)/)?.[1];
+    expect(id).toBeDefined();
+    const updates: AgentTaskSnapshot[] = [];
+    const onUpdate = (task: AgentTaskSnapshot) => {
+      if (task.id === id) updates.push(task);
+    };
+    defaultAgentTasks.on("update", onUpdate);
+    try {
+      await vi.waitFor(() => {
+        expect(defaultAgentTasks.get(id ?? "")?.progress).toContain("progress output");
+      });
+      expect(updates).toEqual([]);
+      expect(defaultAgentTasks.get(id ?? "")?.progress).toContain("read_file");
+      releaseChild();
+      await vi.waitFor(() => expect(defaultAgentTasks.get(id ?? "")?.status).toBe("completed"));
+    } finally {
+      releaseChild();
+      defaultAgentTasks.off("update", onUpdate);
+    }
+  });
+
   it("reports an aborted synchronous subagent as an interrupted tool result", async () => {
     let call = 0;
     const model = new MockLanguageModelV1({
@@ -615,8 +721,8 @@ describe("subagent usage folding normalization", () => {
     cwd = mkdtempSync(path.join(tmpdir(), "star-subagent-fold-"));
   });
 
-  afterEach(() => {
-    defaultAgentTasks.cleanup();
+  afterEach(async () => {
+    await defaultAgentTasks.cleanup();
     rmSync(cwd, { recursive: true, force: true });
   });
 
@@ -649,8 +755,93 @@ describe("subagent usage folding normalization", () => {
   });
 });
 
+describe("AgentTaskManager lifecycle", () => {
+  it("waits for the run to settle before stopped and makes repeated kills safe", async () => {
+    const manager = new AgentTaskManager();
+    let rejectRun: (error: Error) => void = () => {};
+    const started = manager.start(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectRun = reject;
+        }),
+      { prompt: "controlled run" },
+    );
+    const first = manager.kill(started.id);
+    const second = manager.kill(started.id);
+    expect(manager.get(started.id)?.status).toBe("stopping");
+    expect(manager.get(started.id)?.endedAt).toBeUndefined();
+    expect(manager.runningCount()).toBe(1);
+    let settled = false;
+    void first.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    rejectRun(new Error("cancelled"));
+    const [stopped, alsoStopped] = await Promise.all([first, second]);
+    expect(stopped?.status).toBe("stopped");
+    expect(alsoStopped?.status).toBe("stopped");
+    expect(stopped?.result).toBe("Stopped by user.");
+    expect(manager.runningCount()).toBe(0);
+    expect((await manager.kill(started.id))?.status).toBe("stopped");
+  });
+
+  it("distinguishes natural completion from non-cancellation failure", async () => {
+    const manager = new AgentTaskManager();
+    const completed = manager.start(() => Promise.resolve("all done"), { prompt: "complete" });
+    const failed = manager.start(() => Promise.reject(new Error("real failure")), {
+      prompt: "fail",
+    });
+    await vi.waitFor(() => {
+      expect(manager.runningCount()).toBe(0);
+    });
+    expect(manager.get(completed.id)).toMatchObject({ status: "completed", result: "all done" });
+    expect(manager.get(failed.id)).toMatchObject({ status: "failed", result: "real failure" });
+  });
+
+  it("stores bounded progress", async () => {
+    const manager = new AgentTaskManager();
+    const started = manager.start(
+      (_signal, reportProgress) => {
+        reportProgress("x".repeat(20_100));
+        return Promise.resolve("done");
+      },
+      { prompt: "progress" },
+    );
+    await vi.waitFor(() => {
+      expect(manager.get(started.id)?.status).toBe("completed");
+    });
+    expect(manager.get(started.id)?.progress).toHaveLength(20_000);
+  });
+
+  it("shows progress while task_output is running", async () => {
+    let resolveRun: (result: string) => void = () => {};
+    const started = defaultAgentTasks.start(
+      (_signal, reportProgress) => {
+        reportProgress("phase 1: inspecting files");
+        return new Promise<string>((resolve) => {
+          resolveRun = resolve;
+        });
+      },
+      { prompt: "report progress" },
+    );
+    try {
+      const output = await taskOutputTool.execute({ id: started.id }, { cwd: tmpdir() });
+      expect(output.content).toContain("running");
+      expect(output.content).toContain("phase 1: inspecting files");
+      expect(output.content).not.toContain("(running)");
+    } finally {
+      resolveRun("done");
+      await vi.waitFor(() => {
+        expect(defaultAgentTasks.get(started.id)?.status).toBe("completed");
+      });
+      await defaultAgentTasks.cleanup();
+    }
+  });
+});
+
 describe("AgentTaskManager record pruning", () => {
-  it("keeps only the 50 most recent notified finished records", async () => {
+  it("keeps unacknowledged records and prunes only after acknowledgement", async () => {
     const manager = new AgentTaskManager();
     for (let i = 0; i < 60; i++) {
       manager.start(() => Promise.resolve(`result ${i}`), { prompt: `task ${i}` });
@@ -660,16 +851,20 @@ describe("AgentTaskManager record pruning", () => {
     });
     expect(manager.list()).toHaveLength(60);
 
-    const drained = manager.drainNotifications();
-    expect(drained).toHaveLength(60);
+    const peeked = manager.peekNotifications();
+    expect(peeked).toHaveLength(60);
+    expect(manager.peekNotifications()).toEqual(peeked);
+    expect(manager.list()).toHaveLength(60);
+    manager.ackNotifications(peeked.map((task) => task.id));
 
+    expect(manager.peekNotifications()).toEqual([]);
     expect(manager.list()).toHaveLength(50);
     expect(manager.get("agent-1")).toBeUndefined();
     expect(manager.get("agent-11")).toBeDefined();
     expect(manager.get("agent-60")?.result).toBe("result 59");
   });
 
-  it("prefers dropping notified records when pruning", async () => {
+  it("prefers dropping acknowledged records when pruning", async () => {
     const manager = new AgentTaskManager();
     for (let i = 0; i < 60; i++) {
       manager.start(() => Promise.resolve(`result ${i}`), { prompt: `task ${i}` });
@@ -677,7 +872,7 @@ describe("AgentTaskManager record pruning", () => {
     await vi.waitFor(() => {
       expect(manager.runningCount()).toBe(0);
     });
-    manager.drainNotifications();
+    manager.ackNotifications(manager.peekNotifications().map((task) => task.id));
 
     for (let i = 60; i < 70; i++) {
       manager.start(() => Promise.resolve(`result ${i}`), { prompt: `task ${i}` });
@@ -685,7 +880,7 @@ describe("AgentTaskManager record pruning", () => {
     await vi.waitFor(() => {
       expect(manager.runningCount()).toBe(0);
     });
-    manager.drainNotifications();
+    manager.ackNotifications(manager.peekNotifications().map((task) => task.id));
 
     expect(manager.list()).toHaveLength(50);
     expect(manager.get("agent-11")).toBeUndefined();
@@ -696,10 +891,12 @@ describe("AgentTaskManager record pruning", () => {
 describe("formatAgentTaskUpdate", () => {
   const task = (overrides: Partial<AgentTaskSnapshot>): AgentTaskSnapshot => ({
     id: "agent-1",
+    notificationId: "test:agent-1",
     prompt: "do the thing",
     status: "running",
     startedAt: 0,
     result: "",
+    progress: "",
     ...overrides,
   });
 

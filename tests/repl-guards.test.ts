@@ -13,6 +13,7 @@ import type { StreamEvent } from "../src/core/events";
 import type { ChatInput, CoreMessage } from "../src/core/messages";
 import type { PermissionRequest } from "../src/permissions/types";
 import { SessionStore } from "../src/session/store";
+import { type TaskSnapshot, defaultTaskManager } from "../src/tasks/manager";
 import { createDefaultRegistry } from "../src/tools";
 import { renderApp, stripAnsi, tick, typeText } from "./ink-harness";
 import { rmWithRetry } from "./test-fs";
@@ -88,7 +89,15 @@ describe("REPL turn guards", () => {
 
   afterEach(async () => {
     vi.unstubAllEnvs();
-    defaultAgentTasks.cleanup();
+    vi.restoreAllMocks();
+    await defaultAgentTasks.cleanup();
+    await defaultTaskManager.cleanup();
+    defaultAgentTasks.ackNotifications(
+      defaultAgentTasks.peekNotifications().map((task) => task.id),
+    );
+    defaultTaskManager.ackNotifications(
+      defaultTaskManager.peekNotifications().map((task) => task.id),
+    );
     for (const dir of [cwd, home]) await rmWithRetry(dir);
   });
 
@@ -224,30 +233,260 @@ describe("REPL turn guards", () => {
     },
   );
 
-  it("warns about still-running background tasks on exit", { timeout: 30_000 }, async () => {
+  it("aborts a queued permission without clearing another request's prompt", async () => {
     const backend: ChatBackend = {
       async *stream(): AsyncGenerator<StreamEvent> {},
     };
     const app = renderRepl(backend, cwd);
     await tick();
-    defaultAgentTasks.start(() => new Promise<string>(() => {}), { prompt: "never ends" });
+    const handler = backend.confirmHandler;
+    if (!handler) throw new Error("confirmHandler was not attached");
+    const reqA: PermissionRequest = {
+      toolName: "bash",
+      args: { command: "echo active-command" },
+      level: "exec",
+    };
+    const controller = new AbortController();
+    const reqB: PermissionRequest = {
+      toolName: "bash",
+      args: { command: "echo queued-command" },
+      level: "exec",
+      signal: controller.signal,
+    };
+    const pA = handler(reqA);
+    const pB = handler(reqB);
+    await vi.waitFor(() => expect(stripAnsi(app.lastFrame() ?? "")).toContain("active-command"));
+
+    controller.abort();
+    await expect(pB).resolves.toBe(false);
+    expect(stripAnsi(app.lastFrame() ?? "")).toContain("active-command");
+    expect(stripAnsi(app.lastFrame() ?? "")).not.toContain("queued-command");
+    app.stdin.write("y");
+    await expect(pA).resolves.toBe(true);
+    app.unmount();
+  });
+
+  it("stops background tasks and flushes before exit", { timeout: 30_000 }, async () => {
+    const backend: ChatBackend = {
+      async *stream(): AsyncGenerator<StreamEvent> {},
+    };
+    const app = renderRepl(backend, cwd);
     await tick();
+    const handler = backend.confirmHandler;
+    if (!handler) throw new Error("confirmHandler was not attached");
+    const agent = defaultAgentTasks.start(
+      async (signal) => {
+        await handler({
+          toolName: "bash",
+          args: { command: "echo background-permission" },
+          level: "exec",
+          agentId: "agent-background",
+          signal,
+        });
+        return "permission settled";
+      },
+      { prompt: "waits for permission" },
+    );
+    await vi.waitFor(() =>
+      expect(stripAnsi(app.lastFrame() ?? "")).toContain("background-permission"),
+    );
     app.stdin.write("\x04"); // Ctrl+D
     await vi.waitFor(
       () => {
         expect(stripAnsi(app.allOutput())).toContain(
-          "1 background task(s) still running; reports will be lost.",
+          "Stopped 1 background task(s) and flushed their reports before exit.",
         );
       },
       { timeout: 15_000 },
     );
+    expect(defaultAgentTasks.get(agent.id)?.status).toBe("stopped");
+    expect(stripAnsi(app.allOutput())).not.toContain("reports will be lost");
     app.unmount();
+  });
+
+  it("cancels exit when background reports cannot be flushed and allows a retry", async () => {
+    const store = await SessionStore.create(cwd, "test");
+    const loop = new AgentLoop({
+      model: new MockLanguageModelV1(),
+      registry: createDefaultRegistry(),
+      config: makeConfig({ gitSnapshots: false }),
+      cwd,
+      sessionStore: store,
+    });
+    const flush = vi
+      .spyOn(loop, "flushBackgroundNotifications")
+      .mockRejectedValueOnce(new Error("store is full"));
+    const close = vi.spyOn(store, "close");
+    const app = renderRepl(loop, cwd, store);
+    await tick();
+
+    app.stdin.write("\x04");
+    await vi.waitFor(() => {
+      expect(stripAnsi(app.allOutput())).toContain(
+        "Exit cancelled because background work could not be stopped or its reports could not be saved",
+      );
+    });
+    expect(close).not.toHaveBeenCalled();
+
+    await typeText(app.stdin, "/cost", "\r");
+    await vi.waitFor(() =>
+      expect(stripAnsi(app.lastFrame() ?? "")).toContain("API usage this session: 0 requests"),
+    );
+    await typeText(app.stdin, "/exit", "\r");
+    await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+    expect(flush).toHaveBeenCalledTimes(2);
+    app.unmount();
+  });
+
+  it("flushes reports and cancels exit when cleanup returns stop_failed", async () => {
+    const store = await SessionStore.create(cwd, "test");
+    const loop = new AgentLoop({
+      model: new MockLanguageModelV1(),
+      registry: createDefaultRegistry(),
+      config: makeConfig({ gitSnapshots: false }),
+      cwd,
+      sessionStore: store,
+    });
+    const stopFailed: TaskSnapshot = {
+      id: "task-unconfirmed",
+      notificationId: "test:task-unconfirmed",
+      ownerId: "root",
+      command: "sleep",
+      status: "stop_failed",
+      stopError: "process state is unconfirmed",
+      startedAt: Date.now(),
+      output: "",
+      outputStart: 0,
+      nextOffset: 0,
+    };
+    vi.spyOn(defaultTaskManager, "cleanup").mockResolvedValue([stopFailed]);
+    const flush = vi.spyOn(loop, "flushBackgroundNotifications").mockResolvedValue(0);
+    const close = vi.spyOn(store, "close");
+    const app = renderRepl(loop, cwd, store);
+
+    app.stdin.write("\x04");
+    await vi.waitFor(() => {
+      const output = stripAnsi(app.allOutput());
+      expect(output).toContain("Exit cancelled");
+      expect(output).toContain("task-unconfirmed: process state is unconfirmed");
+    });
+    expect(flush).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+    expect(stripAnsi(app.allOutput())).not.toContain("Stopped 1 background task(s)");
+    app.unmount();
+    await store.close();
+  });
+
+  it.each(["new", "resume", "fork"])(
+    "aborts /%s without rebinding when cleanup returns stop_failed",
+    async (operation) => {
+      const store = await SessionStore.create(cwd, "test");
+      let command = `/${operation}`;
+      let successMessage = "Started a new session";
+      if (operation === "fork") {
+        await store.append({ role: "user", content: "fork this" });
+        successMessage = "Forked into new session";
+      } else if (operation === "resume") {
+        const target = await SessionStore.create(cwd, "test");
+        await target.append({ role: "user", content: "resume this" });
+        await target.close();
+        command = `/resume ${target.id}`;
+        successMessage = "Resumed session";
+      }
+      const loop = new AgentLoop({
+        model: new MockLanguageModelV1(),
+        registry: createDefaultRegistry(),
+        config: makeConfig({ gitSnapshots: false }),
+        cwd,
+        sessionStore: store,
+      });
+      const stopFailed: TaskSnapshot = {
+        id: "task-unconfirmed",
+        notificationId: "test:task-unconfirmed",
+        ownerId: "root",
+        command: "sleep",
+        status: "stop_failed",
+        stopError: "process state is unconfirmed",
+        startedAt: Date.now(),
+        output: "",
+        outputStart: 0,
+        nextOffset: 0,
+      };
+      vi.spyOn(defaultTaskManager, "cleanup").mockResolvedValue([stopFailed]);
+      const flush = vi.spyOn(loop, "flushBackgroundNotifications").mockResolvedValue(0);
+      const rebind = vi.spyOn(loop, "setSessionStore");
+      const app = renderRepl(loop, cwd, store);
+
+      await typeText(app.stdin, command, "\r");
+      await vi.waitFor(() => {
+        const output = stripAnsi(app.allOutput());
+        expect(output).toContain("Failed to stop background work;");
+        expect(output).toContain("task-unconfirmed: process state is unconfirmed");
+      });
+      expect(flush).toHaveBeenCalledTimes(1);
+      expect(rebind).not.toHaveBeenCalled();
+      expect(stripAnsi(app.allOutput())).not.toContain(successMessage);
+      app.unmount();
+      await store.close();
+    },
+  );
+
+  it("reloads the current session after flushing new reports on /resume", async () => {
+    const oldStore = await SessionStore.create(cwd, "test");
+    await oldStore.append({ role: "user", content: "existing history" });
+    const loop = new AgentLoop({
+      model: new MockLanguageModelV1(),
+      registry: createDefaultRegistry(),
+      config: makeConfig({ gitSnapshots: false }),
+      cwd,
+      sessionStore: oldStore,
+    });
+    const app = renderRepl(loop, cwd, oldStore);
+    await tick();
+    const agent = defaultAgentTasks.start(
+      (signal) =>
+        new Promise<string>((resolve) => {
+          signal.addEventListener("abort", () => resolve("finished during resume cleanup"), {
+            once: true,
+          });
+        }),
+      { prompt: "resume cleanup" },
+    );
+
+    await typeText(app.stdin, `/resume ${oldStore.id}`, "\r");
+    await vi.waitFor(
+      () => {
+        expect(stripAnsi(app.lastFrame() ?? "")).toContain(`Resumed session ${oldStore.id}`);
+      },
+      { timeout: 15_000 },
+    );
+
+    const inMemory = loop.getStarMessages();
+    const persisted = await oldStore.starMessages();
+    for (const messages of [inMemory, persisted]) {
+      expect(messages).toHaveLength(2);
+      expect(
+        messages.filter(
+          (star) =>
+            star.message.role === "user" && coreMessageText(star.message) === "existing history",
+        ),
+      ).toHaveLength(1);
+      const reports = messages.filter((star) => star.meta?.notificationId === agent.notificationId);
+      expect(reports).toHaveLength(1);
+      expect(reports[0]?.meta?.synthetic).toBe("bg-report");
+      expect(coreMessageText(reports[0]?.message ?? { role: "user", content: "" })).toContain(
+        `[background subagent ${agent.id} stopped]\nStopped on shutdown.`,
+      );
+    }
+    app.unmount();
+    await oldStore.close();
   });
 
   it("rebinds persistence to the resumed session on /resume", { timeout: 30_000 }, async () => {
     const oldStore = await SessionStore.create(cwd, "test");
     const targetStore = await SessionStore.create(cwd, "test");
     await targetStore.append({ role: "user", content: "from target session" });
+    await targetStore.addUsage({ promptTokens: 11, completionTokens: 7, totalTokens: 18 });
     await targetStore.close();
     const model = new MockLanguageModelV1({
       doStream: async () => ({
@@ -277,6 +516,12 @@ describe("REPL turn guards", () => {
         expect(stripAnsi(app.lastFrame() ?? "")).toContain(`Resumed session ${targetStore.id}`);
       },
       { timeout: 15_000 },
+    );
+    await typeText(app.stdin, "/cost", "\r");
+    await vi.waitFor(() =>
+      expect(stripAnsi(app.lastFrame() ?? "")).toContain(
+        "API usage this session: 1 requests, 11 prompt + 7 completion = 18 tokens",
+      ),
     );
     await typeText(app.stdin, "hello", "\r");
     await vi.waitFor(
@@ -666,8 +911,51 @@ describe("REPL turn guards", () => {
     app.unmount();
   });
 
+  it("releases queued background permissions on Ctrl+D without user decisions", async () => {
+    const store = await SessionStore.create(cwd, "test");
+    const loop = new AgentLoop({
+      model: new MockLanguageModelV1(),
+      registry: createDefaultRegistry(),
+      config: makeConfig({ gitSnapshots: false }),
+      cwd,
+      sessionStore: store,
+    });
+    const app = renderRepl(loop, cwd, store);
+    await tick();
+    const handler = loop.confirmHandler;
+    if (!handler) throw new Error("confirmHandler was not attached");
+    const agents = ["first-background", "second-background"].map((command) =>
+      defaultAgentTasks.start(
+        async (signal) => {
+          await handler({
+            toolName: "bash",
+            args: { command },
+            level: "exec",
+            agentId: "agent-background",
+            signal,
+          });
+          return "permission settled";
+        },
+        { prompt: command },
+      ),
+    );
+    await vi.waitFor(() => expect(stripAnsi(app.lastFrame() ?? "")).toContain("first-background"));
+    expect(stripAnsi(app.lastFrame() ?? "")).not.toContain("second-background");
+
+    app.stdin.write("\x04");
+    await vi.waitFor(
+      () => expect(stripAnsi(app.allOutput())).toContain("Stopped 2 background task(s)"),
+      { timeout: 15_000 },
+    );
+    expect(agents.map((agent) => defaultAgentTasks.get(agent.id)?.status)).toEqual([
+      "stopped",
+      "stopped",
+    ]);
+    app.unmount();
+  });
+
   it(
-    "stops background subagents on /new so their reports never reach the new session",
+    "waits for background cleanup on /new and keeps old reports and usage out of the new session",
     { timeout: 30_000 },
     async () => {
       const model = new MockLanguageModelV1({
@@ -693,9 +981,16 @@ describe("REPL turn guards", () => {
       });
       const app = renderRepl(loop, cwd, store);
       await tick();
-      defaultAgentTasks.start(() => new Promise<string>(() => {}), { prompt: "never ends" });
-      await tick();
+      let settle = (_result: string) => {};
+      const agentResult = new Promise<string>((resolve) => {
+        settle = resolve;
+      });
+      const agent = defaultAgentTasks.start(() => agentResult, { prompt: "old session work" });
       await typeText(app.stdin, "/new", "\r");
+      await vi.waitFor(() => expect(defaultAgentTasks.get(agent.id)?.status).toBe("stopping"));
+      expect(stripAnsi(app.allOutput())).not.toContain("Started a new session");
+
+      settle("finished after cancellation");
       await vi.waitFor(
         () => {
           expect(stripAnsi(app.lastFrame() ?? "")).toContain("Started a new session");
@@ -703,9 +998,38 @@ describe("REPL turn guards", () => {
         { timeout: 15_000 },
       );
       expect(stripAnsi(app.lastFrame() ?? "")).toContain("Stopped 1 background task(s)");
-      expect(defaultAgentTasks.list().every((t) => t.status !== "running")).toBe(true);
-      // The stopped agent's report is discarded, not drained: the next turn
-      // must not carry a background-subagent user note into the new session.
+      const oldMessages = await store.starMessages();
+      expect(
+        oldMessages.some(
+          (star) =>
+            star.message.role === "user" &&
+            coreMessageText(star.message).includes(`background subagent ${agent.id} stopped`),
+        ),
+      ).toBe(true);
+      expect(
+        loop
+          .getMessages()
+          .some((m) => m.role === "user" && coreMessageText(m).includes("background subagent")),
+      ).toBe(false);
+
+      loop.onUsage?.(
+        { promptTokens: 7, completionTokens: 3, totalTokens: 10 },
+        "test",
+        0,
+        store.id,
+      );
+      await typeText(app.stdin, "/cost", "\r");
+      await vi.waitFor(() =>
+        expect(stripAnsi(app.lastFrame() ?? "")).toContain("API usage this session: 0 requests"),
+      );
+      loop.onUsage?.({ promptTokens: 2, completionTokens: 1, totalTokens: 3 }, "test", 0);
+      await typeText(app.stdin, "/cost", "\r");
+      await vi.waitFor(() =>
+        expect(stripAnsi(app.lastFrame() ?? "")).toContain(
+          "API usage this session: 1 requests, 2 prompt + 1 completion = 3 tokens",
+        ),
+      );
+
       await typeText(app.stdin, "hello", "\r");
       await vi.waitFor(
         () => {
@@ -713,11 +1037,166 @@ describe("REPL turn guards", () => {
         },
         { timeout: 15_000 },
       );
-      const drained = loop
-        .getMessages()
-        .filter((m) => m.role === "user" && coreMessageText(m).includes("background subagent"));
-      expect(drained).toEqual([]);
+      expect(
+        loop
+          .getMessages()
+          .some((m) => m.role === "user" && coreMessageText(m).includes("background subagent")),
+      ).toBe(false);
       app.unmount();
     },
   );
+
+  it("aborts /new without rebinding when old background reports cannot be flushed", async () => {
+    const store = await SessionStore.create(cwd, "test");
+    const loop = new AgentLoop({
+      model: new MockLanguageModelV1(),
+      registry: createDefaultRegistry(),
+      config: makeConfig({ gitSnapshots: false }),
+      cwd,
+      sessionStore: store,
+    });
+    vi.spyOn(loop, "flushBackgroundNotifications").mockRejectedValue(new Error("store is full"));
+    const rebind = vi.spyOn(loop, "setSessionStore");
+    const app = renderRepl(loop, cwd, store);
+    await typeText(app.stdin, "/new", "\r");
+
+    await vi.waitFor(() => {
+      const frame = stripAnsi(app.lastFrame() ?? "");
+      expect(frame).toContain("new session was not created and the current session is unchanged:");
+      expect(frame).toContain("store is full");
+    });
+    expect(rebind).not.toHaveBeenCalled();
+    expect(stripAnsi(app.allOutput())).not.toContain("Started a new session");
+    app.unmount();
+  });
+
+  it("closes an opened resume target when stopping the old session fails", async () => {
+    const oldStore = await SessionStore.create(cwd, "test");
+    const target = await SessionStore.create(cwd, "test");
+    await target.append({ role: "user", content: "target history" });
+    await target.close();
+    const loop = new AgentLoop({
+      model: new MockLanguageModelV1(),
+      registry: createDefaultRegistry(),
+      config: makeConfig({ gitSnapshots: false }),
+      cwd,
+      sessionStore: oldStore,
+    });
+    vi.spyOn(loop, "flushBackgroundNotifications").mockRejectedValue(new Error("flush failed"));
+    const rebind = vi.spyOn(loop, "setSessionStore");
+    const app = renderRepl(loop, cwd, oldStore);
+    await typeText(app.stdin, `/resume ${target.id}`, "\r");
+
+    await vi.waitFor(() => {
+      expect(stripAnsi(app.lastFrame() ?? "")).toContain(
+        "resume aborted and the current session is unchanged: flush failed",
+      );
+    });
+    expect(rebind).not.toHaveBeenCalled();
+    const reopened = await SessionStore.open(target.id);
+    expect(reopened).not.toBeNull();
+    await reopened?.close();
+    app.unmount();
+  });
+
+  it("forks from the pre-cleanup snapshot and resets usage and budget state", async () => {
+    let request = 0;
+    const model = new MockLanguageModelV1({
+      doStream: async () => {
+        const text = request++ === 0 ? "before response" : "after response";
+        return {
+          stream: convertArrayToReadableStream([
+            { type: "text-delta", textDelta: text },
+            {
+              type: "finish",
+              finishReason: "stop",
+              usage: { promptTokens: 1, completionTokens: 1 },
+            },
+          ]),
+          rawCall: { rawPrompt: null, rawSettings: {} },
+        };
+      },
+    });
+    const store = await SessionStore.create(cwd, "test");
+    const config = makeConfig({
+      gitSnapshots: false,
+      sessionBudgetUsd: 1.5,
+      models: [
+        {
+          name: "test",
+          provider: "test",
+          model: "test",
+          promptPrice: 1_000_000,
+          completionPrice: 1_000_000,
+        },
+      ],
+    });
+    const loop = new AgentLoop({
+      model,
+      registry: createDefaultRegistry(),
+      config,
+      cwd,
+      sessionStore: store,
+      modelName: "test",
+    });
+    const app = renderApp(
+      createElement(Repl, {
+        backend: loop,
+        model: "test",
+        permissionMode: "auto",
+        config,
+        cwd,
+        sessionStore: store,
+        initialUsage: {
+          requests: 1,
+          promptTokens: 10,
+          completionTokens: 5,
+          totalTokens: 15,
+          costUsd: 0,
+        },
+      }),
+    );
+    await typeText(app.stdin, "before fork", "\r");
+    await vi.waitFor(() => {
+      expect(stripAnsi(app.lastFrame() ?? "")).toContain("before response");
+      expect(stripAnsi(app.lastFrame() ?? "")).toContain("Session budget exceeded");
+    });
+
+    let settle = (_result: string) => {};
+    const agentResult = new Promise<string>((resolve) => {
+      settle = resolve;
+    });
+    const agent = defaultAgentTasks.start(() => agentResult, { prompt: "fork cleanup" });
+    await typeText(app.stdin, "/fork", "\r");
+    await vi.waitFor(() => expect(defaultAgentTasks.get(agent.id)?.status).toBe("stopping"));
+    expect(stripAnsi(app.allOutput())).not.toContain("Forked into new session");
+    settle("cancelled result");
+
+    await vi.waitFor(
+      () => expect(stripAnsi(app.lastFrame() ?? "")).toContain("Forked into new session"),
+      { timeout: 15_000 },
+    );
+    expect(
+      (await store.starMessages()).some(
+        (star) =>
+          star.message.role === "user" &&
+          coreMessageText(star.message).includes(`background subagent ${agent.id} stopped`),
+      ),
+    ).toBe(true);
+    expect(
+      loop
+        .getMessages()
+        .some((message) => coreMessageText(message).includes("background subagent")),
+    ).toBe(false);
+
+    await typeText(app.stdin, "/cost", "\r");
+    await vi.waitFor(() =>
+      expect(stripAnsi(app.lastFrame() ?? "")).toContain("API usage this session: 0 requests"),
+    );
+    await typeText(app.stdin, "after fork", "\r");
+    await vi.waitFor(() => expect(stripAnsi(app.lastFrame() ?? "")).toContain("after response"), {
+      timeout: 15_000,
+    });
+    app.unmount();
+  });
 });

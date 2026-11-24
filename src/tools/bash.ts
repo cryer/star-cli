@@ -1,16 +1,20 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { getEnvFileKeys } from "../config/env";
+import { killTree } from "../core/process";
 import { isSecretEnvName } from "../core/sensitive";
-import { defaultTaskManager } from "../tasks/manager";
 import type { Tool, ToolResult } from "./types";
+
+export { killTree };
 
 export const MAX_OUTPUT = 30000;
 const HALF_OUTPUT = MAX_OUTPUT / 2;
 const DEFAULT_TIMEOUT = 120;
 const MAX_TIMEOUT = 600;
+const DEFAULT_BACKGROUND_TIMEOUT = 3600;
+const MAX_BACKGROUND_TIMEOUT = 3600;
 
 export interface ShellSpec {
   shell: string;
@@ -78,49 +82,34 @@ export function resolveShell(): ShellSpec {
   return cachedSpec;
 }
 
-const schema = z.object({
-  command: z.string().describe("Shell command to execute"),
-  timeout: z
-    .number()
-    .positive()
-    .max(MAX_TIMEOUT)
-    .optional()
-    .describe("Timeout in seconds (default 120, max 600)"),
-  description: z.string().optional().describe("Short description of what the command does"),
-  run_in_background: z
-    .boolean()
-    .optional()
-    .describe(
-      "Run the command in the background and return a task id immediately (default false). Use task_output/task_kill to inspect or stop it.",
-    ),
-});
-
-export function killTree(child: ChildProcess): void {
-  if (process.platform === "win32") {
-    if (child.pid) {
-      // taskkill itself may fail to spawn (stripped container, policy block,
-      // mangled PATH): an unlistened "error" event would crash the CLI.
-      spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
-        windowsHide: true,
-        stdio: "ignore",
-      })
-        .on("error", () => {})
-        .unref();
+const schema = z
+  .object({
+    command: z.string().describe("Shell command to execute"),
+    timeout: z
+      .number()
+      .positive()
+      .max(MAX_BACKGROUND_TIMEOUT)
+      .optional()
+      .describe(
+        `Timeout in seconds (foreground: default ${DEFAULT_TIMEOUT}, max ${MAX_TIMEOUT}; background: default ${DEFAULT_BACKGROUND_TIMEOUT}, max ${MAX_BACKGROUND_TIMEOUT})`,
+      ),
+    description: z.string().optional().describe("Short description of what the command does"),
+    run_in_background: z
+      .boolean()
+      .optional()
+      .describe(
+        "Run the command in the background and return a task id immediately (default false). Use task_output/task_kill to inspect or stop it.",
+      ),
+  })
+  .superRefine((args, ctx) => {
+    if (!args.run_in_background && args.timeout !== undefined && args.timeout > MAX_TIMEOUT) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["timeout"],
+        message: `Foreground timeout must be at most ${MAX_TIMEOUT} seconds`,
+      });
     }
-    return;
-  }
-  // POSIX children spawn detached, so the pid leads a process group and a
-  // negative-pid kill reaches shell grandchildren too.
-  if (child.pid) {
-    try {
-      process.kill(-child.pid, "SIGKILL");
-      return;
-    } catch {
-      // group already gone (or not detached): fall back to the direct kill
-    }
-  }
-  child.kill("SIGKILL");
-}
+  });
 
 // Bounds memory while a command streams: once the output passes MAX_OUTPUT
 // bytes the first half is kept verbatim, the second half rolls, and the
@@ -246,16 +235,25 @@ export const bashTool: Tool<typeof schema> = {
   parameters: schema,
   execute(args, ctx) {
     if (args.run_in_background) {
-      const task = defaultTaskManager.start({
-        command: args.command,
-        description: args.description,
-        cwd: ctx.cwd,
-        timeoutSeconds: args.timeout,
-        ownerId: ctx.agentId ?? "root",
-        env: childEnv(),
-      });
-      return Promise.resolve({
-        content: `Background task started: ${task.id}\ncommand: ${args.command}\ndescription: ${args.description ?? "(none)"}`,
+      if (ctx.backgroundTasksEnabled === false) {
+        return Promise.resolve({
+          content:
+            "Background tasks are disabled in print mode; run the command in the foreground.",
+          isError: true,
+        });
+      }
+      return import("../tasks/manager").then(({ defaultTaskManager }) => {
+        const task = defaultTaskManager.start({
+          command: args.command,
+          description: args.description,
+          cwd: ctx.cwd,
+          timeoutSeconds: args.timeout,
+          ownerId: ctx.agentId ?? "root",
+          env: childEnv(),
+        });
+        return {
+          content: `Background task started: ${task.id}\ncommand: ${args.command}\ndescription: ${args.description ?? "(none)"}`,
+        };
       });
     }
     const timeoutSeconds = Math.min(args.timeout ?? DEFAULT_TIMEOUT, MAX_TIMEOUT);
@@ -282,11 +280,11 @@ export const bashTool: Tool<typeof schema> = {
         resolve(result);
       };
       const onAbort = () => {
-        killTree(child);
+        void killTree(child);
         finish({ content: `${output}\nCommand aborted`, isError: true });
       };
       const timer = setTimeout(() => {
-        killTree(child);
+        void killTree(child);
         finish({
           content: `${output}\nCommand timed out after ${timeoutSeconds}s`,
           isError: true,
