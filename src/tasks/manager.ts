@@ -258,22 +258,31 @@ export class TaskManager extends EventEmitter {
     rec.terminalStatus = status;
     if (rec.timer) clearTimeout(rec.timer);
     rec.stopPromise = (async () => {
+      const waitForClose = async (timeoutMs: number): Promise<boolean> => {
+        let closeTimer: NodeJS.Timeout | undefined;
+        try {
+          return await Promise.race([
+            rec.closed.then(() => true),
+            new Promise<boolean>((resolve) => {
+              closeTimer = setTimeout(() => resolve(false), timeoutMs);
+            }),
+          ]);
+        } finally {
+          if (closeTimer) clearTimeout(closeTimer);
+        }
+      };
       await killTree(rec.child).catch(() => {});
-      let closeTimer: NodeJS.Timeout | undefined;
-      const closed = await Promise.race([
-        rec.closed.then(() => true),
-        new Promise<boolean>((resolve) => {
-          closeTimer = setTimeout(() => resolve(false), 2000);
-        }),
-      ]);
-      if (closeTimer) clearTimeout(closeTimer);
+      const closed = await waitForClose(2000);
       if (!closed && rec.status === "stopping") {
         rec.child.stdout?.destroy();
         rec.child.stderr?.destroy();
         directKill(rec.child);
-        rec.stopError =
-          "Timed out waiting for process close after termination; process state is unconfirmed.";
-        this.finish(rec, "stop_failed", null);
+        const closedAfterCleanup = await waitForClose(2000);
+        if (!closedAfterCleanup && rec.status === "stopping") {
+          rec.stopError =
+            "Timed out waiting for process close after termination; process state is unconfirmed.";
+          this.finish(rec, "stop_failed", null);
+        }
       }
       return this.snapshot(rec);
     })();

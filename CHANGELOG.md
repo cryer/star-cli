@@ -17,6 +17,7 @@ an entry under `[Unreleased]` in the same commit that lands the change. On relea
 
 ### Fixed
 
+- **Windows background task stops tolerate delayed process events**: cleaning up retained pipes and directly terminating the child now gets a second bounded wait for `close`, so a slow CI event loop no longer turns an otherwise successful stop into `stop_failed`
 - **background task shutdown and reports are reliable**: shell tasks and subagents now remain `stopping` until the process or child loop has actually settled, cancellation cannot be followed by a late permission/hook tool execution, and killing a subagent cleans up its owned shells. Shell and subagent reports enter the main conversation through persistence-acknowledged delivery, survive exit and session switches without leaking into the new session, and late usage stays attributed to its source session
 - **print mode no longer silently aborts useful background work**: `-p` rejects background shell/subagent startup with a foreground alternative, waits for any existing work during cleanup, persists pending reports, and prints final usage only after settlement
 - **background task inspection is actionable and incremental**: `/tasks` includes subagents plus direct `output`/`kill` actions, shell output supports byte cursors and UTF-8-safe limits, running subagents expose recent tool activity, status-bar IDs stay visible, permission prompts identify their agent, and foreground/background timeout limits now match their schemas
